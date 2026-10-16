@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 try:
     from mika_nexus.bot import App, public_media_result
+    from mika_nexus.jobs import extractor_error
 except ImportError:
     App = None
 
@@ -84,6 +85,47 @@ class FakeBot:
 
 @unittest.skipIf(App is None, "aiogram is not installed")
 class TelegramFlowTests(unittest.IsolatedAsyncioTestCase):
+    async def test_expired_search_explains_next_step(self):
+        with tempfile.TemporaryDirectory() as d:
+            app = object.__new__(App)
+            app.settings = Settings(
+                bot_token="123:fake",
+                owner_telegram_id=1,
+                allowed_telegram_ids="1",
+                data_dir=Path(d),
+            )
+            app.store = Store(Path(d) / "state.sqlite")
+            app.store.seed_access({1})
+            sid = app.store.create_search(1, 1, "sample", {"track"}, {"soundcloud"})
+            app.store.set_search_message(sid, 20)
+            app.store.db.execute("UPDATE search_sessions SET expires=0 WHERE id=?", (sid,))
+            message = FakePrompt(SimpleNamespace(id=1, type="private"), 20)
+            await app.callback(StaleCallback(f"s:{sid}:b", message))
+            self.assertIn("Search expired", message.edited)
+
+    async def test_extractor_errors_are_specific_and_do_not_echo_links(self):
+        cases = [
+            (
+                "https://x.com/a/status/1",
+                b"No video could be found in this tweet",
+                "no downloadable video",
+            ),
+            (
+                "https://instagram.com/stories/a/1",
+                b"Use --cookies for authentication",
+                "requires login",
+            ),
+            (
+                "https://instagram.com/p/abc",
+                b"No video formats found!",
+                "no publicly extractable video",
+            ),
+        ]
+        for url, detail, expected in cases:
+            result = extractor_error(url, detail + url.encode())
+            self.assertIn(expected, result)
+            self.assertNotIn(url, result)
+
     async def test_stale_search_callback_can_offer_public_media(self):
         with tempfile.TemporaryDirectory() as d:
             app = object.__new__(App)

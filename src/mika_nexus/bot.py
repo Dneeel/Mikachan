@@ -3,6 +3,7 @@
 import asyncio
 import html
 import json
+import time
 
 from aiogram import Bot, Dispatcher, Router
 from aiogram.client.default import DefaultBotProperties
@@ -432,7 +433,24 @@ class App:
             return
         sid, action = parts[1:3]
         row = self.store.search(sid, q.from_user.id, q.message.chat.id)
-        if not row or row["message_id"] != q.message.message_id:
+        if not row:
+            expired = self.store.db.execute(
+                "SELECT user_id,chat_id,message_id,expires FROM search_sessions WHERE id=?",
+                (sid,),
+            ).fetchone()
+            if (
+                expired
+                and expired["user_id"] == q.from_user.id
+                and expired["chat_id"] == q.message.chat.id
+                and expired["message_id"] == q.message.message_id
+                and expired["expires"] <= time.time()
+            ):
+                try:
+                    await q.message.edit_text("Search expired. Send /search to start again.")
+                except TelegramBadRequest:
+                    pass
+            return
+        if row["message_id"] != q.message.message_id:
             return
         kinds, sources = set(json.loads(row["kinds"])), set(json.loads(row["sources"]))
         if action in ("k", "p") and len(parts) == 4:

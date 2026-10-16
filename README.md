@@ -4,7 +4,7 @@ Private, Telegram-native media utility. It asks for **✅ Yes / ❌ No** before 
 
 ## Current build status
 
-The bot is deployed on the supplied Freestyle Ubuntu VM with a dedicated systemd service. All 16 tests, Ruff, and mypy pass there. Owner-approved TikTok video/photo and a public Instagram Reel were delivered. Live Apple/Deezer search and the Telegram search result view were verified; public SoundCloud and YouTube Music result URLs passed extractor probes. The VM is **paused** after checks to conserve its free runtime quota; resume it before testing the bot. Instagram stories and some photo posts require source access or cookies. Spotify, Apple Music, and Deezer provide catalog metadata, not full licensed audio files. See [test report](docs/TEST_REPORT.md) and [provider matrix](docs/PROVIDER_MATRIX.md).
+The bot is deployed on the supplied Freestyle Ubuntu VM with a dedicated systemd service. All 18 tests, Ruff, and mypy pass there. Owner-approved TikTok video/photo and a public Instagram Reel were delivered. Live Apple/Deezer search and the Telegram search result view were verified; public SoundCloud and YouTube Music result URLs passed extractor probes. The VM is **paused** after checks to conserve its free runtime quota; resume it before testing the bot. Instagram stories and some photo posts require source access or cookies. Spotify, Apple Music, and Deezer provide catalog metadata, not full licensed audio files. See [test report](docs/TEST_REPORT.md) and [provider matrix](docs/PROVIDER_MATRIX.md).
 
 ## Commands
 

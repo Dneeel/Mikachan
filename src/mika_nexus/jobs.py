@@ -38,6 +38,25 @@ MIME_EXT = {
 }
 
 
+def extractor_error(url: str, stderr: bytes) -> str:
+    """Summarize extractor failures without forwarding untrusted output or URLs."""
+    detail = stderr.decode(errors="replace").lower()
+    provider = source(url)
+    if any(term in detail for term in ("cookies", "login", "authentication required")):
+        return "This source requires login; anonymous download is unavailable"
+    if provider == "twitter" and "no video could be found" in detail:
+        return "This X post contains no downloadable video"
+    if provider == "instagram" and "no video formats found" in detail:
+        return "This Instagram post has no publicly extractable video"
+    if "drm protected" in detail:
+        return "This source does not provide public downloadable audio"
+    if "unsupported url" in detail:
+        return "This type of source link is not supported"
+    if "http error 403" in detail or "forbidden" in detail:
+        return "This source denied anonymous access"
+    return "Source extractor could not access this public item"
+
+
 class Worker:
     def __init__(self, settings: Settings, store: Store, bot: Bot):
         self.settings, self.store, self.bot = settings, store, bot
@@ -362,7 +381,7 @@ class Worker:
             await proc.wait()
             raise
         if proc.returncode:
-            raise ValueError("source extractor could not access this public item")
+            raise ValueError(extractor_error(url, stderr))
         files = [p for p in directory.iterdir() if p.is_file() and not p.name.endswith(".part")]
         if not 1 <= len(files) <= 10:
             raise ValueError("source returned no bounded deliverable media")
