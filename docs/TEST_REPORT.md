@@ -1,5 +1,12 @@
 # Test report — 2026-10-16
 
+## Music and interface follow-up
+
+- The owner's new Spotify example `4MHVtf79JQ8VIzrkNwgQt4` resolved to a 293-second track by `イイダサトミ`. Its original search returned no public recording because of punctuation and a non-Latin artist name. Apple public metadata identified `Satomi Iida` as an alias. After normalizing the query and scoring both names, live job `7BaD2T8Um4Gl` completed with Telegram media receipt 443. The resulting audio was sent through the bot's MP3 path; a listener should still confirm the sound content.
+- LRCLIB returned a four-line first hit for `Soldier Side` even though a complete matching 220-second entry existed. The revised lookup selects the complete entry (39 lines in a live probe), checks duration, and falls back to lyrics.ovh if necessary. It does not present a short snippet as a complete lyric.
+- Static user interface strings in the bot source are English. Public media titles, creator names, captions, and user search terms keep their source language. Federated searches now share one 12-second deadline rather than waiting up to 12 seconds for each provider in sequence.
+- Current local checks: Ruff and mypy clean, 33 automated tests passed. The full deployed build passed the same 33 tests on the Freestyle VM before the final query adjustment; the targeted music tests and Ruff passed there afterward.
+
 ## Latest user report investigation
 
 The 23-item owner report prompted changes to native Telegram delivery, metadata,
