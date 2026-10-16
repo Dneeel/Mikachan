@@ -837,7 +837,8 @@ class Worker:
         assert isinstance(track, CatalogTrack)
         alias = await recording_search_alias(track)
         core = re.split(r"[（(]", track.title, maxsplit=1)[0].strip(" -")
-        query = f"{core} {alias[1]}" if alias else f"{track.artist} {track.title}"
+        search_core = re.sub(r"[^\w\s]+", " ", core.replace("'", "").replace("’", ""))
+        query = f"{search_core} {alias[1]}" if alias else f"{track.artist} {track.title}"
         hits, _ = await Searcher().search(
             query.strip(),
             {"track"},
@@ -846,8 +847,11 @@ class Worker:
         ranked = sorted(
             (
                 (
-                    match_score(
-                        track.title, track.artist, h.title, h.creator, track.duration, h.duration
+                    max(
+                        match_score(track.title, track.artist, h.title, h.creator,
+                                    track.duration, h.duration),
+                        match_score(search_core, alias[1], h.title, h.creator,
+                                    track.duration, h.duration) if alias else 0.0,
                     ),
                     h,
                 )
