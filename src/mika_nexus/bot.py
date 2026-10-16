@@ -22,6 +22,7 @@ from aiogram.types import (
 from .config import Settings
 from .jobs import Worker
 from .search import KINDS, SOURCES, Searcher
+from .matching import match_score
 from .security import allowed, clean_url, links, source
 from .store import Store
 
@@ -51,7 +52,20 @@ def public_media_result(hit: dict[str, object]) -> bool:
         ("soundcloud", "track"),
         ("ytmusic", "track"),
         ("ytmusic", "episode"),
+        ("apple_podcasts", "episode"),
     }
+
+
+HELP_TEXT = (
+    "<b>MIKA NEXUS · Help</b>\n"
+    "<b>Search:</b> /search query · /music query · /podcast query\n"
+    "<b>Media:</b> send one or more public HTTP(S) links; approve each with Yes. "
+    "Use /youtube, /tiktok, /instagram, or /twitter for platform guidance.\n"
+    "<b>Jobs:</b> /queue · /cancel · /cancel JOB_ID · /status\n"
+    "<b>Settings:</b> /settings; change search type and source filters in results.\n"
+    "<b>Owner:</b> /admin\n"
+    "Catalog links can find matching public recordings. Protected catalog audio is unavailable."
+)
 
 
 class App:
@@ -128,10 +142,19 @@ class App:
         word, _, arg = raw.partition(" ")
         cmd = word.split("@")[0].lower()
         arg = arg.strip()
-        if cmd in ("/start", "/help"):
+        if cmd == "/start":
             await m.reply(
-                "<b>MIKA NEXUS</b>\nSend a public HTTP(S) link to approve its processing.\n/search query · /music query · /podcast query\n/queue · /cancel ID · /status · /settings\n/twitter · /instagram · /tiktok · /youtube\nSpotify, Apple Music, and Deezer are catalog sources; their full licensed audio is unavailable."
+                "<b>MIKA NEXUS</b>\nSend a public link or choose a search:",
+                reply_markup=kb(
+                    [
+                        [("🎵 Music", "m:music"), ("🎙 Podcast", "m:podcast")],
+                        [("🔎 All search", "m:search"), ("📖 Help", "m:help")],
+                        [("📥 Queue", "m:queue"), ("⚙ Settings", "m:settings")],
+                    ]
+                ),
             )
+        elif cmd == "/help":
+            await m.reply(HELP_TEXT)
         elif cmd in ("/search", "/music", "/podcast"):
             if arg:
                 if len(arg) <= 120:
@@ -151,7 +174,19 @@ class App:
                 "\n".join(f"<code>{j['id']}</code> · {j['state']}" for j in jobs) or "No jobs."
             )
         elif cmd == "/cancel":
-            if arg and self.store.cancel(arg, m.from_user.id):
+            if not arg:
+                active = [
+                    j
+                    for j in self.store.jobs(m.from_user.id)
+                    if j["state"] in {"QUEUED", "RESOLVING", "DOWNLOADING", "VERIFYING"}
+                ]
+                await m.reply(
+                    "Select a job to cancel:" if active else "No cancellable jobs.",
+                    reply_markup=kb([[(j["id"], f"j:{j['id']}:cancel")] for j in active])
+                    if active
+                    else None,
+                )
+            elif self.store.cancel(arg, m.from_user.id):
                 task = self.worker.tasks.get(arg)
                 if task:
                     task.cancel()
@@ -163,9 +198,12 @@ class App:
                 f"Jobs: {len(self.store.jobs(m.from_user.id))} recent · Active: {len(self.worker.tasks)}"
             )
         elif cmd == "/settings":
-            await m.reply(
-                "Search filters are editable in each result view. Public SoundCloud and YouTube Music results can request download with a separate confirmation. Spotify, Apple Music, and Deezer provide catalog metadata only."
-            )
+            pref = self.store.preferences(m.from_user.id)
+            body = "Search filters are editable in each result view. Public audio is sent as MP3."
+            if pref:
+                body += "\nTypes: " + ", ".join(sorted(pref[0]))
+                body += "\nSources: " + ", ".join(sorted(pref[1]))
+            await m.reply(body)
         elif cmd == "/admin" and m.from_user.id == self.settings.owner_telegram_id:
             parts = arg.split()
             if len(parts) == 2 and parts[0] in {"add", "remove"} and parts[1].isdigit():
@@ -264,6 +302,20 @@ class App:
             if public_media_result(h):
                 body += "\n\nPublic media may be available. Requesting it opens a separate Yes/No confirmation."
                 buttons = [[("Request public media", f"s:{sid}:r:{detail}:{gen}")]]
+            elif h["kind"] == "track" and h["source"] in {"spotify", "apple", "deezer"}:
+                body += "\n\nFind public recordings matching this catalog track."
+                buttons = [[("Find audio matches", f"s:{sid}:f:{detail}:{gen}")]]
+            elif h["kind"] in {"album", "playlist"} and h["source"] in {
+                "spotify",
+                "apple",
+                "deezer",
+                "ytmusic",
+            }:
+                body += "\n\nBrowse available items in this collection."
+                buttons = [[("Browse items", f"s:{sid}:l:{detail}:{gen}")]]
+            elif h["kind"] == "podcast" and h["source"] == "apple_podcasts":
+                body += "\n\nBrowse public episodes."
+                buttons = [[("Browse episodes", f"s:{sid}:l:{detail}:{gen}")]]
             else:
                 body += "\n\nCatalog information only. This source does not provide a downloadable full-audio file here."
             buttons.append([("◀ Back", f"s:{sid}:b")])
@@ -339,6 +391,38 @@ class App:
             await acknowledge(q, "Unavailable")
             return
         data = q.data or ""
+        if data.startswith("m:"):
+            await acknowledge(q)
+            action = data[2:]
+            if action in {"search", "music", "podcast"}:
+                self.store.prompt_query(
+                    q.from_user.id,
+                    q.message.chat.id,
+                    action,
+                    self.settings.search_session_ttl_seconds,
+                )
+                await self.bot.send_message(
+                    q.message.chat.id, "Send your search query in the next 10 minutes."
+                )
+            elif action == "help":
+                await self.bot.send_message(q.message.chat.id, HELP_TEXT)
+            elif action == "queue":
+                jobs = self.store.jobs(q.from_user.id)
+                await self.bot.send_message(
+                    q.message.chat.id,
+                    "\n".join(f"<code>{j['id']}</code> · {j['state']}" for j in jobs) or "No jobs.",
+                )
+            elif action == "settings":
+                pref = self.store.preferences(q.from_user.id)
+                body = (
+                    "Search filters are editable in each result view. "
+                    "Audio recordings are delivered as MP3 when requested."
+                )
+                if pref:
+                    body += "\nTypes: " + ", ".join(sorted(pref[0]))
+                    body += "\nSources: " + ", ".join(sorted(pref[1]))
+                await self.bot.send_message(q.message.chat.id, body)
+            return
         if data.startswith("a:"):
             await acknowledge(q)
             parts = data.split(":")
@@ -404,12 +488,13 @@ class App:
                 jid, created = self.store.select_collection(
                     cid, q.from_user.id, q.message.chat.id, number
                 )
-                if created:
-                    await self.bot.send_message(
+                if created and jid is not None:
+                    status = await self.bot.send_message(
                         q.message.chat.id,
                         f"Queued selected item · <code>{jid}</code>",
                         reply_markup=kb([[("Cancel", f"j:{jid}:cancel")]]),
                     )
+                    self.store.bind_progress(jid, status.message_id)
             return
         if data.startswith("j:"):
             await acknowledge(q)
@@ -423,6 +508,13 @@ class App:
                 if task:
                     task.cancel()
                 await q.message.edit_text("Cancelled")
+            elif len(parts) == 3 and parts[2] == "audio":
+                jid, created = self.store.create_derivative(
+                    parts[1], q.from_user.id, q.message.chat.id, "audio"
+                )
+                if created and jid is not None:
+                    await q.message.edit_text(f"MP3 queued · <code>{jid}</code>")
+                    self.store.bind_progress(jid, q.message.message_id)
             return
         if not data.startswith("s:"):
             await acknowledge(q)
@@ -476,6 +568,77 @@ class App:
             and int(parts[4]) == row["generation"]
         ):
             await self.render_search(sid, q.from_user.id, q.message.chat.id, detail=int(parts[3]))
+        elif (
+            action == "l"
+            and len(parts) == 5
+            and parts[3].isdigit()
+            and parts[4].isdigit()
+            and int(parts[4]) == row["generation"]
+        ):
+            hit = self.store.result(sid, row["generation"], int(parts[3]))
+            if not hit or hit.get("kind") not in {"album", "playlist", "podcast"}:
+                return
+            try:
+                items, title = await self.worker._browse(clean_url(str(hit["url"])))
+            except (ValueError, TimeoutError):
+                await self.bot.send_message(q.message.chat.id, "Collection items are unavailable.")
+                return
+            if not items:
+                await self.bot.send_message(q.message.chat.id, "No public collection items found.")
+                return
+            cid = self.store.create_collection(q.from_user.id, q.message.chat.id, title, items)
+            prompt = await self.bot.send_message(q.message.chat.id, "Loading collection…")
+            self.store.db.execute(
+                "UPDATE collections SET message_id=? WHERE id=?", (prompt.message_id, cid)
+            )
+            await self.render_collection(cid, q.from_user.id, q.message.chat.id, 0)
+        elif (
+            action == "f"
+            and len(parts) == 5
+            and parts[3].isdigit()
+            and parts[4].isdigit()
+            and int(parts[4]) == row["generation"]
+        ):
+            hit = self.store.result(sid, row["generation"], int(parts[3]))
+            if (
+                not hit
+                or hit.get("kind") != "track"
+                or hit.get("source") not in {"spotify", "apple", "deezer"}
+            ):
+                return
+            query = f"{hit['creator']} {hit['title']}".strip()
+            alt_sid = self.store.create_search(
+                q.from_user.id,
+                q.message.chat.id,
+                query,
+                {"track"},
+                {"soundcloud", "ytmusic"},
+            )
+            pending = await self.bot.send_message(
+                q.message.chat.id, "Finding public audio matches…"
+            )
+            self.store.set_search_message(alt_sid, pending.message_id)
+            hits, failures = await self.searcher.search(query, {"track"}, {"soundcloud", "ytmusic"})
+            ranked = sorted(
+                (
+                    (
+                        match_score(
+                            hit["title"],
+                            hit["creator"],
+                            h.title,
+                            h.creator,
+                            hit.get("duration"),
+                            h.duration,
+                        ),
+                        h,
+                    )
+                    for h in hits
+                ),
+                key=lambda item: item[0],
+                reverse=True,
+            )
+            self.store.save_results(alt_sid, 0, [h.data() for score, h in ranked if score >= 0.48])
+            await self.render_search(alt_sid, q.from_user.id, q.message.chat.id, failures)
         elif (
             action == "r"
             and len(parts) == 5

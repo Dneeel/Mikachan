@@ -1,17 +1,21 @@
-# Provider capability matrix
+# Provider capability matrix — 2026-10-16
 
-Apple Music and Deezer search returned live results on the supplied VM on 2026-10-16. Other live routes remain unverified.
+Status refers to evidence from the supplied Freestyle VM unless stated otherwise. Metadata search does not prove download delivery.
 
-| Source | Catalog search implemented | Download route | Credential requirement | Status |
-| --- | --- | --- | --- | --- |
-| Apple Music | Track, album, artist via public iTunes API | None for licensed tracks; link may be handled by extractor only if public | None | TRACK SEARCH VERIFIED |
-| Apple Podcasts | Podcast, episode via public iTunes API | Public episode link may be handled | None | UNVERIFIED |
-| Deezer | Track, album, artist, playlist via public API | Metadata only; no protected audio | None | TRACK SEARCH VERIFIED |
-| SoundCloud | Track via yt-dlp `scsearch` | yt-dlp public item after separate consent | None for public extractor path | SEARCH AND MEDIA PROBE VERIFIED; DELIVERY UNVERIFIED |
-| YouTube Music | Track, album, artist, playlist, podcast, episode via `ytmusicapi` | yt-dlp public item after separate consent | None by default | SEARCH AND MEDIA PROBE VERIFIED; DELIVERY UNVERIFIED |
-| Spotify | Track, album, artist, playlist via official search API | Metadata only; no full Spotify audio | Client ID/secret for this adapter | CREDENTIALS REQUIRED; FULL AUDIO UNAVAILABLE |
-| Podcast RSS / Castbox | No global catalog search | Public URL via extractor where supported | None | PARTIAL, UNVERIFIED |
-| YouTube, TikTok, Instagram, Twitter/X, Reddit, Pinterest | No dedicated catalog search | yt-dlp public item; gallery-dl fallback for TikTok photos | Public extraction only | TikTok video/photo and one Instagram Reel DELIVERY VERIFIED; Instagram stories require login; tested X post contained no video; other routes UNVERIFIED |
-| Direct HTTPS | No search | Bounded stream download | None | UNVERIFIED live |
+| Source | Metadata / browsing | Download route | Current evidence |
+| --- | --- | --- | --- |
+| Spotify | Public track page and album embed; official search requires client ID/secret | Find selectable public SoundCloud / YouTube Music recordings; no DRM audio | Track and 18-track album live PASS; playlist embed returned 500; alternative candidates live PASS; chosen candidate Telegram delivery UNVERIFIED |
+| SoundCloud | `scsearch` via yt-dlp; track metadata | Extract public track to MP3 | 35 combined audio candidates live PASS; Telegram delivery UNVERIFIED |
+| YouTube Music | `ytmusicapi` track/album/playlist/podcast search | yt-dlp + ffmpeg MP3 for public track | Search live PASS; YouTube video to real MP3 and ffprobe live PASS; Telegram delivery UNVERIFIED |
+| Apple Music | Public iTunes track/album/artist search and lookup | Find alternative public recording; no DRM audio | Search previously live PASS; album and track lookup code UNVERIFIED live |
+| Deezer | Public catalog search and track/album/playlist API | Find alternative public recording; no DRM audio | Search previously live PASS; new selection flow UNVERIFIED live |
+| Apple Podcasts / RSS | Public podcast and episode search, feed URL and bounded RSS browsing | Public enclosure file | Search returned 30 hits and public feed exposed 30 episodes live PASS; Telegram delivery UNVERIFIED |
+| YouTube | yt-dlp with Deno/EJS | Video, or MP3 audio extraction | Real MP3/ffprobe and one Telegram audio receipt PASS; video delivery/quality menus UNVERIFIED or NOT IMPLEMENTED |
+| TikTok | Short-link redirect and post/profile routing | yt-dlp, gallery-dl, then bounded public API fallback with post-ID check | Formerly failing video recovered as a 3.3 MB MP4 with audio+video and delivered to Telegram with one receipt; MP3 passed ffprobe; derivative Telegram delivery pending |
+| Instagram | Post/reel and bounded public profile metadata where available | Gallery first for photo/carousel, yt-dlp fallback | One Reel previously delivered; tested photo gallery timed out after 45s; stories often require login |
+| Twitter / X | Tweet and profile routing | Gallery first for media, yt-dlp fallback | Tested owner tweet had no video; image/multimedia delivery UNVERIFIED |
+| Reddit / Pinterest / Facebook / Google Drive | Safe routing and bounded public extraction | yt-dlp/gallery-dl or direct stream | UNVERIFIED live |
+| Direct HTTPS | Validated DNS/redirect streaming | Bounded disk stream; MP3 transcoding when requested | Automated media transcode PASS; remote delivery UNVERIFIED; Range resume NOT IMPLEMENTED |
+| Public MEGA | Recognized and reported unavailable | No adapter | NOT IMPLEMENTED |
 
-Search failures are reported in the UI. Sources can be independently selected; unavailable sources are not filled with another source's results. Apple previews are not treated as full songs. yt-dlp provider behavior can change with upstream sites and may require authentication for some content; this app does not acquire personal sessions.
+Private media and protected catalog audio are outside the public access model. Provider failures are surfaced without claiming a successful download. The source label in search results identifies where metadata was found; the actual chosen public recording is selected separately.

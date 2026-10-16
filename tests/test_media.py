@@ -1,5 +1,9 @@
 import unittest
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
+from unittest.mock import AsyncMock, Mock, patch
 from mika_nexus.media import groups
 
 
@@ -12,3 +16,73 @@ class GalleryTests(unittest.TestCase):
                 self.assertEqual([p for chunk in chunks for p in chunk], paths)
                 self.assertTrue(all(1 <= len(chunk) <= 10 for chunk in chunks))
                 self.assertTrue(all(len(chunk) >= 2 for chunk in chunks[:-1]))
+
+
+@unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg required")
+class Mp3Tests(unittest.IsolatedAsyncioTestCase):
+    async def test_post_audio_is_real_mp3(self):
+        from mika_nexus.jobs import Worker
+
+        with tempfile.TemporaryDirectory() as d:
+            source = Path(d) / "post.mp4"
+            subprocess.run(
+                [
+                    "ffmpeg",
+                    "-v",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=440:duration=1",
+                    "-c:a",
+                    "aac",
+                    "-y",
+                    str(source),
+                ],
+                check=True,
+            )
+            target = await Worker._transcode_mp3(object.__new__(Worker), source, 2_000_000)
+            self.assertEqual(target.suffix, ".mp3")
+            self.assertFalse(source.exists())
+            result = subprocess.run(
+                [
+                    "ffprobe",
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "a:0",
+                    "-show_entries",
+                    "stream=codec_name",
+                    "-of",
+                    "default=noprint_wrappers=1",
+                    str(target),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertIn("codec_name=mp3", result.stdout)
+
+
+class TikTokFallbackTests(unittest.IsolatedAsyncioTestCase):
+    async def test_rejects_mismatched_post_id(self):
+        from mika_nexus.jobs import Worker
+
+        response = Mock()
+        response.json.return_value = {
+            "code": 0,
+            "data": {"id": "999", "play": "https://cdn.example/video.mp4"},
+        }
+        client = AsyncMock()
+        client.get.return_value = response
+        client.__aenter__.return_value = client
+        worker = object.__new__(Worker)
+        worker._direct = AsyncMock()
+        with (
+            tempfile.TemporaryDirectory() as d,
+            patch("mika_nexus.jobs.validate_dns"),
+            patch("mika_nexus.jobs.httpx.AsyncClient", return_value=client),
+        ):
+            files = await worker._tikwm("https://www.tiktok.com/@creator/video/123", Path(d), 1000)
+        self.assertIsNone(files)
+        worker._direct.assert_not_awaited()

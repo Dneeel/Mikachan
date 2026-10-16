@@ -51,6 +51,13 @@ CREATE TABLE IF NOT EXISTS collections (
 CREATE TABLE IF NOT EXISTS cache (
  key TEXT PRIMARY KEY, file_id TEXT NOT NULL, media_kind TEXT NOT NULL,
  owner_id INTEGER NOT NULL, created REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS job_modes (
+ job_id TEXT PRIMARY KEY, mode TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS derivatives (
+ parent_id TEXT NOT NULL, mode TEXT NOT NULL, child_id TEXT NOT NULL,
+ PRIMARY KEY(parent_id,mode));
+CREATE TABLE IF NOT EXISTS job_progress (
+ job_id TEXT PRIMARY KEY, message_id INTEGER NOT NULL);
 """
 
 
@@ -191,6 +198,9 @@ class Store:
                         "INSERT INTO jobs VALUES (?,?,?,?,?,?,?,?,?,NULL)",
                         (jid, user, chat, row["url"], "QUEUED", now, now, None, None),
                     )
+                    self.db.execute(
+                        "INSERT INTO job_progress VALUES (?,?)", (jid, row["prompt_id"])
+                    )
                 result = (state, jid)
             self.db.execute("COMMIT")
             return result
@@ -206,6 +216,51 @@ class Store:
             (jid, user, chat, url, "QUEUED", now, now, None, None),
         )
         return jid
+
+    def job_mode(self, jid: str) -> str:
+        row = self.db.execute("SELECT mode FROM job_modes WHERE job_id=?", (jid,)).fetchone()
+        return str(row[0]) if row else "auto"
+
+    def progress_message(self, jid: str) -> int | None:
+        row = self.db.execute(
+            "SELECT message_id FROM job_progress WHERE job_id=?", (jid,)
+        ).fetchone()
+        return int(row[0]) if row else None
+
+    def bind_progress(self, jid: str, message_id: int) -> None:
+        self.db.execute("INSERT OR REPLACE INTO job_progress VALUES (?,?)", (jid, message_id))
+
+    def create_derivative(
+        self, parent_id: str, user: int, chat: int, mode: str
+    ) -> tuple[str | None, bool]:
+        if mode != "audio":
+            return None, False
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            parent = self.db.execute(
+                "SELECT url,state FROM jobs WHERE id=? AND user_id=? AND chat_id=?",
+                (parent_id, user, chat),
+            ).fetchone()
+            result: tuple[str | None, bool] = (None, False)
+            if parent and parent["state"] == "COMPLETED":
+                existing = self.db.execute(
+                    "SELECT child_id FROM derivatives WHERE parent_id=? AND mode=?",
+                    (parent_id, mode),
+                ).fetchone()
+                if existing:
+                    result = (str(existing[0]), False)
+                else:
+                    jid = self.create_job(user, chat, str(parent["url"]))
+                    self.db.execute("INSERT INTO job_modes VALUES (?,?)", (jid, mode))
+                    self.db.execute(
+                        "INSERT INTO derivatives VALUES (?,?,?)", (parent_id, mode, jid)
+                    )
+                    result = (jid, True)
+            self.db.execute("COMMIT")
+            return result
+        except BaseException:
+            self.db.execute("ROLLBACK")
+            raise
 
     def create_collection(
         self, user: int, chat: int, title: str, items: list[dict[str, str]]

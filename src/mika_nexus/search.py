@@ -21,6 +21,8 @@ class Hit:
     url: str
     id: str
     downloadable: bool = False
+    duration: int | None = None
+    isrc: str | None = None
 
     def data(self) -> dict[str, Any]:
         return asdict(self)
@@ -103,6 +105,10 @@ class Searcher:
                                 x.get("artistName", ""),
                                 url,
                                 str(x.get("trackId") or x.get("collectionId") or x.get("artistId")),
+                                False,
+                                (int(x["trackTimeMillis"]) // 1000)
+                                if x.get("trackTimeMillis")
+                                else None,
                             )
                         )
         return out
@@ -120,7 +126,11 @@ class Searcher:
                 r.raise_for_status()
                 for x in r.json().get("results", []):
                     title = x.get("trackName") or x.get("collectionName")
-                    url = x.get("trackViewUrl") or x.get("collectionViewUrl")
+                    url = (
+                        x.get("episodeUrl")
+                        if kind == "episode" and x.get("episodeUrl")
+                        else x.get("trackViewUrl") or x.get("collectionViewUrl")
+                    )
                     if title and url:
                         out.append(
                             Hit(
@@ -157,6 +167,9 @@ class Searcher:
                                 (x.get("artist") or {}).get("name", ""),
                                 x["link"],
                                 str(x["id"]),
+                                False,
+                                x.get("duration") if kind == "track" else None,
+                                x.get("isrc"),
                             )
                         )
         return out
@@ -192,6 +205,8 @@ class Searcher:
                 x.get("uploader", ""),
                 x.get("url") or x.get("webpage_url", ""),
                 str(x.get("id")),
+                True,
+                x.get("duration"),
             )
             for x in obj.get("entries", [])
             if x and (x.get("url") or x.get("webpage_url")) and x.get("id")
@@ -231,6 +246,8 @@ class Searcher:
                             ", ".join(a.get("name", "") for a in artists),
                             url,
                             id_,
+                            kind in {"track", "episode"},
+                            x.get("duration_seconds"),
                         )
                     )
         return out

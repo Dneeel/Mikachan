@@ -64,6 +64,9 @@ def source(url: str) -> str:
         "twitter": ("twitter.com", "x.com", "t.co"),
         "reddit": ("reddit.com", "redd.it"),
         "pinterest": ("pinterest.com", "pin.it"),
+        "facebook": ("facebook.com", "fb.watch"),
+        "gdrive": ("drive.google.com", "docs.google.com"),
+        "mega": ("mega.nz", "mega.io"),
         "soundcloud": ("soundcloud.com",),
         "spotify": ("spotify.com",),
         "apple": ("music.apple.com", "podcasts.apple.com"),
@@ -79,6 +82,28 @@ def source(url: str) -> str:
 def collection(url: str) -> bool:
     p = urlsplit(url)
     path = p.path.lower()
+    if p.hostname == "podcasts.apple.com":
+        return True
+    if path.rstrip("/").endswith((".xml", ".rss", "/feed", "/rss")):
+        return True
+    if p.hostname == "music.apple.com" and "i=" in p.query:
+        return False
+    provider = source(url)
+    parts = [part for part in path.split("/") if part]
+    if provider == "tiktok" and len(parts) == 1 and parts[0].startswith("@"):
+        return True
+    if (
+        provider == "instagram"
+        and len(parts) == 1
+        and parts[0] not in {"explore", "accounts", "direct", "stories", "reels"}
+    ):
+        return True
+    if provider == "twitter" and len(parts) == 1 and p.hostname != "t.co":
+        return True
+    if provider == "soundcloud" and len(parts) == 1:
+        return True
+    if provider == "pinterest" and len(parts) == 1 and p.hostname != "pin.it":
+        return True
     return (
         any(x in path for x in ("/playlist", "/album", "/artist", "/user/", "/profile/", "/show/"))
         or "list=" in p.query
