@@ -1,4 +1,5 @@
 """Runs when aiogram dependencies are installed; no real Bot API calls."""
+
 import tempfile
 import unittest
 from pathlib import Path
@@ -59,7 +60,12 @@ class TelegramFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_consent_and_silent_text(self):
         with tempfile.TemporaryDirectory() as d:
             app = object.__new__(App)
-            app.settings = Settings(bot_token="123:fake", owner_telegram_id=1, allowed_telegram_ids="1", data_dir=Path(d))
+            app.settings = Settings(
+                bot_token="123:fake",
+                owner_telegram_id=1,
+                allowed_telegram_ids="1",
+                data_dir=Path(d),
+            )
             app.store = Store(Path(d) / "state.sqlite")
             app.store.seed_access({1})
             chat = SimpleNamespace(id=1, type="private")

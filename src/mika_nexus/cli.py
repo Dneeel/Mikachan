@@ -12,11 +12,12 @@ def main() -> None:
         for name in ("ffmpeg", "ffprobe", "yt-dlp", "deno"):
             print(f"{name}: {shutil.which(name) or 'missing'}")
         try:
-            s = Settings()
+            s = Settings()  # type: ignore[call-arg]  # values are loaded from the environment
             print(f"config: valid; mode={s.bot_api_mode}; users={len(s.allowlist)}")
         except Exception:
             print("config: invalid; check required values in .env.example")
         print("provider status: unverified until live acceptance")
         return
     from .bot import App
-    asyncio.run(App(Settings()).run())
+
+    asyncio.run(App(Settings()).run())  # type: ignore[call-arg]

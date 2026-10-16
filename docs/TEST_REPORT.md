@@ -1,12 +1,16 @@
-# Test report — 2026-10-15
+# Test report — 2026-10-16
 
-Executed in `/workspace/mika-nexus`:
+Executed on the supplied Freestyle Ubuntu 24.04 VM in `/opt/mika-nexus`:
 
-- `python -m compileall -q src` — passed.
-- `PYTHONPATH=src python -m unittest discover -s tests -q` — **14 tests passed, 1 skipped**. Covers URL syntax, mixed DNS rejection, source labeling, private-chat auth, consent race/idempotency/expiry, recovery, search session ownership/generation, filter/source isolation and distinct versions, configuration fail-closed rules, owner-managed allowlist, idempotent collection selection gallery grouping, fair per-user scheduling, and rate limiting.
-- `PYTHONPATH=src BOT_TOKEN=123:fake OWNER_TELEGRAM_ID=1 ALLOWED_TELEGRAM_IDS=1 python -m mika_nexus doctor` — passed config validation; found ffmpeg/ffprobe and reported missing yt-dlp/Deno. The token value was a nonfunctional test placeholder.
-- `deploy/setup-ubuntu.sh --dry-run` — passed.
-- `UV_CACHE_DIR=/tmp/mika-uv-cache uv sync --offline --extra dev` — failed because aiogram is absent from the local cache.
-- Network-enabled `uv sync --extra dev` — permission request interrupted twice before package installation; no lockfile or full runtime test was produced.
+- `uv sync --extra dev` — installed 42 packages and produced the committed `uv.lock`.
+- `.venv/bin/ruff check src tests` — passed.
+- `.venv/bin/ruff format --check src tests` — passed.
+- `.venv/bin/mypy src` — passed, no issues in 10 source files.
+- `.venv/bin/python -m unittest discover -s tests -v` — **15 tests passed**, including the aiogram fake Telegram consent flow.
+- `ffmpeg` and `ffprobe` installed from Ubuntu packages; service PATH includes `.venv/bin/yt-dlp`.
+- `mika-nexus doctor` with service configuration — valid public Bot API mode, one allowed user.
+- Telegram `getMe` — succeeded for `@mikadlbot`.
+- Live catalog search for “Daft Punk” with Apple and Deezer — 30 hits across both sources, no failures.
+- `systemctl` reported `ActiveState=active`, `SubState=running` before the VM was paused. The VM was then paused to conserve runtime quota.
 
-Not executed: aiogram runtime smoke test, fake Telegram Bot API integration (test present but skipped due to missing aiogram), ruff, mypy, live source probes, dependency vulnerability scan, Ubuntu systemd test, and VPS test. This build has **not** passed the specification's V1 release gate.
+Still awaiting owner acceptance: a real `/start` conversation, callback approval/rejection, actual media download/delivery, and live checks for all other providers. No local Bot API mode test was possible without Telegram API ID/hash. Deno is not installed.

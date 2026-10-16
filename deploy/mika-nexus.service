@@ -5,9 +5,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=YOUR_USER
+User=mika-nexus
+Group=mika-nexus
 WorkingDirectory=/opt/mika-nexus
-EnvironmentFile=/opt/mika-nexus/.env
+EnvironmentFile=/etc/mika-nexus.env
+Environment=PATH=/opt/mika-nexus/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=/opt/mika-nexus/.venv/bin/mika-nexus run
 Restart=on-failure
 RestartSec=5

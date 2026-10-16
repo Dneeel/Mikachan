@@ -1,4 +1,5 @@
 """Authorization and conservative URL validation before and after consent."""
+
 import ipaddress
 import re
 import socket
@@ -78,4 +79,7 @@ def source(url: str) -> str:
 def collection(url: str) -> bool:
     p = urlsplit(url)
     path = p.path.lower()
-    return any(x in path for x in ("/playlist", "/album", "/artist", "/user/", "/profile/", "/show/")) or "list=" in p.query
+    return (
+        any(x in path for x in ("/playlist", "/album", "/artist", "/user/", "/profile/", "/show/"))
+        or "list=" in p.query
+    )

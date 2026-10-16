@@ -9,7 +9,15 @@ from mika_nexus.store import Store
 
 class SecurityTests(unittest.TestCase):
     def test_url_policy(self):
-        for url in ("http://127.0.0.1/x", "http://169.254.169.254/x", "http://[::1]/", "http://localhost/x", "https://a.com:8080/x", "https://x:y@a.com/x", "file:///tmp/x"):
+        for url in (
+            "http://127.0.0.1/x",
+            "http://169.254.169.254/x",
+            "http://[::1]/",
+            "http://localhost/x",
+            "https://a.com:8080/x",
+            "https://x:y@a.com/x",
+            "file:///tmp/x",
+        ):
             with self.subTest(url=url), self.assertRaises(ValueError):
                 clean_url(url)
         self.assertEqual(source(clean_url("https://youtube.com.evil.example/x")), "direct")
@@ -80,6 +88,7 @@ class StoreTests(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
+
 class AdminTests(unittest.TestCase):
     def test_owner_managed_allowlist(self):
         with tempfile.TemporaryDirectory() as d:
@@ -99,6 +108,7 @@ class AdminTests(unittest.TestCase):
             self.assertEqual(db.apply_access(token, 1, 1, 10, 52), "cannot remove owner")
             self.assertIn(1, db.allowlist())
 
+
 class CollectionTests(unittest.TestCase):
     def test_selection_is_idempotent_and_owned(self):
         with tempfile.TemporaryDirectory() as d:
@@ -110,6 +120,7 @@ class CollectionTests(unittest.TestCase):
             self.assertEqual(db.select_collection(cid, 20, 10, 0), (jid, False))
             self.assertEqual(len(db.jobs(20)), 1)
 
+
 class QueueTests(unittest.TestCase):
     def test_one_oldest_job_per_user(self):
         with tempfile.TemporaryDirectory() as d:
@@ -120,6 +131,7 @@ class QueueTests(unittest.TestCase):
             rows = db.next_jobs()
             self.assertEqual({r["user_id"] for r in rows}, {1, 2})
             self.assertEqual(len(rows), 2)
+
 
 class RateTests(unittest.TestCase):
     def test_rate_limit(self):

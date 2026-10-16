@@ -1,23 +1,41 @@
 """Bounded on-demand downloader and Telegram delivery."""
+
 import asyncio
 import hashlib
 import html
 import json
 import os
 import shutil
+from functools import partial
 from pathlib import Path
 from urllib.parse import urlsplit
 
 import httpx
 from aiogram import Bot
-from aiogram.types import FSInputFile, InputMediaDocument
+from aiogram.types import (
+    FSInputFile,
+    InputMediaAudio,
+    InputMediaDocument,
+    InputMediaPhoto,
+    InputMediaVideo,
+)
 
 from .config import Settings
 from .security import source, validate_dns, collection, clean_url
 from .store import Store
 from .media import groups, verify
 
-MIME_EXT = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "audio/mpeg": ".mp3", "audio/ogg": ".ogg", "audio/mp4": ".m4a", "video/mp4": ".mp4", "application/pdf": ".pdf", "application/zip": ".zip"}
+MIME_EXT = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "audio/mpeg": ".mp3",
+    "audio/ogg": ".ogg",
+    "audio/mp4": ".m4a",
+    "video/mp4": ".mp4",
+    "application/pdf": ".pdf",
+    "application/zip": ".zip",
+}
 
 
 class Worker:
@@ -41,12 +59,19 @@ class Worker:
                             self.running_users.add(row["user_id"])
                             task = asyncio.create_task(self._run(row["id"]))
                             self.tasks[row["id"]] = task
-                            task.add_done_callback(lambda _, j=row["id"], u=row["user_id"]: self._done(j, u))
+                            task.add_done_callback(
+                                partial(self._task_done, str(row["id"]), int(row["user_id"]))
+                            )
             await asyncio.sleep(1)
 
     def _done(self, jid: str, user: int) -> None:
         self.tasks.pop(jid, None)
         self.running_users.discard(user)
+
+    def _task_done(self, jid: str, user: int, task: asyncio.Task[None]) -> None:
+        self._done(jid, user)
+        if not task.cancelled():
+            task.exception()
 
     async def stop(self) -> None:
         self.running = False
@@ -65,15 +90,23 @@ class Worker:
         max_bytes = (48 if self.settings.bot_api_mode == "public" else 1900) * 1024 * 1024
         try:
             key = hashlib.sha256((url + "|document|public").encode()).hexdigest()
-            cached = self.store.db.execute("SELECT file_id FROM cache WHERE key=? AND owner_id=?", (key, row["user_id"])).fetchone()
+            cached = self.store.db.execute(
+                "SELECT file_id FROM cache WHERE key=? AND owner_id=?", (key, row["user_id"])
+            ).fetchone()
             if cached:
                 self.store.transition(jid, "RESOLVING", "DELIVERING")
                 try:
-                    sent = await self.bot.send_document(chat, cached["file_id"], caption="MIKA NEXUS · " + html.escape(url[:900]))
+                    sent = await self.bot.send_document(
+                        chat, cached["file_id"], caption="MIKA NEXUS · " + html.escape(url[:900])
+                    )
                 except Exception as exc:
-                    self.store.transition(jid, "DELIVERING", "DELIVERY_UNCERTAIN", error=type(exc).__name__)
+                    self.store.transition(
+                        jid, "DELIVERING", "DELIVERY_UNCERTAIN", error=type(exc).__name__
+                    )
                     return
-                self.store.receipt(jid, sent.message_id, sent.document.file_id if sent.document else None)
+                self.store.receipt(
+                    jid, sent.message_id, sent.document.file_id if sent.document else None
+                )
                 self.store.transition(jid, "DELIVERING", "COMPLETED", receipt_id=sent.message_id)
                 return
             if collection(url):
@@ -82,12 +115,18 @@ class Worker:
                     raise ValueError("No public collection items found")
                 cid = self.store.create_collection(row["user_id"], chat, title, items)
                 from .bot import kb
+
                 caption = f"MIKA NEXUS · {html.escape(title[:120])}\nSelect one item:"
-                buttons = [[(f"{i + 1}. {item['title'][:45]}", f"v:{cid}:d:{i}")] for i, item in enumerate(items[:10])]
+                buttons = [
+                    [(f"{i + 1}. {item['title'][:45]}", f"v:{cid}:d:{i}")]
+                    for i, item in enumerate(items[:10])
+                ]
                 if len(items) > 10:
                     buttons.append([("Next ▶", f"v:{cid}:p:1")])
                 sent = await self.bot.send_message(chat, caption, reply_markup=kb(buttons))
-                self.store.db.execute("UPDATE collections SET message_id=? WHERE id=?", (sent.message_id, cid))
+                self.store.db.execute(
+                    "UPDATE collections SET message_id=? WHERE id=?", (sent.message_id, cid)
+                )
                 self.store.transition(jid, "RESOLVING", "COMPLETED", receipt_id=sent.message_id)
                 return
             self.store.transition(jid, "RESOLVING", "DOWNLOADING")
@@ -95,7 +134,8 @@ class Worker:
                 paths = [await self._direct(url, job_dir, max_bytes)]
             else:
                 paths = await self._ytdlp(url, job_dir, max_bytes)
-            if self.store.job(jid)["state"] == "CANCELLED":
+            current_job = self.store.job(jid)
+            if current_job and current_job["state"] == "CANCELLED":
                 return
             self.store.transition(jid, "DOWNLOADING", "VERIFYING", artifact=str(job_dir))
             if sum(p.stat().st_size for p in paths) > max_bytes:
@@ -108,18 +148,43 @@ class Worker:
                 sent_messages = []
                 for chunk in groups(paths):
                     if len(chunk) == 1:
-                        sent_messages.append(await self.bot.send_document(chat, FSInputFile(chunk[0]), caption="MIKA NEXUS · " + html.escape(url[:900])))
+                        sent_messages.append(
+                            await self.bot.send_document(
+                                chat,
+                                FSInputFile(chunk[0]),
+                                caption="MIKA NEXUS · " + html.escape(url[:900]),
+                            )
+                        )
                     else:
-                        media = [InputMediaDocument(media=FSInputFile(path), caption=("MIKA NEXUS · " + html.escape(url[:900])) if i == 0 and not sent_messages else None) for i, path in enumerate(chunk)]
+                        media: list[
+                            InputMediaAudio | InputMediaDocument | InputMediaPhoto | InputMediaVideo
+                        ] = [
+                            InputMediaDocument(
+                                media=FSInputFile(path),
+                                caption=("MIKA NEXUS · " + html.escape(url[:900]))
+                                if i == 0 and not sent_messages
+                                else None,
+                            )
+                            for i, path in enumerate(chunk)
+                        ]
                         sent_messages.extend(await self.bot.send_media_group(chat, media))
-                    for sent in sent_messages[-len(chunk):]:
-                        self.store.receipt(jid, sent.message_id, sent.document.file_id if sent.document else None)
+                    for sent in sent_messages[-len(chunk) :]:
+                        self.store.receipt(
+                            jid, sent.message_id, sent.document.file_id if sent.document else None
+                        )
             except Exception as exc:
-                self.store.transition(jid, "DELIVERING", "DELIVERY_UNCERTAIN", error=type(exc).__name__)
+                self.store.transition(
+                    jid, "DELIVERING", "DELIVERY_UNCERTAIN", error=type(exc).__name__
+                )
                 return
-            self.store.transition(jid, "DELIVERING", "COMPLETED", receipt_id=sent_messages[0].message_id)
+            self.store.transition(
+                jid, "DELIVERING", "COMPLETED", receipt_id=sent_messages[0].message_id
+            )
             if len(paths) == 1 and sent_messages[0].document:
-                self.store.db.execute("INSERT OR REPLACE INTO cache VALUES (?,?,?,?,strftime('%s','now'))", (key, sent_messages[0].document.file_id, "document", row["user_id"]))
+                self.store.db.execute(
+                    "INSERT OR REPLACE INTO cache VALUES (?,?,?,?,strftime('%s','now'))",
+                    (key, sent_messages[0].document.file_id, "document", row["user_id"]),
+                )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -133,11 +198,25 @@ class Worker:
 
     async def _browse(self, url: str) -> tuple[list[dict[str, str]], str]:
         validate_dns(url)
-        proc = await asyncio.create_subprocess_exec("yt-dlp", "--flat-playlist", "--playlist-end", "30", "--dump-single-json", "--skip-download", "--no-warnings", url, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, start_new_session=True, env={"PATH": os.environ.get("PATH", "")})
+        proc = await asyncio.create_subprocess_exec(
+            "yt-dlp",
+            "--flat-playlist",
+            "--playlist-end",
+            "30",
+            "--dump-single-json",
+            "--skip-download",
+            "--no-warnings",
+            url,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+            start_new_session=True,
+            env={"PATH": os.environ.get("PATH", "")},
+        )
         try:
             out, _ = await asyncio.wait_for(proc.communicate(), 30)
         except (TimeoutError, asyncio.CancelledError):
             import signal
+
             os.killpg(proc.pid, signal.SIGTERM)
             await proc.wait()
             raise
@@ -168,6 +247,7 @@ class Worker:
                         if not target:
                             raise ValueError("redirect without destination")
                         from urllib.parse import urljoin
+
                         url = urljoin(url, target)
                         continue
                     resp.raise_for_status()
@@ -193,11 +273,27 @@ class Worker:
         if not shutil.which("yt-dlp"):
             raise ValueError("yt-dlp is not installed")
         template = str(directory / "%(autonumber)02d.%(ext)s")
-        proc = await asyncio.create_subprocess_exec("yt-dlp", "--playlist-end", "10", "--no-warnings", "--restrict-filenames", "--max-filesize", str(max_bytes), "-o", template, url, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE, start_new_session=True, env={"PATH": os.environ.get("PATH", "")})
+        proc = await asyncio.create_subprocess_exec(
+            "yt-dlp",
+            "--playlist-end",
+            "10",
+            "--no-warnings",
+            "--restrict-filenames",
+            "--max-filesize",
+            str(max_bytes),
+            "-o",
+            template,
+            url,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+            env={"PATH": os.environ.get("PATH", "")},
+        )
         try:
             _, stderr = await asyncio.wait_for(proc.communicate(), 600)
         except (TimeoutError, asyncio.CancelledError):
             import signal
+
             os.killpg(proc.pid, signal.SIGTERM)
             await proc.wait()
             raise
