@@ -11,7 +11,7 @@ Apple Music and Deezer search returned live results on the supplied VM on 2026-1
 | YouTube Music | Track, album, artist, playlist, podcast, episode via `ytmusicapi` | yt-dlp public item | None by default | UNVERIFIED |
 | Spotify | Track, album, artist, playlist via official search API | Metadata only; never Spotify audio | Optional client ID/secret for this adapter | CREDENTIALS REQUIRED by default |
 | Podcast RSS / Castbox | No global catalog search | Public URL via extractor where supported | None | PARTIAL, UNVERIFIED |
-| YouTube, TikTok, Instagram, Twitter/X, Reddit, Pinterest | No dedicated catalog search | yt-dlp public item | Public extraction only | UNVERIFIED |
+| YouTube, TikTok, Instagram, Twitter/X, Reddit, Pinterest | No dedicated catalog search | yt-dlp public item; gallery-dl fallback for TikTok photos | Public extraction only | TikTok video and one photo gallery delivery VERIFIED; other sources UNVERIFIED, some TikTok photos require login |
 | Direct HTTPS | No search | Bounded stream download | None | UNVERIFIED live |
 
 Search failures are reported in the UI. Sources can be independently selected; unavailable sources are not filled with another source's results. Apple previews are not treated as full songs. yt-dlp provider behavior can change with upstream sites and may require authentication for some content; this app does not acquire personal sessions.

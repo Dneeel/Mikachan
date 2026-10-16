@@ -4,7 +4,7 @@ Private, Telegram-native media utility. It asks for **✅ Yes / ❌ No** before 
 
 ## Current build status
 
-The bot is deployed on the supplied Freestyle Ubuntu VM with a dedicated systemd service. All 15 tests, Ruff, and mypy pass there. Telegram `getMe` succeeded and live Apple/Deezer searches returned results. The VM is **paused** to conserve its free runtime quota; resume it before testing the bot. No owner-driven Telegram conversation, real media delivery, or other live provider acceptance has been completed. See [test report](docs/TEST_REPORT.md) and [provider matrix](docs/PROVIDER_MATRIX.md).
+The bot is deployed on the supplied Freestyle Ubuntu VM with a dedicated systemd service. All 15 tests, Ruff, and mypy pass there. Telegram `getMe` succeeded, live Apple/Deezer searches returned results, and owner-approved TikTok video and photo deliveries succeeded. The VM is **paused** after checks to conserve its free runtime quota; resume it before testing the bot. Some TikTok photo posts still require source access or cookies and cannot be delivered anonymously. See [test report](docs/TEST_REPORT.md) and [provider matrix](docs/PROVIDER_MATRIX.md).
 
 ## Commands
 
@@ -23,4 +23,4 @@ All public link submissions receive one separate consent prompt per URL, up to f
 
 SQLite WAL holds consent, jobs, result snapshots, collection browsing, and Telegram file ID cache. The worker allows two concurrent jobs globally and one per user. Direct files are streamed to private job directories. yt-dlp runs only on demand. Search metadata does not cause downloads. Metadata-only catalog hits require a new link submission and consent; they are never represented as Spotify/Apple/Deezer audio bytes.
 
-Current limitations include no automated local Bot API migration, no RSS discovery/search index, no robust disk reservation, and no verified end-to-end Telegram download. Deno is not installed on the VM, so some modern YouTube extraction paths may fail. Apple and Deezer search have been probed; other providers remain unverified. See [security](docs/SECURITY.md) and [dependency notices](docs/DEPENDENCIES.md).
+Current limitations include no automated local Bot API migration, no RSS discovery/search index, and no robust disk reservation. Deno is not installed on the VM, so some modern YouTube extraction paths may fail. Apple and Deezer search and TikTok video/photo delivery have been probed; other providers remain unverified. See [security](docs/SECURITY.md) and [dependency notices](docs/DEPENDENCIES.md).

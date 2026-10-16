@@ -8,7 +8,7 @@ import os
 import shutil
 from functools import partial
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 from aiogram import Bot
@@ -133,7 +133,15 @@ class Worker:
             if source(url) == "direct":
                 paths = [await self._direct(url, job_dir, max_bytes)]
             else:
-                paths = await self._ytdlp(url, job_dir, max_bytes)
+                try:
+                    paths = await self._ytdlp(url, job_dir, max_bytes)
+                except ValueError as extraction_error:
+                    if source(url) != "tiktok":
+                        raise
+                    photos = await self._gallery_tiktok(url, job_dir, max_bytes)
+                    if photos is None:
+                        raise extraction_error
+                    paths = photos
             current_job = self.store.job(jid)
             if current_job and current_job["state"] == "CANCELLED":
                 return
@@ -237,7 +245,9 @@ class Worker:
             items.append({"title": str(entry.get("title") or "Untitled")[:100], "url": target})
         return items[:30], str(data.get("title") or "Collection")
 
-    async def _direct(self, url: str, directory: Path, max_bytes: int) -> Path:
+    async def _direct(
+        self, url: str, directory: Path, max_bytes: int, stem: str = "artifact"
+    ) -> Path:
         async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
             for _ in range(5):
                 validate_dns(url)
@@ -246,8 +256,6 @@ class Worker:
                         target = resp.headers.get("location")
                         if not target:
                             raise ValueError("redirect without destination")
-                        from urllib.parse import urljoin
-
                         url = urljoin(url, target)
                         continue
                     resp.raise_for_status()
@@ -257,7 +265,7 @@ class Worker:
                     suffix = MIME_EXT.get(mime) or Path(urlsplit(url).path).suffix[:10] or ".bin"
                     if not suffix.startswith(".") or not suffix[1:].isalnum():
                         suffix = ".bin"
-                    path = directory / ("artifact" + suffix)
+                    path = directory / (stem + suffix)
                     total = 0
                     with path.open("wb") as f:
                         async for chunk in resp.aiter_bytes(65536):
@@ -267,6 +275,59 @@ class Worker:
                             f.write(chunk)
                     return path
         raise ValueError("too many redirects")
+
+    async def _gallery_tiktok(self, url: str, directory: Path, max_bytes: int) -> list[Path] | None:
+        if not shutil.which("gallery-dl"):
+            raise ValueError("TikTok photo support is not installed")
+        target = url
+        async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
+            for _ in range(5):
+                validate_dns(target)
+                async with client.stream("GET", target) as response:
+                    if response.status_code in (301, 302, 303, 307, 308):
+                        location = response.headers.get("location")
+                        if not location:
+                            raise ValueError("TikTok redirect has no destination")
+                        target = clean_url(urljoin(target, location))
+                        continue
+                    response.raise_for_status()
+                    break
+            else:
+                raise ValueError("too many TikTok redirects")
+        if source(target) != "tiktok" or "/photo/" not in urlsplit(target).path:
+            return None
+        proc = await asyncio.create_subprocess_exec(
+            "gallery-dl",
+            "-g",
+            target,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+            start_new_session=True,
+            env={"PATH": os.environ.get("PATH", "")},
+        )
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), 45)
+        except (TimeoutError, asyncio.CancelledError):
+            import signal
+
+            os.killpg(proc.pid, signal.SIGTERM)
+            await proc.wait()
+            raise
+        if proc.returncode:
+            raise ValueError("TikTok photo extraction unavailable")
+        candidates = stdout.decode().splitlines()
+        if not candidates:
+            raise ValueError("TikTok photo unavailable; source may require login")
+        if len(candidates) > 35:
+            raise ValueError("TikTok photo collection is too large")
+        media_urls = [clean_url(candidate) for candidate in candidates[:10]]
+        paths: list[Path] = []
+        remaining = max_bytes
+        for index, media_url in enumerate(media_urls):
+            path = await self._direct(media_url, directory, remaining, stem=f"{index:02d}")
+            paths.append(path)
+            remaining -= path.stat().st_size
+        return paths
 
     async def _ytdlp(self, url: str, directory: Path, max_bytes: int) -> list[Path]:
         validate_dns(url)

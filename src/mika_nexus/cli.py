@@ -9,7 +9,7 @@ def main() -> None:
     p.add_argument("command", choices=["run", "doctor"])
     args = p.parse_args()
     if args.command == "doctor":
-        for name in ("ffmpeg", "ffprobe", "yt-dlp", "deno"):
+        for name in ("ffmpeg", "ffprobe", "yt-dlp", "gallery-dl", "deno"):
             print(f"{name}: {shutil.which(name) or 'missing'}")
         try:
             s = Settings()  # type: ignore[call-arg]  # values are loaded from the environment
