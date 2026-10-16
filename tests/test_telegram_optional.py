@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 try:
-    from mika_nexus.bot import App
+    from mika_nexus.bot import App, public_media_result
 except ImportError:
     App = None
 
@@ -55,8 +55,72 @@ class FakeCallback:
         self.answered = True
 
 
+class StaleCallback(FakeCallback):
+    async def answer(self, *args, **kwargs):
+        from aiogram.exceptions import TelegramBadRequest
+        from aiogram.methods import AnswerCallbackQuery
+
+        raise TelegramBadRequest(
+            method=AnswerCallbackQuery(callback_query_id="expired"),
+            message="query is too old and response timeout expired or query ID is invalid",
+        )
+
+
+class FakeBot:
+    def __init__(self):
+        self.edits = []
+        self.sent = []
+
+    async def edit_message_text(self, text, **kwargs):
+        self.edits.append((text, kwargs))
+
+    async def send_message(self, chat_id, text, **kwargs):
+        prompt = FakePrompt(SimpleNamespace(id=chat_id, type="private"), 301)
+        prompt.text = text
+        prompt.keyboard = kwargs.get("reply_markup")
+        self.sent.append(prompt)
+        return prompt
+
+
 @unittest.skipIf(App is None, "aiogram is not installed")
 class TelegramFlowTests(unittest.IsolatedAsyncioTestCase):
+    async def test_stale_search_callback_can_offer_public_media(self):
+        with tempfile.TemporaryDirectory() as d:
+            app = object.__new__(App)
+            app.settings = Settings(
+                bot_token="123:fake",
+                owner_telegram_id=1,
+                allowed_telegram_ids="1",
+                data_dir=Path(d),
+            )
+            app.store = Store(Path(d) / "state.sqlite")
+            app.store.seed_access({1})
+            app.bot = FakeBot()
+            app.searcher = SimpleNamespace(health={})
+            sid = app.store.create_search(1, 1, "sample", {"track"}, {"soundcloud"})
+            app.store.set_search_message(sid, 20)
+            app.store.save_results(
+                sid,
+                0,
+                [
+                    {
+                        "source": "soundcloud",
+                        "kind": "track",
+                        "title": "Public track",
+                        "creator": "Artist",
+                        "url": "https://soundcloud.com/artist/public-track",
+                        "id": "track-1",
+                    }
+                ],
+            )
+            message = FakePrompt(SimpleNamespace(id=1, type="private"), 20)
+            await app.callback(StaleCallback(f"s:{sid}:d:0:0", message))
+            self.assertIn("Request public media", str(app.bot.edits[-1][1]["reply_markup"]))
+            await app.callback(StaleCallback(f"s:{sid}:r:0:0", message))
+            self.assertEqual(len(app.bot.sent), 1)
+            self.assertEqual(app.store.jobs(1), [])
+            self.assertFalse(public_media_result({"source": "spotify", "kind": "track"}))
+
     async def test_consent_and_silent_text(self):
         with tempfile.TemporaryDirectory() as d:
             app = object.__new__(App)

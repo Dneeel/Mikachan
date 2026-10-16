@@ -8,6 +8,7 @@ from aiogram import Bot, Dispatcher, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import (
     BotCommand,
     CallbackQuery,
@@ -20,7 +21,7 @@ from aiogram.types import (
 from .config import Settings
 from .jobs import Worker
 from .search import KINDS, SOURCES, Searcher
-from .security import allowed, links, source
+from .security import allowed, clean_url, links, source
 from .store import Store
 
 
@@ -31,6 +32,25 @@ def kb(rows: list[list[tuple[str, str]]]) -> InlineKeyboardMarkup:
             for row in rows
         ]
     )
+
+
+async def acknowledge(q: CallbackQuery, message: str | None = None) -> None:
+    try:
+        await q.answer(message)
+    except TelegramBadRequest as exc:
+        if (
+            "query is too old" not in str(exc).lower()
+            and "query id is invalid" not in str(exc).lower()
+        ):
+            raise
+
+
+def public_media_result(hit: dict[str, object]) -> bool:
+    return (hit.get("source"), hit.get("kind")) in {
+        ("soundcloud", "track"),
+        ("ytmusic", "track"),
+        ("ytmusic", "episode"),
+    }
 
 
 class App:
@@ -109,7 +129,7 @@ class App:
         arg = arg.strip()
         if cmd in ("/start", "/help"):
             await m.reply(
-                "<b>MIKA NEXUS</b>\nSend a public HTTP(S) link to approve its processing.\n/search query · /music query · /podcast query\n/queue · /cancel ID · /status · /settings\n/twitter · /instagram · /tiktok · /youtube"
+                "<b>MIKA NEXUS</b>\nSend a public HTTP(S) link to approve its processing.\n/search query · /music query · /podcast query\n/queue · /cancel ID · /status · /settings\n/twitter · /instagram · /tiktok · /youtube\nSpotify, Apple Music, and Deezer are catalog sources; their full licensed audio is unavailable."
             )
         elif cmd in ("/search", "/music", "/podcast"):
             if arg:
@@ -143,7 +163,7 @@ class App:
             )
         elif cmd == "/settings":
             await m.reply(
-                "Search filters are editable in each result view. Downloads use source native format as a document."
+                "Search filters are editable in each result view. Public SoundCloud and YouTube Music results can request download with a separate confirmation. Spotify, Apple Music, and Deezer provide catalog metadata only."
             )
         elif cmd == "/admin" and m.from_user.id == self.settings.owner_telegram_id:
             parts = arg.split()
@@ -239,8 +259,13 @@ class App:
             body = "Choose types:" if menu == "types" else "Choose sources:"
         elif detail is not None and 0 <= detail < len(hits):
             h = hits[detail]
-            body = f"{html.escape(h['source'])} · {html.escape(h['kind'])}\n<b>{html.escape(h['title'])}</b>\n{html.escape(h['creator'])}\n{html.escape(h['url'][:700])}\n\nCatalog metadata is not an audio file. To process this link, send it as a new message and confirm."
-            buttons = [[("◀ Back", f"s:{sid}:b")]]
+            body = f"{html.escape(h['source'])} · {html.escape(h['kind'])}\n<b>{html.escape(h['title'])}</b>\n{html.escape(h['creator'])}\n{html.escape(h['url'][:700])}"
+            if public_media_result(h):
+                body += "\n\nPublic media may be available. Requesting it opens a separate Yes/No confirmation."
+                buttons = [[("Request public media", f"s:{sid}:r:{detail}:{gen}")]]
+            else:
+                body += "\n\nCatalog information only. This source does not provide a downloadable full-audio file here."
+            buttons.append([("◀ Back", f"s:{sid}:b")])
         else:
             current = hits[
                 page * self.settings.search_page_size : (page + 1) * self.settings.search_page_size
@@ -310,11 +335,11 @@ class App:
             or isinstance(q.message, InaccessibleMessage)
             or not self.authorized(q.from_user.id, q.message.chat.id, q.message.chat.type)
         ):
-            await q.answer("Unavailable")
+            await acknowledge(q, "Unavailable")
             return
         data = q.data or ""
         if data.startswith("a:"):
-            await q.answer()
+            await acknowledge(q)
             parts = data.split(":")
             if len(parts) != 3 or q.from_user.id != self.settings.owner_telegram_id:
                 return
@@ -337,12 +362,12 @@ class App:
         if data.startswith("c:"):
             parts = data.split(":")
             if len(parts) != 3 or parts[2] not in {"y", "n"}:
-                await q.answer()
+                await acknowledge(q)
                 return
             state, jid = self.store.decision(
                 parts[1], q.from_user.id, q.message.chat.id, q.message.message_id, parts[2] == "y"
             )
-            await q.answer("Expired" if state == "EXPIRED" else None)
+            await acknowledge(q, "Expired" if state == "EXPIRED" else None)
             if state == "REJECTED":
                 try:
                     await q.message.delete()
@@ -360,7 +385,7 @@ class App:
                 await q.message.edit_reply_markup(reply_markup=None)
             return
         if data.startswith("v:"):
-            await q.answer()
+            await acknowledge(q)
             parts = data.split(":")
             if len(parts) != 4:
                 return
@@ -386,7 +411,7 @@ class App:
                     )
             return
         if data.startswith("j:"):
-            await q.answer()
+            await acknowledge(q)
             parts = data.split(":")
             if (
                 len(parts) == 3
@@ -399,9 +424,9 @@ class App:
                 await q.message.edit_text("Cancelled")
             return
         if not data.startswith("s:"):
-            await q.answer()
+            await acknowledge(q)
             return
-        await q.answer()
+        await acknowledge(q)
         parts = data.split(":")
         if len(parts) < 3:
             return
@@ -433,6 +458,38 @@ class App:
             and int(parts[4]) == row["generation"]
         ):
             await self.render_search(sid, q.from_user.id, q.message.chat.id, detail=int(parts[3]))
+        elif (
+            action == "r"
+            and len(parts) == 5
+            and parts[3].isdigit()
+            and parts[4].isdigit()
+            and int(parts[4]) == row["generation"]
+        ):
+            index = int(parts[3])
+            hit = self.store.result(sid, row["generation"], index)
+            if not hit or not public_media_result(hit):
+                return
+            try:
+                url = clean_url(str(hit["url"]))
+            except ValueError:
+                return
+            if not self.store.rate(q.from_user.id, "links", 12):
+                return
+            cid = self.store.confirm_create(
+                q.message.chat.id,
+                q.from_user.id,
+                q.message.message_id,
+                index,
+                url,
+                self.settings.confirmation_ttl_seconds,
+            )
+            if self.store.claim_prompt(cid):
+                prompt = await self.bot.send_message(
+                    q.message.chat.id,
+                    f"MIKA NEXUS · Confirm public media request\n<code>{html.escape(url[:300])}</code>",
+                    reply_markup=kb([[("✅ Yes", f"c:{cid}:y"), ("❌ No", f"c:{cid}:n")]]),
+                )
+                self.store.set_prompt(cid, prompt.message_id)
         elif action in ("prev", "next"):
             page = max(0, row["page"] + (1 if action == "next" else -1))
             if page * self.settings.search_page_size < max(

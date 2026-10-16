@@ -130,6 +130,9 @@ class Worker:
                 self.store.transition(jid, "RESOLVING", "COMPLETED", receipt_id=sent.message_id)
                 return
             self.store.transition(jid, "RESOLVING", "DOWNLOADING")
+            host = (urlsplit(url).hostname or "").lower()
+            if source(url) in {"spotify", "deezer"} or host == "music.apple.com":
+                raise ValueError("This catalog link does not expose a downloadable full-audio file")
             if source(url) == "direct":
                 paths = [await self._direct(url, job_dir, max_bytes)]
             else:

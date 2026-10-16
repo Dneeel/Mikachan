@@ -2,13 +2,14 @@
 
 Executed on the supplied Freestyle Ubuntu 24.04 VM in `/opt/mika-nexus`:
 
-- `uv sync --extra dev` — resolved 44 packages including `gallery-dl`; `uv.lock` is committed.
+- `uv sync --extra dev` installed locked dependencies, including `yt-dlp==2026.8.19` and `gallery-dl==1.32.16`.
 - Ruff lint and formatting checks passed; mypy reported no issues in 10 source files.
-- `.venv/bin/python -m unittest discover -s tests -v` — **15 tests passed**, including the aiogram fake Telegram consent flow.
-- `ffmpeg`, `ffprobe`, `yt-dlp`, and `gallery-dl` are installed in the service environment. `doctor` validated public Bot API mode and the single authorized user.
-- Telegram `getMe` succeeded for `@mikadlbot`; `getWebhookInfo` showed no webhook and zero pending updates after polling resumed.
-- Live Apple and Deezer search returned 30 results for “Daft Punk” without provider failures.
-- Owner-submitted TikTok links produced consent prompts. Two video jobs completed. A TikTok photo post initially failed under yt-dlp; after adding the gallery-dl fallback, the same approved job completed with two Telegram document receipts.
-- The service reported `ActiveState=active`, `SubState=running` during the checks. The VM is paused after testing to conserve runtime quota.
+- `.venv/bin/python -m unittest discover -s tests -v` — **16 tests passed**, including a stale Telegram callback and search result confirmation test.
+- The service reported `ActiveState=active`, `SubState=running` after restart; Telegram `getMe` succeeded for `@mikadlbot`.
+- Live Apple and Deezer catalog search returned results. The owner's stored search sessions contained results from Apple, Deezer, SoundCloud, YouTube Music, and Apple Podcasts. An existing Telegram search message was successfully edited to show a public SoundCloud result with a request button.
+- One actual SoundCloud result and one YouTube Music result passed yt-dlp media probes; neither has had a Telegram delivery acceptance test.
+- Owner-approved TikTok video/photo jobs completed, including a two-image photo post. An Instagram Reel that failed under the older extractor completed with one Telegram document receipt after the yt-dlp update.
+- One Instagram story required login, one Instagram photo post had no available video format, one tested X post had no video, and a Spotify track did not expose downloadable full audio. Another TikTok photo post may require cookies.
+- The VM was paused after checks to conserve its free runtime quota.
 
-Limits: a separate TikTok photo post returned an extractor error indicating that source access or cookies may be required; no owner credentials were requested or used. Deno and local Bot API mode are not configured. Other download providers have not had live acceptance tests.
+Full music tracks from Spotify, Apple Music, and Deezer are unavailable from public catalog pages. The Spotify search adapter also requires client credentials that have not been supplied. No personal cookies were requested or used. Deno and local Bot API mode are not configured. Other download providers have not had live delivery tests.
