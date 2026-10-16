@@ -2,7 +2,7 @@
 
 import re
 from difflib import SequenceMatcher
-from urllib.parse import parse_qs, urljoin, urlsplit
+from urllib.parse import parse_qs, unquote, urljoin, urlsplit
 import unicodedata
 
 import feedparser  # type: ignore[import-untyped]
@@ -103,15 +103,21 @@ def _similar(a: str, b: str) -> float:
 
 
 async def resolve_episode_link(url: str) -> dict[str, str | int] | None:
-    """Resolve a specific Apple/Spotify episode to a verified public enclosure."""
+    """Resolve a specific Apple, Spotify, or Castbox episode to public audio."""
     clean = clean_url(url)
     host = urlsplit(clean).hostname or ""
+    castbox = host == "castbox.fm" or host.endswith(".castbox.fm")
     if not (
         host == "podcasts.apple.com" and "i=" in urlsplit(clean).query
         or host == "open.spotify.com" and urlsplit(clean).path.startswith("/episode/")
+        or castbox and bool(re.search(r"/(?:vi|ep)/\d+|/episode/.+-id\d+", urlsplit(clean).path))
     ):
         return None
     current = clean
+    if castbox:
+        short = re.search(r"/(?:vi|ep)/(\d+)", urlsplit(clean).path)
+        if short:
+            current = f"https://castbox.fm/ep/{short[1]}"
     async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
         for _ in range(4):
             validate_dns(current)
@@ -129,6 +135,11 @@ async def resolve_episode_link(url: str) -> dict[str, str | int] | None:
         parser.feed(page.text[:500_000])
         title = parser.data.get("og:title", "").strip()
         description = parser.data.get("og:description", "")
+        if castbox:
+            slug = unquote(urlsplit(current).path).split("/episode/")[-1]
+            slug = re.sub(r"-id\d+(?:-id\d+)?$", "", slug)
+            title = slug.replace("-", " ").strip()
+            description = ""
         if not title:
             raise ValueError("episode title is unavailable")
         show = description.split(" · ")[0].strip()
@@ -145,11 +156,13 @@ async def resolve_episode_link(url: str) -> dict[str, str | int] | None:
     matches = [
         episode for episode in candidates
         if episode.get("episodeUrl")
-        and (_similar(title, str(episode.get("trackName") or "")) >= 0.90)
+        and (_similar(title, str(episode.get("trackName") or "")) >= (0.97 if castbox else 0.90))
         and (not show or _similar(show, str(episode.get("collectionName") or "")) >= 0.70)
     ]
     if identifier:
         matches = [episode for episode in matches if str(episode.get("trackId")) == identifier]
+    if castbox and len({str(x.get("episodeUrl")) for x in matches}) != 1:
+        raise ValueError("اپیزود Castbox در منابع عمومی یکتا و قابل‌تأیید نیست")
     if not matches:
         raise ValueError("نسخهٔ عمومیِ منطبق با این اپیزود پیدا نشد")
     match = matches[0]

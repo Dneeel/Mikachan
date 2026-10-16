@@ -4,8 +4,9 @@
 
 The 23-item owner report prompted changes to native Telegram delivery, metadata,
 collection browsing, direct episode matching, and search ranking. Local Ruff,
-mypy, and 27 automated tests passed before deployment. A synthetic VP9 WebM
-converted to H.264 MP4 and passed ffprobe. These tests do not establish that
+mypy, and 29 automated tests passed before deployment. A synthetic VP9 WebM
+converted to H.264 MP4 and passed ffprobe; an oversize synthetic episode was
+compressed below the test upload limit. These tests do not establish that
 every third-party source is anonymously accessible.
 
 Read-only checks on the supplied Freestyle VM found:
@@ -18,8 +19,8 @@ Read-only checks on the supplied Freestyle VM found:
 - The sample Spotify track resolves as **Soldier Side — System Of A Down**,
   duration 220 seconds, with cover art. YouTube Music returned a matching public
   221-second recording. The deployed strict matcher downloaded a 7,867,053-byte
-  MP3; ffprobe measured 220.296 seconds. Telegram delivery requires a separate
-  acceptance check.
+  MP3; ffprobe measured 220.296 seconds. A queued owner test then completed in
+  the live bot with one Telegram media receipt and correct title/artist context.
 - The sample Spotify playlist embed exposed 87 tracks with titles and artists.
   The Jafekri public RSS feed exposed 221 episodes. The bot now browses up to
   300 items with ten-per-page controls.
@@ -28,6 +29,10 @@ Read-only checks on the supplied Freestyle VM found:
   claimed fixed.
 - The supplied Pornhub URL returns HTTP 410 Gone at source. It cannot verify a
   working adapter; a live public sample is required for that claim.
+- The owner's Castbox `vi/1012217789` link redirects to an episode page whose
+  title exactly matches a unique Apple Podcasts public enclosure. The new
+  resolver returns its 4,140-second audio with the original Castbox Link;
+  Telegram upload is still pending.
 - A TikTok music-page extractor is currently unsupported upstream; music from
   photo posts is handled separately when the public post API exposes it.
 

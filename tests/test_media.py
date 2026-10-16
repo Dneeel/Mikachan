@@ -20,6 +20,21 @@ class GalleryTests(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg required")
 class Mp3Tests(unittest.IsolatedAsyncioTestCase):
+    async def test_large_episode_is_reencoded_below_public_upload_limit(self):
+        from mika_nexus.jobs import Worker
+
+        with tempfile.TemporaryDirectory() as d:
+            original = Path(d) / "episode.mp3"
+            subprocess.run(
+                ["ffmpeg", "-v", "error", "-f", "lavfi", "-i",
+                 "sine=frequency=440:duration=60", "-c:a", "libmp3lame",
+                 "-b:a", "128k", "-y", str(original)], check=True,
+            )
+            self.assertGreater(original.stat().st_size, 300_000)
+            compressed = await Worker._compress_mp3(object.__new__(Worker), original, 300_000)
+            self.assertLessEqual(compressed.stat().st_size, 300_000)
+            self.assertEqual(media_kind(compressed, await verify(compressed, 300_000)), "audio")
+
     async def test_webm_is_delivered_as_playable_mp4(self):
         from mika_nexus.jobs import Worker
 
