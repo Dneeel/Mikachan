@@ -1,0 +1,3 @@
+# Live acceptance pending
+
+With an authorized staging bot and approved network, verify: start/help/command list; exactly two consent buttons; No deletes only bot prompt; Yes produces file; duplicate callbacks; unauthorized actor; `/music Radiohead` and follow-up text; source/type toggles and ten-result limit; each live provider's actual hits and failures; SoundCloud official/slowed distinction where actual uploads exist; collection selection; direct URL redirects; cancellation; public 48 MiB limit; local Bot API migration and large upload. Record timestamps, provider versions and sanitized URLs. No live provider was verified in the current workspace.

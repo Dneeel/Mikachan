@@ -1,0 +1,21 @@
+[Unit]
+Description=MIKA NEXUS private Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_USER
+WorkingDirectory=/opt/mika-nexus
+EnvironmentFile=/opt/mika-nexus/.env
+ExecStart=/opt/mika-nexus/.venv/bin/mika-nexus run
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/mika-nexus
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

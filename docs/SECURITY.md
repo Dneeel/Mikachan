@@ -1,0 +1,9 @@
+# Security and privacy
+
+- Startup requires a positive numeric owner ID, a token, and an allowlist of one to four distinct positive numeric IDs containing the owner. Private chats are the default; callbacks recheck owner, chat, prompt/session ID and expiry.
+- URL submission performs syntax checks and host classification without remote requests. No, expired, unauthorized, and repeated callbacks cannot create a job. Links in ordinary noncommand text are the only unsolicited processing trigger.
+- Fetch-time DNS checks reject private/mixed answers, but HTTP proxy resolution and yt-dlp's internally discovered redirects/media URLs can bypass the local DNS check. **The extractor and proxied direct downloader therefore still carry SSRF risk.** Run this bot under an unprivileged user with restrictive egress on a dedicated host/container before accepting untrusted users. Do not place it beside sensitive services without stronger network isolation.
+- Direct downloads are streamed with a 48 MiB public or 1900 MiB local limit. Local mode requires loopback URL and API credentials. Child processes use argument arrays and their own process group; cancellation targets the owned task.
+- `.env` is ignored by Git and must be 0600. No user token or provider secret should be logged. SQLite and job directories should be owned by the service user. No private account scraping or DRM bypass is intended.
+- Search result text is HTML-escaped. Catalog links are metadata, not approved download requests. A selected catalog result tells the user to submit its URL and approve it.
+- Remaining hardening before production: pin DNS to actual outgoing connection or enforce egress policy, validate extractor media URLs, validate file types with ffprobe, reserve disk space, test cancellation and real Bot API behavior, and audit dependencies against current advisories.

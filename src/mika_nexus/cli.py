@@ -1,0 +1,22 @@
+import argparse
+import asyncio
+import shutil
+from .config import Settings
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(prog="mika-nexus")
+    p.add_argument("command", choices=["run", "doctor"])
+    args = p.parse_args()
+    if args.command == "doctor":
+        for name in ("ffmpeg", "ffprobe", "yt-dlp", "deno"):
+            print(f"{name}: {shutil.which(name) or 'missing'}")
+        try:
+            s = Settings()
+            print(f"config: valid; mode={s.bot_api_mode}; users={len(s.allowlist)}")
+        except Exception:
+            print("config: invalid; check required values in .env.example")
+        print("provider status: unverified until live acceptance")
+        return
+    from .bot import App
+    asyncio.run(App(Settings()).run())
