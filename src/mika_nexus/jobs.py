@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import sys
 from functools import partial
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
@@ -28,7 +29,7 @@ from .config import Settings
 from .security import source, validate_dns, collection, clean_url
 from .store import Store
 from .media import groups, media_kind, verify
-from .catalog import _Meta, resolve_collection, resolve_track
+from .catalog import _Meta, recording_search_alias, resolve_collection, resolve_track
 from .matching import match_score
 from .search import Searcher
 from .podcasts import apple_podcast_feed, episodes, is_feed_url, resolve_episode_link
@@ -113,13 +114,13 @@ class Worker:
 
         message_id = self.store.progress_message(jid)
         labels = {
-            "Resolving": "🔎 در حال بررسی لینک…",
-            "Downloading": "⬇️ در حال دریافت رسانه…",
-            "Processing": "🎛 در حال آماده‌سازی فایل…",
-            "Uploading": "📤 در حال ارسال به تلگرام…",
+            "Resolving": "🔎 Checking the link…",
+            "Downloading": "⬇️ Downloading media…",
+            "Processing": "🎛 Preparing media…",
+            "Uploading": "📤 Sending to Telegram…",
         }
         label = labels.get(stage, stage)
-        keyboard = kb([[("لغو ✕", f"j:{jid}:cancel")]]) if active else None
+        keyboard = kb([[("Cancel ✕", f"j:{jid}:cancel")]]) if active else None
         try:
             if message_id is None:
                 message = await self.bot.send_message(chat, label, reply_markup=keyboard)
@@ -201,9 +202,9 @@ class Worker:
         if lyrics:
             extras.append(InlineKeyboardButton(text="📝 Lyrics", callback_data=f"j:{jid}:lyrics"))
         if details:
-            extras.append(InlineKeyboardButton(text="ℹ️ جزئیات", callback_data=f"j:{jid}:info"))
+            extras.append(InlineKeyboardButton(text="ℹ️ Details", callback_data=f"j:{jid}:info"))
         if transcript:
-            extras.append(InlineKeyboardButton(text="📄 متن اپیزود", callback_data=f"j:{jid}:transcribe"))
+            extras.append(InlineKeyboardButton(text="📄 Transcript", callback_data=f"j:{jid}:transcribe"))
         if extras:
             rows.append(extras)
         return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -514,7 +515,7 @@ class Worker:
                     sent_messages.append(sent)
                 if len(visuals) > 1 and not others:
                     await self.bot.send_message(
-                        chat, "🔗 لینک پست و جزئیات",
+                        chat, "🔗 Post link and details",
                         reply_markup=self._buttons(
                             jid, source_link, False, bool(context.get("description")), False
                         ),
@@ -569,7 +570,7 @@ class Worker:
                     else type(exc).__name__
                 )
                 self.store.transition(jid, current["state"], "FAILED", error=safe)
-                await self._progress(jid, chat, f"⚠️ دریافت انجام نشد\n{html.escape(safe)}", active=False)
+                await self._progress(jid, chat, f"⚠️ Download failed\n{html.escape(safe)}", active=False)
         finally:
             shutil.rmtree(job_dir, ignore_errors=True)
 
@@ -630,7 +631,7 @@ class Worker:
             except ValueError:
                 continue
             slug = urlsplit(target).path.strip("/").split("/")[-1].replace("-", " ")
-            title = str(entry.get("title") or entry.get("track") or slug or "مورد بدون عنوان")
+            title = str(entry.get("title") or entry.get("track") or slug or "Untitled")
             artist = str(entry.get("artist") or entry.get("uploader") or "")
             items.append({
                 "title": title[:100], "artist": artist[:100], "url": target,
@@ -794,7 +795,7 @@ class Worker:
             display = parser.data.get("og:title", "").split(" (@")[0] or display
             bio = parser.data.get("og:description", "") or bio
         if not avatar_url:
-            raise ValueError("اطلاعات عمومی این پروفایل در دسترس نیست")
+            raise ValueError("Public profile information is unavailable")
         avatar = await self._direct(avatar_url, directory, 8 * 1024 * 1024)
         avatar = (await self._prepare_media([avatar], 8 * 1024 * 1024))[0]
         context = {
@@ -805,9 +806,9 @@ class Worker:
         self.store.set_job_context(jid, context)
         markup = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🔗 Link", url=url),
-             InlineKeyboardButton(text="🖼 عکس اصلی", callback_data=f"j:{jid}:avatar")],
-            [InlineKeyboardButton(text="⬇️ آخرین پست", callback_data=f"j:{jid}:latest"),
-             InlineKeyboardButton(text="⭕ استوری‌ها", callback_data=f"j:{jid}:stories")],
+             InlineKeyboardButton(text="🖼 Original avatar", callback_data=f"j:{jid}:avatar")],
+            [InlineKeyboardButton(text="⬇️ Latest post", callback_data=f"j:{jid}:latest"),
+             InlineKeyboardButton(text="⭕ Stories", callback_data=f"j:{jid}:stories")],
         ])
         if not self.store.transition(jid, "RESOLVING", "DELIVERING"):
             return True
@@ -834,8 +835,11 @@ class Worker:
         from .catalog import CatalogTrack
 
         assert isinstance(track, CatalogTrack)
+        alias = await recording_search_alias(track)
+        core = re.split(r"[（(]", track.title, maxsplit=1)[0].strip(" -")
+        query = f"{core} {alias[1]}" if alias else f"{track.artist} {track.title}"
         hits, _ = await Searcher().search(
-            f"{track.artist} {track.title}".strip(),
+            query.strip(),
             {"track"},
             {"soundcloud", "ytmusic"},
         )
@@ -876,7 +880,7 @@ class Worker:
                 for file in directory.iterdir():
                     if file.is_file():
                         file.unlink()
-        raise ValueError("نسخهٔ کامل و منطبق با این آهنگ در منابع عمومی پیدا نشد")
+        raise ValueError("No complete public recording matched this track")
 
     async def _direct(
         self, url: str, directory: Path, max_bytes: int, stem: str = "artifact"
@@ -1252,8 +1256,6 @@ class Worker:
         self, url: str, directory: Path, max_bytes: int, mode: str = "auto"
     ) -> list[Path]:
         validate_dns(url)
-        if not shutil.which("yt-dlp"):
-            raise ValueError("yt-dlp is not installed")
         template = str(directory / "%(autonumber)02d.%(ext)s")
         audio_args = (
             ["--extract-audio", "--audio-format", "mp3", "--audio-quality", "0"]
@@ -1268,7 +1270,8 @@ class Worker:
                 "--merge-output-format", "mp4",
             ]
         proc = await asyncio.create_subprocess_exec(
-            "yt-dlp",
+            sys.executable,
+            "-m", "yt_dlp",
             "--playlist-end",
             "10",
             "--no-warnings",

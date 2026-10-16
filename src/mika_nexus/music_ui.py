@@ -1,5 +1,6 @@
 """Listening links and verified public lyric lookup for music search results."""
 
+import re
 from urllib.parse import quote
 
 import httpx
@@ -20,28 +21,59 @@ def listening_links(title: str, creator: str, source: str, url: str) -> list[tup
     return links
 
 
-async def verified_lyrics(title: str, creator: str) -> str | None:
-    """Return attributed lyrics only when the catalog title and artist agree."""
+def _plain_lyrics(value: str) -> str:
+    lines = [re.sub(r"^\[\d{1,2}:\d{2}(?:\.\d+)?\]\s*", "", line).strip()
+             for line in value.splitlines()]
+    return "\n".join(lines).strip()
+
+
+async def verified_lyrics(title: str, creator: str, duration: int | None = None) -> str | None:
+    """Prefer a complete, correctly attributed lyric over a short first search hit."""
     if not title.strip() or not creator.strip():
         return None
     async with httpx.AsyncClient(timeout=10) as client:
-        response = await client.get(
-            "https://lrclib.net/api/search",
-            params={"track_name": title, "artist_name": creator},
-            headers={"User-Agent": "MIKA-NEXUS/1.0 (lyrics lookup)"},
-        )
-        response.raise_for_status()
-    payload = response.json()
-    if not isinstance(payload, list):
-        return None
-    for item in payload[:10]:
-        if not isinstance(item, dict):
-            continue
-        matched_title = str(item.get("trackName") or "")
-        matched_artist = str(item.get("artistName") or "")
-        if match_score(title, creator, matched_title, matched_artist) < 0.85:
-            continue
-        text = item.get("plainLyrics") or item.get("syncedLyrics")
-        if isinstance(text, str) and text.strip():
-            return text.strip()
+        try:
+            response = await client.get(
+                "https://lrclib.net/api/search",
+                params={"track_name": title, "artist_name": creator},
+                headers={"User-Agent": "MIKA-NEXUS/1.0 (lyrics lookup)"},
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except (httpx.HTTPError, ValueError):
+            payload = []
+        candidates: list[tuple[int, str]] = []
+        if isinstance(payload, list):
+            for item in payload[:50]:
+                if not isinstance(item, dict):
+                    continue
+                matched_title = str(item.get("trackName") or "")
+                matched_artist = str(item.get("artistName") or "")
+                if match_score(title, creator, matched_title, matched_artist) < 0.85:
+                    continue
+                item_duration = item.get("duration")
+                if duration and isinstance(item_duration, (int, float)) and abs(duration - item_duration) > 15:
+                    continue
+                lyric = item.get("plainLyrics") or item.get("syncedLyrics")
+                if isinstance(lyric, str):
+                    plain = _plain_lyrics(lyric)
+                    lines = sum(bool(line.strip()) for line in plain.splitlines())
+                    if lines:
+                        candidates.append((lines, plain))
+        if candidates:
+            best_lines, best = max(candidates, key=lambda pair: (pair[0], len(pair[1])))
+            if best_lines >= 8:
+                return best
+        try:
+            response = await client.get(
+                f"https://api.lyrics.ovh/v1/{quote(creator, safe='')}/{quote(title, safe='')}"
+            )
+            response.raise_for_status()
+            lyric = response.json().get("lyrics")
+            if isinstance(lyric, str):
+                plain = _plain_lyrics(lyric)
+                if sum(bool(line.strip()) for line in plain.splitlines()) >= 8:
+                    return plain
+        except (httpx.HTTPError, ValueError, AttributeError):
+            pass
     return None

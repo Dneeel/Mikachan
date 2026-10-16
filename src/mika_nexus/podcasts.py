@@ -162,9 +162,9 @@ async def resolve_episode_link(url: str) -> dict[str, str | int] | None:
     if identifier:
         matches = [episode for episode in matches if str(episode.get("trackId")) == identifier]
     if castbox and len({str(x.get("episodeUrl")) for x in matches}) != 1:
-        raise ValueError("اپیزود Castbox در منابع عمومی یکتا و قابل‌تأیید نیست")
+        raise ValueError("Castbox episode identity could not be verified in public sources")
     if not matches:
-        raise ValueError("نسخهٔ عمومیِ منطبق با این اپیزود پیدا نشد")
+        raise ValueError("No matching public version of this episode was found")
     match = matches[0]
     return {
         "url": clean_url(str(match["episodeUrl"])),

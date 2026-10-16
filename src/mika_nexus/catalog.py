@@ -3,11 +3,13 @@
 from dataclasses import dataclass
 from html.parser import HTMLParser
 import json
+import re
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
 
 from .security import clean_url, source, validate_dns
+from .matching import tokens
 
 
 @dataclass(frozen=True)
@@ -18,6 +20,37 @@ class CatalogTrack:
     duration: int | None = None
     isrc: str | None = None
     cover: str = ""
+
+
+async def recording_search_alias(track: CatalogTrack) -> tuple[str, str] | None:
+    """Find an alternate published title/artist for non-Latin catalog metadata."""
+    if track.artist.isascii():
+        return None
+    core = re.split(r"[（(]", track.title, maxsplit=1)[0].strip(" -")
+    wanted = tokens(core)
+    if not wanted:
+        return None
+    async with httpx.AsyncClient(timeout=8) as client:
+        try:
+            response = await client.get(
+                "https://itunes.apple.com/search",
+                params={"term": track.artist, "entity": "song", "limit": 30},
+            )
+            response.raise_for_status()
+            results = response.json().get("results", [])
+        except (httpx.HTTPError, ValueError):
+            return None
+    for item in results:
+        title, artist = str(item.get("trackName") or ""), str(item.get("artistName") or "")
+        if not title or not artist or artist == track.artist:
+            continue
+        if len(wanted & tokens(title)) / len(wanted) < 0.7:
+            continue
+        item_duration = item.get("trackTimeMillis")
+        if track.duration and item_duration and abs(track.duration - int(item_duration) / 1000) > 6:
+            continue
+        return title, artist
+    return None
 
 
 def _spotify_art(entity: dict) -> str:

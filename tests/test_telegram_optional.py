@@ -157,7 +157,7 @@ class TelegramFlowTests(unittest.IsolatedAsyncioTestCase):
             )
             message = FakePrompt(SimpleNamespace(id=1, type="private"), 20)
             await app.callback(StaleCallback(f"s:{sid}:d:0:0", message))
-            self.assertIn("⬇️ دریافت", str(app.bot.edits[-1][1]["reply_markup"]))
+            self.assertIn("⬇️ Download", str(app.bot.edits[-1][1]["reply_markup"]))
             await app.callback(StaleCallback(f"s:{sid}:r:0:0", message))
             self.assertEqual(len(app.bot.sent), 1)
             self.assertEqual(app.store.jobs(1), [])

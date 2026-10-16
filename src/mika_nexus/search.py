@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import re
+import sys
 import unicodedata
 from dataclasses import asdict, dataclass
 from typing import Any
@@ -61,9 +62,16 @@ class Searcher:
         ]
         results: list[Hit] = []
         failures: dict[str, str] = {}
+        done, pending = await asyncio.wait([task for _, task in tasks], timeout=12)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
         for source, task in tasks:
             try:
-                hits = await asyncio.wait_for(task, timeout=12)
+                if task not in done:
+                    raise TimeoutError()
+                hits = task.result()
                 results.extend(h for h in hits if h.source == source and h.kind in kinds)
                 self.health[source] = "ok"
             except Exception as exc:
@@ -212,7 +220,8 @@ class Searcher:
         if "track" not in kinds:
             return []
         proc = await asyncio.create_subprocess_exec(
-            "yt-dlp",
+            sys.executable,
+            "-m", "yt_dlp",
             "--flat-playlist",
             "--dump-single-json",
             "--no-warnings",

@@ -46,29 +46,29 @@ def collection_view(
     rows: list[list[tuple[str, str]]] = []
     for index in range(page * 10, min((page + 1) * 10, len(items))):
         item = items[index]
-        name = str(item.get("title") or "مورد بدون عنوان")[:38]
+        name = str(item.get("title") or "Untitled")[:38]
         artist = str(item.get("artist") or "")[:22]
         rows.append([(f"{index + 1}. {name}{' · ' + artist if artist else ''}"[:64],
                       f"v:{cid}:q:{index}")])
     nav = []
     if page:
-        nav.append(("◀ قبلی", f"v:{cid}:p:{page - 1}"))
+        nav.append(("◀ Previous", f"v:{cid}:p:{page - 1}"))
     if (page + 1) * 10 < len(items):
-        nav.append(("بعدی ▶", f"v:{cid}:p:{page + 1}"))
+        nav.append(("Next ▶", f"v:{cid}:p:{page + 1}"))
     if nav:
         rows.append(nav)
-    rows.append([("⬇️ دانلود همه", f"v:{cid}:q:all")])
+    rows.append([("⬇️ Download all", f"v:{cid}:q:all")])
     markup = kb(rows)
     owner_url = str(context.get("owner_url") or "")
     source_url = str(context.get("source_url") or "")
     links = []
     if owner_url:
-        links.append(InlineKeyboardButton(text="👤 صاحب مجموعه", url=owner_url))
+        links.append(InlineKeyboardButton(text="👤 Creator", url=owner_url))
     if source_url:
         links.append(InlineKeyboardButton(text="🔗 Link", url=source_url))
     if links:
         markup.inline_keyboard.append(links)
-    text = f"📚 <b>{html.escape(title[:150])}</b>\n{len(items)} مورد · صفحه {page + 1}"
+    text = f"📚 <b>{html.escape(title[:150])}</b>\n{len(items)} items · Page {page + 1}"
     return text, markup
 
 
@@ -162,7 +162,7 @@ class App:
                     continue
                 label = source(url)
                 prompt = await m.reply(
-                    f"🔗 <b>{html.escape(label.title())}</b> · لینک {index + 1} از {len(urls)}\n{html.escape(url[:300])}\n\nدریافت شود؟",
+                    f"🔗 <b>{html.escape(label.title())}</b> · Link {index + 1} of {len(urls)}\n{html.escape(url[:300])}\n\nDownload this item?",
                     reply_markup=kb([[("✅ Yes", f"c:{cid}:y"), ("❌ No", f"c:{cid}:n")]]),
                 )
                 self.store.set_prompt(cid, prompt.message_id)
@@ -183,7 +183,7 @@ class App:
         arg = arg.strip()
         if cmd == "/start":
             await m.reply(
-                "✨ <b>MIKA NEXUS</b>\nلینک عمومی بفرست یا برای پیدا کردن موسیقی و پادکست جست‌وجو کن.",
+                "✨ <b>MIKA NEXUS</b>\nSend a public link or search for music and podcasts.",
                 reply_markup=kb(
                     [
                         [("🎵 Music", "m:music"), ("🎙 Podcast", "m:podcast")],
@@ -289,7 +289,7 @@ class App:
                 if narrowed:
                     kinds = narrowed
         sid = self.store.create_search(m.from_user.id, m.chat.id, query, kinds, sources)
-        msg = await m.reply("🔎 در حال جست‌وجو…")
+        msg = await m.reply("🔎 Searching…")
         self.store.set_search_message(sid, msg.message_id)
         await self.refresh_search(sid, m.from_user.id, m.chat.id)
 
@@ -323,7 +323,7 @@ class App:
         kinds, sources = set(json.loads(row["kinds"])), set(json.loads(row["sources"]))
         gen, page = row["generation"], row["page"]
         hits = self.store.results(sid, gen)
-        head = f"🔎 <b>{html.escape(row['query'])}</b> · صفحه {page + 1}"
+        head = f"🔎 <b>{html.escape(row['query'])}</b> · Page {page + 1}"
         buttons: list[list[tuple[str, str]]] = []
         if menu in ("types", "sources"):
             choices = KINDS if menu == "types" else SOURCES
@@ -347,7 +347,7 @@ class App:
             icon = "🎙️" if h["kind"] in {"podcast", "episode"} else "🎵"
             body = f"{icon} <b>{html.escape(h['title'])}</b>\n👤 {html.escape(h['creator'])}"
             if public_media_result(h):
-                buttons = [[("⬇️ دریافت", f"s:{sid}:r:{detail}:{gen}")]]
+                buttons = [[("⬇️ Download", f"s:{sid}:r:{detail}:{gen}")]]
             elif h["kind"] in {"album", "playlist"} and h["source"] in {
                 "spotify",
                 "apple",
@@ -388,8 +388,8 @@ class App:
                 )
             if kinds <= {"podcast", "episode"}:
                 buttons.append([
-                    ("🎙 برنامه‌ها", f"s:{sid}:quick:podcast"),
-                    ("🎧 قسمت‌ها", f"s:{sid}:quick:episode"),
+                    ("🎙 Shows", f"s:{sid}:quick:podcast"),
+                    ("🎧 Episodes", f"s:{sid}:quick:episode"),
                 ])
             buttons.append([("🧩 Types", f"s:{sid}:types"), ("🌐 Sources", f"s:{sid}:sources")])
             buttons.append([("◀ Previous", f"s:{sid}:prev"), ("Next ▶", f"s:{sid}:next")])
@@ -406,7 +406,7 @@ class App:
                 keyboard.inline_keyboard.insert(
                     -1,
                     [InlineKeyboardButton(
-                        text="📝 متن آهنگ", callback_data=f"s:{sid}:y:{detail}:{gen}"
+                        text="📝 Lyrics", callback_data=f"s:{sid}:y:{detail}:{gen}"
                     )],
                 )
                 keyboard.inline_keyboard.insert(
@@ -528,8 +528,8 @@ class App:
                         pass
             elif state == "ACCEPTED":
                 await q.message.edit_text(
-                    "⏳ درخواست ثبت شد؛ در حال آماده‌سازی…",
-                    reply_markup=kb([[("لغو ✕", f"j:{jid}:cancel")]]),
+                    "⏳ Preparing your download…",
+                    reply_markup=kb([[("Cancel ✕", f"j:{jid}:cancel")]]),
                 )
             elif state == "EXPIRED":
                 await q.message.edit_reply_markup(reply_markup=None)
@@ -556,15 +556,15 @@ class App:
                     [("🎬 480p", "480"), ("🎬 720p", "720"), ("🎵 MP3", "audio")]
                     if is_video else
                     [("🎵 MP3", "audio")] if target.get("kind") in {"track", "episode"}
-                    else [("⬇️ دریافت", "auto")]
+                    else [("⬇️ Download", "auto")]
                 )
                 markup = kb([
                     [(label, f"v:{cid}:s:{arg}:{mode}") for label, mode in quality_choices],
-                    [("◀ بازگشت", f"v:{cid}:p:{int(arg) // 10 if arg.isdigit() else 0}")],
+                    [("◀ Back", f"v:{cid}:p:{int(arg) // 10 if arg.isdigit() else 0}")],
                 ])
-                label = "همهٔ موارد" if arg == "all" else html.escape(str(target.get("title") or ""))
+                label = "All items" if arg == "all" else html.escape(str(target.get("title") or ""))
                 await q.message.edit_text(
-                    f"🎛 <b>{label}</b>\nکیفیت دریافت را انتخاب کن.", reply_markup=markup
+                    f"🎛 <b>{label}</b>\nChoose download quality.", reply_markup=markup
                 )
             elif action == "s" and len(parts) == 5:
                 mode = parts[4]
@@ -583,7 +583,7 @@ class App:
                 if created_jobs:
                     await self.bot.send_message(
                         q.message.chat.id,
-                        f"⏳ {len(created_jobs)} مورد به صف دریافت اضافه شد.",
+                        f"⏳ {len(created_jobs)} items added to the download queue.",
                     )
                 await self.render_collection(
                     cid, q.from_user.id, q.message.chat.id,
@@ -618,7 +618,7 @@ class App:
                         )
                     except (ValueError, TimeoutError, StopIteration):
                         await self.bot.send_message(
-                            q.message.chat.id, "آخرین پست عمومی این پروفایل در دسترس نیست."
+                            q.message.chat.id, "The latest public post is unavailable."
                         )
                         return
                     mode = "auto"
@@ -635,8 +635,8 @@ class App:
                     q.from_user.id, q.message.chat.id, target, mode, item_context
                 )
                 status = await self.bot.send_message(
-                    q.message.chat.id, "⏳ در حال بررسی رسانهٔ عمومی…",
-                    reply_markup=kb([[("لغو ✕", f"j:{jid}:cancel")]]),
+                    q.message.chat.id, "⏳ Checking public media…",
+                    reply_markup=kb([[("Cancel ✕", f"j:{jid}:cancel")]]),
                 )
                 self.store.bind_progress(jid, status.message_id)
                 return
@@ -646,14 +646,14 @@ class App:
                     return
                 context = self.store.job_context(parts[1])
                 if parts[2] == "transcribe":
-                    await self.bot.send_message(q.message.chat.id, "📄 تبدیل اپیزود به متن: به‌زودی")
+                    await self.bot.send_message(q.message.chat.id, "📄 Episode transcription: coming soon")
                 elif parts[2] == "info":
                     details = str(context.get("description") or "").strip()
                     if details:
                         for offset in range(0, min(len(details), 12000), 3500):
                             await self.bot.send_message(
                                 q.message.chat.id,
-                                ("ℹ️ <b>جزئیات</b>\n" if offset == 0 else "")
+                                ("ℹ️ <b>Details</b>\n" if offset == 0 else "")
                                 + html.escape(details[offset : offset + 3500]),
                             )
                 else:
@@ -661,6 +661,7 @@ class App:
                         lyric = await verified_lyrics(
                             str(context.get("title") or ""),
                             str(context.get("artist") or ""),
+                            int(context.get("duration") or 0) or None,
                         )
                     except Exception:
                         lyric = None
@@ -673,7 +674,7 @@ class App:
                             )
                     else:
                         await self.bot.send_message(
-                            q.message.chat.id, "متن تأییدشده‌ای برای این آهنگ پیدا نشد."
+                            q.message.chat.id, "Complete lyrics for this song were unavailable."
                         )
                 return
             if (
@@ -693,11 +694,11 @@ class App:
                     if q.message.document or q.message.video:
                         await q.message.edit_reply_markup(reply_markup=None)
                         status = await self.bot.send_message(
-                            q.message.chat.id, "🎵 در حال آماده‌سازی MP3…"
+                            q.message.chat.id, "🎵 Preparing MP3…"
                         )
                         self.store.bind_progress(jid, status.message_id)
                     else:
-                        await q.message.edit_text("🎵 در حال آماده‌سازی MP3…")
+                        await q.message.edit_text("🎵 Preparing MP3…")
                         self.store.bind_progress(jid, q.message.message_id)
             return
         if not data.startswith("s:"):
@@ -767,7 +768,10 @@ class App:
             if not hit or hit.get("kind") != "track":
                 return
             try:
-                lyric = await verified_lyrics(str(hit["title"]), str(hit["creator"]))
+                lyric = await verified_lyrics(
+                    str(hit["title"]), str(hit["creator"]),
+                    int(hit.get("duration") or 0) or None,
+                )
             except Exception:
                 lyric = None
             if lyric:
@@ -780,7 +784,7 @@ class App:
                     )
             else:
                 await self.bot.send_message(
-                    q.message.chat.id, "متن تأییدشده‌ای برای این نسخه پیدا نشد."
+                    q.message.chat.id, "Complete lyrics for this version were unavailable."
                 )
         elif (
             action == "l"

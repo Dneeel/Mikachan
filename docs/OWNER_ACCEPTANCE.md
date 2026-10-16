@@ -11,6 +11,9 @@ support from confirmed delivery in Telegram.
 | Profile card, avatar file, latest post, stories | Card and actions implemented; access varies by source; Instagram/TikTok public profile acceptance pending |
 | YouTube/Spotify/SoundCloud collection browsing, quality choice, ordered download all | Implemented; owner's SoundCloud set created a Telegram menu with three real track titles; Spotify 87-track collection probed; ordered full playlist delivery pending |
 | Spotify track identity, full duration, title/artist/cover | Owner's sample yielded a verified 220.296-second MP3 and one completed Telegram media receipt; cover visibility in the client remains unchecked |
+| New Japanese Spotify example `4MHVtf79JQ8VIzrkNwgQt4` | Reproduced failure: catalog artist is Japanese and the original federated query returned no candidates. Public Apple metadata supplies a romanized alias; a 294-second YouTube Music candidate matches the 293-second track. Live delivery pending. |
+| Full lyrics | The earlier four-line `Soldier Side` result was an incomplete first LRCLIB hit. Lookup now examines up to 50 candidates, checks track duration, prefers full versions, and tries lyrics.ovh if needed; a live lookup returned 39 lines. |
+| English interface and search latency | Static bot labels and messages translated to English; federated search now has one 12-second deadline. Source metadata and user-supplied text keep their original language. |
 | Apple/Spotify/Castbox podcast episode links | Exact public enclosure matching implemented; owner's Castbox sample completed Telegram delivery with one receipt and correct metadata; owner's Spotify and Apple samples resolved in metadata checks |
 | Podcast search ranking and full feed pagination | Implemented; Jafekri feed exposes 221 episodes; Castbox search is not implemented |
 | Podcast source Link, transcript placeholder, oversized audio compression | Implemented; large Telegram upload acceptance pending |
