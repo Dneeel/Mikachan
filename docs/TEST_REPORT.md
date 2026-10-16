@@ -13,11 +13,13 @@ Read-only checks on the supplied Freestyle VM found:
 - The owner's SoundCloud short playlist resolved to three public tracks. A flat
   yt-dlp listing omitted all three titles; full metadata extraction returned
   their actual titles, uploaders, URLs, and durations. The browser now requests
-  full SoundCloud metadata and resolves short URLs before classifying them.
+  full SoundCloud metadata, resolves short URLs, and recognizes `/sets/` as a
+  collection.
 - The sample Spotify track resolves as **Soldier Side — System Of A Down**,
   duration 220 seconds, with cover art. YouTube Music returned a matching public
-  221-second recording; actual audio download and Telegram delivery require
-  separate acceptance checks.
+  221-second recording. The deployed strict matcher downloaded a 7,867,053-byte
+  MP3; ffprobe measured 220.296 seconds. Telegram delivery requires a separate
+  acceptance check.
 - The sample Spotify playlist embed exposed 87 tracks with titles and artists.
   The Jafekri public RSS feed exposed 221 episodes. The bot now browses up to
   300 items with ten-per-page controls.

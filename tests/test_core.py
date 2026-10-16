@@ -24,6 +24,7 @@ class SecurityTests(unittest.TestCase):
         self.assertEqual(source(clean_url("https://x.com/user/status/1")), "twitter")
         self.assertFalse(collection("https://youtu.be/abc"))
         self.assertTrue(collection("https://youtube.com/playlist?list=abc"))
+        self.assertTrue(collection("https://soundcloud.com/artist/sets/album-name"))
 
     def test_dns_mixed(self):
         answers = [(2, 1, 6, "", ("8.8.8.8", 443)), (2, 1, 6, "", ("10.0.0.1", 443))]

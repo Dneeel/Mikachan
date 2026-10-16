@@ -102,6 +102,8 @@ def collection(url: str) -> bool:
         return True
     if provider == "soundcloud" and len(parts) == 1:
         return True
+    if provider == "soundcloud" and "/sets/" in path:
+        return True
     if provider == "pinterest" and len(parts) == 1 and p.hostname != "pin.it":
         return True
     return (

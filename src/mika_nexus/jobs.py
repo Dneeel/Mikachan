@@ -494,8 +494,13 @@ class Worker:
                     if kind == "audio":
                         title = str(context.get("title") or Path(urlsplit(url).path).stem or "Audio")[:64]
                         artist = str(context.get("artist") or "")[:64]
+                        audio_name = re.sub(
+                            r"[\\/\x00-\x1f:*?\"<>|]", "_",
+                            f"{artist} - {title}" if artist else title,
+                        ).strip(" ._")[:150] or "Audio"
                         sent = await self.bot.send_audio(
-                            chat, FSInputFile(path), title=title, performer=artist or None,
+                            chat, FSInputFile(path, filename=audio_name + ".mp3"),
+                            title=title, performer=artist or None,
                             thumbnail=FSInputFile(cover) if cover else None,
                             caption=caption if not sent_messages else None,
                             reply_markup=markup,
