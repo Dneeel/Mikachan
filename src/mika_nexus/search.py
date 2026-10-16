@@ -3,6 +3,8 @@
 import asyncio
 import json
 import os
+import re
+import unicodedata
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -10,6 +12,20 @@ import httpx
 
 KINDS = ("track", "album", "playlist", "artist", "podcast", "episode")
 SOURCES = ("apple", "deezer", "soundcloud", "ytmusic", "spotify", "apple_podcasts")
+
+
+def _terms(value: str) -> set[str]:
+    value = unicodedata.normalize("NFKC", value).casefold().replace("\u200c", " ")
+    return set(re.findall(r"[^\W_]+", value, flags=re.UNICODE))
+
+
+def _relevance(query: str, hit: "Hit") -> float:
+    wanted = _terms(query)
+    title = _terms(hit.title)
+    combined = title | _terms(hit.creator)
+    coverage = len(wanted & combined) / len(wanted) if wanted else 0.0
+    exact = 0.5 if wanted == title else 0.0
+    return coverage + exact
 
 
 @dataclass(frozen=True)
@@ -70,6 +86,28 @@ class Searcher:
             for s in SOURCES:
                 if buckets[s]:
                     ordered.append(buckets[s].pop(0))
+        if kinds <= {"podcast", "episode"}:
+            preference = {"apple_podcasts": 0.15, "spotify": 0.12, "ytmusic": 0.04}
+            ordered.sort(
+                key=lambda h: (
+                    _relevance(query, h),
+                    0.25 if h.kind == "podcast" else 0.0,
+                    preference.get(h.source, 0.0),
+                ),
+                reverse=True,
+            )
+            deduped: list[Hit] = []
+            program_keys: set[tuple[str, str]] = set()
+            for hit in ordered:
+                program_key = (" ".join(sorted(_terms(hit.title))), " ".join(sorted(_terms(hit.creator))))
+                if hit.kind == "podcast" and program_key in program_keys:
+                    continue
+                if hit.kind == "podcast":
+                    program_keys.add(program_key)
+                deduped.append(hit)
+            ordered = deduped
+        else:
+            ordered.sort(key=lambda h: _relevance(query, h), reverse=True)
         return ordered[:50], failures
 
     async def _one(self, source: str, query: str, kinds: set[str]) -> list[Hit]:
@@ -126,18 +164,14 @@ class Searcher:
                 r.raise_for_status()
                 for x in r.json().get("results", []):
                     title = x.get("trackName") or x.get("collectionName")
-                    url = (
-                        x.get("episodeUrl")
-                        if kind == "episode" and x.get("episodeUrl")
-                        else x.get("trackViewUrl") or x.get("collectionViewUrl")
-                    )
+                    url = x.get("trackViewUrl") or x.get("collectionViewUrl")
                     if title and url:
                         out.append(
                             Hit(
                                 "apple_podcasts",
                                 kind,
                                 title,
-                                x.get("artistName", ""),
+                                x.get("artistName") or x.get("collectionName") or "",
                                 url,
                                 str(x.get("trackId") or x.get("collectionId")),
                                 kind == "episode" and bool(x.get("episodeUrl")),

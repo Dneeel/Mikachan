@@ -70,5 +70,5 @@ class CatalogTests(unittest.IsolatedAsyncioTestCase):
         ):
             items, title = await resolve_collection("https://open.spotify.com/album/abc")
         self.assertEqual(title, "Album")
-        self.assertEqual(len(items), 30)
+        self.assertEqual(len(items), 50)
         self.assertEqual(items[6]["url"], "https://open.spotify.com/track/6")

@@ -57,6 +57,10 @@ CREATE TABLE IF NOT EXISTS cache_audio (
  key TEXT PRIMARY KEY, has_audio INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS job_modes (
  job_id TEXT PRIMARY KEY, mode TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS job_context (
+ job_id TEXT PRIMARY KEY, payload TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS collection_context (
+ collection_id TEXT PRIMARY KEY, payload TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS derivatives (
  parent_id TEXT NOT NULL, mode TEXT NOT NULL, child_id TEXT NOT NULL,
  PRIMARY KEY(parent_id,mode));
@@ -212,14 +216,30 @@ class Store:
             self.db.execute("ROLLBACK")
             raise
 
-    def create_job(self, user: int, chat: int, url: str) -> str:
+    def create_job(
+        self, user: int, chat: int, url: str,
+        mode: str = "auto", context: dict[str, Any] | None = None,
+    ) -> str:
         jid = secrets.token_urlsafe(9)
         now = time.time()
         self.db.execute(
             "INSERT INTO jobs VALUES (?,?,?,?,?,?,?,?,?,NULL)",
             (jid, user, chat, url, "QUEUED", now, now, None, None),
         )
+        if mode != "auto":
+            self.db.execute("INSERT INTO job_modes VALUES (?,?)", (jid, mode))
+        if context:
+            self.set_job_context(jid, context)
         return jid
+
+    def job_context(self, jid: str) -> dict[str, Any]:
+        row = self.db.execute("SELECT payload FROM job_context WHERE job_id=?", (jid,)).fetchone()
+        return json.loads(row[0]) if row else {}
+
+    def set_job_context(self, jid: str, context: dict[str, Any]) -> None:
+        self.db.execute(
+            "INSERT OR REPLACE INTO job_context VALUES (?,?)", (jid, json.dumps(context))
+        )
 
     def job_mode(self, jid: str) -> str:
         row = self.db.execute("SELECT mode FROM job_modes WHERE job_id=?", (jid,)).fetchone()
@@ -254,8 +274,10 @@ class Store:
                 if existing:
                     result = (str(existing[0]), False)
                 else:
-                    jid = self.create_job(user, chat, str(parent["url"]))
-                    self.db.execute("INSERT INTO job_modes VALUES (?,?)", (jid, mode))
+                    jid = self.create_job(
+                        user, chat, str(parent["url"]), mode,
+                        self.job_context(parent_id),
+                    )
                     self.db.execute(
                         "INSERT INTO derivatives VALUES (?,?,?)", (parent_id, mode, jid)
                     )
@@ -267,17 +289,28 @@ class Store:
             raise
 
     def create_collection(
-        self, user: int, chat: int, title: str, items: list[dict[str, str]]
+        self, user: int, chat: int, title: str, items: list[dict[str, str]],
+        context: dict[str, Any] | None = None,
     ) -> str:
         cid = secrets.token_urlsafe(9)
         self.db.execute(
             "INSERT INTO collections VALUES (?,?,?,NULL,?,?,?)",
             (cid, user, chat, title[:200], json.dumps(items), time.time() + 1800),
         )
+        if context:
+            self.db.execute(
+                "INSERT INTO collection_context VALUES (?,?)", (cid, json.dumps(context))
+            )
         return cid
 
+    def collection_context(self, cid: str) -> dict[str, Any]:
+        row = self.db.execute(
+            "SELECT payload FROM collection_context WHERE collection_id=?", (cid,)
+        ).fetchone()
+        return json.loads(row[0]) if row else {}
+
     def select_collection(
-        self, cid: str, user: int, chat: int, index: int
+        self, cid: str, user: int, chat: int, index: int, mode: str = "auto",
     ) -> tuple[str | None, bool]:
         self.db.execute("BEGIN IMMEDIATE")
         try:
@@ -294,7 +327,8 @@ class Store:
                 if existing:
                     result = (str(existing[0]), False)
                 else:
-                    jid = self.create_job(user, chat, items[index]["url"])
+                    item = items[index]
+                    jid = self.create_job(user, chat, item["url"], mode, item)
                     self.db.execute(
                         "INSERT INTO collection_selections VALUES (?,?,?)", (cid, index, jid)
                     )

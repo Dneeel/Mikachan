@@ -83,7 +83,7 @@ def collection(url: str) -> bool:
     p = urlsplit(url)
     path = p.path.lower()
     if p.hostname == "podcasts.apple.com":
-        return True
+        return "i=" not in p.query
     if path.rstrip("/").endswith((".xml", ".rss", "/feed", "/rss")):
         return True
     if p.hostname == "music.apple.com" and "i=" in p.query:

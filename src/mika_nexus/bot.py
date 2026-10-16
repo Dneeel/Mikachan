@@ -4,6 +4,7 @@ import asyncio
 import html
 import json
 import time
+from collections.abc import Mapping, Sequence
 
 from aiogram import Bot, Dispatcher, Router
 from aiogram.client.default import DefaultBotProperties
@@ -37,6 +38,40 @@ def kb(rows: list[list[tuple[str, str]]]) -> InlineKeyboardMarkup:
     )
 
 
+def collection_view(
+    cid: str, title: str, items: Sequence[Mapping[str, object]], page: int,
+    context: dict[str, object],
+) -> tuple[str, InlineKeyboardMarkup]:
+    page = max(0, min(page, (len(items) - 1) // 10))
+    rows: list[list[tuple[str, str]]] = []
+    for index in range(page * 10, min((page + 1) * 10, len(items))):
+        item = items[index]
+        name = str(item.get("title") or "مورد بدون عنوان")[:38]
+        artist = str(item.get("artist") or "")[:22]
+        rows.append([(f"{index + 1}. {name}{' · ' + artist if artist else ''}"[:64],
+                      f"v:{cid}:q:{index}")])
+    nav = []
+    if page:
+        nav.append(("◀ قبلی", f"v:{cid}:p:{page - 1}"))
+    if (page + 1) * 10 < len(items):
+        nav.append(("بعدی ▶", f"v:{cid}:p:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([("⬇️ دانلود همه", f"v:{cid}:q:all")])
+    markup = kb(rows)
+    owner_url = str(context.get("owner_url") or "")
+    source_url = str(context.get("source_url") or "")
+    links = []
+    if owner_url:
+        links.append(InlineKeyboardButton(text="👤 صاحب مجموعه", url=owner_url))
+    if source_url:
+        links.append(InlineKeyboardButton(text="🔗 Link", url=source_url))
+    if links:
+        markup.inline_keyboard.append(links)
+    text = f"📚 <b>{html.escape(title[:150])}</b>\n{len(items)} مورد · صفحه {page + 1}"
+    return text, markup
+
+
 async def acknowledge(q: CallbackQuery, message: str | None = None) -> None:
     try:
         await q.answer(message)
@@ -54,6 +89,9 @@ def public_media_result(hit: dict[str, object]) -> bool:
         ("ytmusic", "track"),
         ("ytmusic", "episode"),
         ("apple_podcasts", "episode"),
+        ("spotify", "track"),
+        ("apple", "track"),
+        ("deezer", "track"),
     }
 
 
@@ -156,13 +194,14 @@ class App:
             )
         elif cmd == "/help":
             await m.reply(HELP_TEXT)
-        elif cmd in ("/search", "/music", "/podcast"):
+        elif cmd in ("/search", "/music", "/podcast", "/pod"):
+            mode = "podcast" if cmd == "/pod" else cmd[1:]
             if arg:
                 if len(arg) <= 120:
-                    await self.begin_search(m, arg, cmd[1:])
+                    await self.begin_search(m, arg, mode)
             else:
                 self.store.prompt_query(
-                    m.from_user.id, m.chat.id, cmd[1:], self.settings.search_session_ttl_seconds
+                    m.from_user.id, m.chat.id, mode, self.settings.search_session_ttl_seconds
                 )
                 await m.reply("Send your search query in the next 10 minutes.")
         elif cmd in ("/twitter", "/instagram", "/tiktok", "/youtube"):
@@ -242,7 +281,13 @@ class App:
         sources = {"apple", "apple_podcasts", "deezer", "soundcloud", "ytmusic"}
         pref = self.store.preferences(m.from_user.id)
         if pref:
-            kinds, sources = pref
+            saved_kinds, sources = pref
+            if mode == "search":
+                kinds = saved_kinds
+            else:
+                narrowed = kinds & saved_kinds
+                if narrowed:
+                    kinds = narrowed
         sid = self.store.create_search(m.from_user.id, m.chat.id, query, kinds, sources)
         msg = await m.reply("🔎 در حال جست‌وجو…")
         self.store.set_search_message(sid, msg.message_id)
@@ -299,13 +344,10 @@ class App:
             body = "Choose types:" if menu == "types" else "Choose sources:"
         elif detail is not None and 0 <= detail < len(hits):
             h = hits[detail]
-            body = f"🎵 {html.escape(h['source'])} · {html.escape(h['kind'])}\n<b>{html.escape(h['title'])}</b>\n👤 {html.escape(h['creator'])}\n{html.escape(h['url'][:700])}"
+            icon = "🎙️" if h["kind"] in {"podcast", "episode"} else "🎵"
+            body = f"{icon} <b>{html.escape(h['title'])}</b>\n👤 {html.escape(h['creator'])}"
             if public_media_result(h):
-                body += "\n\nPublic media may be available. Requesting it opens a separate Yes/No confirmation."
-                buttons = [[("Request public media", f"s:{sid}:r:{detail}:{gen}")]]
-            elif h["kind"] == "track" and h["source"] in {"spotify", "apple", "deezer"}:
-                body += "\n\nFind public recordings matching this catalog track."
-                buttons = [[("Find audio matches", f"s:{sid}:f:{detail}:{gen}")]]
+                buttons = [[("⬇️ دریافت", f"s:{sid}:r:{detail}:{gen}")]]
             elif h["kind"] in {"album", "playlist"} and h["source"] in {
                 "spotify",
                 "apple",
@@ -344,11 +386,21 @@ class App:
                         for i in range(offset, min(offset + 5, len(current)))
                     ]
                 )
+            if kinds <= {"podcast", "episode"}:
+                buttons.append([
+                    ("🎙 برنامه‌ها", f"s:{sid}:quick:podcast"),
+                    ("🎧 قسمت‌ها", f"s:{sid}:quick:episode"),
+                ])
             buttons.append([("🧩 Types", f"s:{sid}:types"), ("🌐 Sources", f"s:{sid}:sources")])
             buttons.append([("◀ Previous", f"s:{sid}:prev"), ("Next ▶", f"s:{sid}:next")])
             buttons.append([("🔄 Refresh", f"s:{sid}:refresh"), ("✖ Close", f"s:{sid}:close")])
         try:
             keyboard = kb(buttons)
+            if detail is not None and 0 <= detail < len(hits):
+                keyboard.inline_keyboard.insert(
+                    -1,
+                    [InlineKeyboardButton(text="🔗 Link", url=str(hits[detail]["url"]))],
+                )
             if detail is not None and 0 <= detail < len(hits) and hits[detail]["kind"] == "track":
                 hit = hits[detail]
                 keyboard.inline_keyboard.insert(
@@ -380,24 +432,19 @@ class App:
         if not row:
             return
         items = json.loads(row["items"])
-        page = max(0, min(page, (len(items) - 1) // 10))
-        buttons = [
-            [(f"{i + 1}. {items[i]['title'][:45]}", f"v:{cid}:d:{i}")]
-            for i in range(page * 10, min((page + 1) * 10, len(items)))
-        ]
-        nav = []
-        if page:
-            nav.append(("◀ Previous", f"v:{cid}:p:{page - 1}"))
-        if (page + 1) * 10 < len(items):
-            nav.append(("Next ▶", f"v:{cid}:p:{page + 1}"))
-        if nav:
-            buttons.append(nav)
-        await self.bot.edit_message_text(
-            f"MIKA NEXUS · {html.escape(row['title'])}\nSelect one item:",
-            chat_id=chat,
-            message_id=row["message_id"],
-            reply_markup=kb(buttons),
+        body, markup = collection_view(
+            cid, str(row["title"]), items, page, self.store.collection_context(cid)
         )
+        try:
+            await self.bot.edit_message_text(
+                body,
+                chat_id=chat,
+                message_id=row["message_id"],
+                reply_markup=markup,
+            )
+        except TelegramBadRequest as exc:
+            if "message is not modified" not in str(exc).lower():
+                raise
 
     async def callback(self, q: CallbackQuery) -> None:
         if (
@@ -490,33 +537,145 @@ class App:
         if data.startswith("v:"):
             await acknowledge(q)
             parts = data.split(":")
-            if len(parts) != 4:
+            if len(parts) not in {4, 5}:
                 return
-            cid, action, arg = parts[1:]
+            cid, action, arg = parts[1:4]
             row = self.store.collection(cid, q.from_user.id, q.message.chat.id)
             if not row or row["message_id"] != q.message.message_id:
                 return
             items = json.loads(row["items"])
-            if not arg.isdigit():
-                return
-            number = int(arg)
-            if action == "p":
+            if action == "p" and arg.isdigit():
+                number = int(arg)
                 await self.render_collection(cid, q.from_user.id, q.message.chat.id, number)
-            elif action == "d" and 0 <= number < len(items):
-                jid, created = self.store.select_collection(
-                    cid, q.from_user.id, q.message.chat.id, number
+            elif action == "q" and (arg == "all" or arg.isdigit() and int(arg) < len(items)):
+                context = self.store.collection_context(cid)
+                provider = str(context.get("kind") or "")
+                target = items[int(arg)] if arg.isdigit() else items[0]
+                is_video = provider == "youtube" or target.get("kind") == "video"
+                quality_choices = (
+                    [("🎬 480p", "480"), ("🎬 720p", "720"), ("🎵 MP3", "audio")]
+                    if is_video else
+                    [("🎵 MP3", "audio")] if target.get("kind") in {"track", "episode"}
+                    else [("⬇️ دریافت", "auto")]
                 )
-                if created and jid is not None:
-                    status = await self.bot.send_message(
-                        q.message.chat.id,
-                        "⏳ مورد انتخابی در صف دریافت است…",
-                        reply_markup=kb([[("Cancel", f"j:{jid}:cancel")]]),
+                markup = kb([
+                    [(label, f"v:{cid}:s:{arg}:{mode}") for label, mode in quality_choices],
+                    [("◀ بازگشت", f"v:{cid}:p:{int(arg) // 10 if arg.isdigit() else 0}")],
+                ])
+                label = "همهٔ موارد" if arg == "all" else html.escape(str(target.get("title") or ""))
+                await q.message.edit_text(
+                    f"🎛 <b>{label}</b>\nکیفیت دریافت را انتخاب کن.", reply_markup=markup
+                )
+            elif action == "s" and len(parts) == 5:
+                mode = parts[4]
+                if mode not in {"auto", "audio", "480", "720"}:
+                    return
+                indexes = range(len(items)) if arg == "all" else ([int(arg)] if arg.isdigit() else [])
+                created_jobs = []
+                for number in indexes:
+                    if not 0 <= number < len(items):
+                        continue
+                    jid, created = self.store.select_collection(
+                        cid, q.from_user.id, q.message.chat.id, number, mode
                     )
-                    self.store.bind_progress(jid, status.message_id)
+                    if created and jid:
+                        created_jobs.append(jid)
+                if created_jobs:
+                    await self.bot.send_message(
+                        q.message.chat.id,
+                        f"⏳ {len(created_jobs)} مورد به صف دریافت اضافه شد.",
+                    )
+                await self.render_collection(
+                    cid, q.from_user.id, q.message.chat.id,
+                    int(arg) // 10 if arg.isdigit() else 0,
+                )
             return
         if data.startswith("j:"):
             await acknowledge(q)
             parts = data.split(":")
+            if len(parts) == 3 and parts[2] in {"avatar", "latest", "stories"}:
+                job = self.store.job(parts[1])
+                if not job or job["user_id"] != q.from_user.id or job["chat_id"] != q.message.chat.id:
+                    return
+                context = self.store.job_context(parts[1])
+                if context.get("kind") != "profile" or not self.store.rate(q.from_user.id, "links", 12):
+                    return
+                profile_url = str(context.get("profile_url") or "")
+                if parts[2] == "avatar":
+                    target = clean_url(str(context.get("avatar_url") or ""))
+                    mode = "document"
+                    item_context = {
+                        "kind": "profile_avatar", "source_url": profile_url,
+                        "title": context.get("title"), "artist": context.get("artist"),
+                    }
+                elif parts[2] == "latest":
+                    try:
+                        items, _ = await self.worker._browse_profile_gallery(profile_url)
+                        target = next(
+                            str(x["url"]) for x in items
+                            if "/video/" in x["url"] or "/photo/" in x["url"]
+                            or "/p/" in x["url"] or "/status/" in x["url"]
+                        )
+                    except (ValueError, TimeoutError, StopIteration):
+                        await self.bot.send_message(
+                            q.message.chat.id, "آخرین پست عمومی این پروفایل در دسترس نیست."
+                        )
+                        return
+                    mode = "auto"
+                    item_context = {"source_url": target, "kind": "post"}
+                else:
+                    username = str(context.get("artist") or "")
+                    if source(profile_url) == "instagram":
+                        target = f"https://www.instagram.com/stories/{username}/"
+                    else:
+                        target = f"https://www.tiktok.com/@{username}/stories"
+                    mode = "auto"
+                    item_context = {"source_url": target, "kind": "story"}
+                jid = self.store.create_job(
+                    q.from_user.id, q.message.chat.id, target, mode, item_context
+                )
+                status = await self.bot.send_message(
+                    q.message.chat.id, "⏳ در حال بررسی رسانهٔ عمومی…",
+                    reply_markup=kb([[("لغو ✕", f"j:{jid}:cancel")]]),
+                )
+                self.store.bind_progress(jid, status.message_id)
+                return
+            if len(parts) == 3 and parts[2] in {"info", "lyrics", "transcribe"}:
+                job = self.store.job(parts[1])
+                if not job or job["user_id"] != q.from_user.id or job["chat_id"] != q.message.chat.id:
+                    return
+                context = self.store.job_context(parts[1])
+                if parts[2] == "transcribe":
+                    await self.bot.send_message(q.message.chat.id, "📄 تبدیل اپیزود به متن: به‌زودی")
+                elif parts[2] == "info":
+                    details = str(context.get("description") or "").strip()
+                    if details:
+                        for offset in range(0, min(len(details), 12000), 3500):
+                            await self.bot.send_message(
+                                q.message.chat.id,
+                                ("ℹ️ <b>جزئیات</b>\n" if offset == 0 else "")
+                                + html.escape(details[offset : offset + 3500]),
+                            )
+                else:
+                    try:
+                        lyric = await verified_lyrics(
+                            str(context.get("title") or ""),
+                            str(context.get("artist") or ""),
+                        )
+                    except Exception:
+                        lyric = None
+                    if lyric:
+                        for offset in range(0, min(len(lyric), 12000), 3500):
+                            await self.bot.send_message(
+                                q.message.chat.id,
+                                ("📝 <b>Lyrics</b>\n" if offset == 0 else "")
+                                + html.escape(lyric[offset : offset + 3500]),
+                            )
+                    else:
+                        await self.bot.send_message(
+                            q.message.chat.id, "متن تأییدشده‌ای برای این آهنگ پیدا نشد."
+                        )
+                return
             if (
                 len(parts) == 3
                 and parts[2] == "cancel"
@@ -584,6 +743,10 @@ class App:
             await self.render_search(
                 sid, q.from_user.id, q.message.chat.id, menu="types" if action == "k" else "sources"
             )
+        elif action == "quick" and len(parts) == 4 and parts[3] in {"podcast", "episode"}:
+            chosen = {parts[3]} if kinds != {parts[3]} else {"podcast", "episode"}
+            self.store.update_search(sid, chosen, sources)
+            await self.refresh_search(sid, q.from_user.id, q.message.chat.id)
         elif action in ("types", "sources"):
             await self.render_search(sid, q.from_user.id, q.message.chat.id, menu=action)
         elif (
@@ -637,7 +800,11 @@ class App:
             if not items:
                 await self.bot.send_message(q.message.chat.id, "No public collection items found.")
                 return
-            cid = self.store.create_collection(q.from_user.id, q.message.chat.id, title, items)
+            cid = self.store.create_collection(
+                q.from_user.id, q.message.chat.id, title, items,
+                {"source_url": str(hit["url"]), "kind": str(hit["source"]),
+                 "owner_url": str(items[0].get("owner_url") or "")},
+            )
             prompt = await self.bot.send_message(q.message.chat.id, "Loading collection…")
             self.store.db.execute(
                 "UPDATE collections SET message_id=? WHERE id=?", (prompt.message_id, cid)
@@ -748,6 +915,7 @@ class App:
                     ("search", "Search music and podcasts"),
                     ("music", "Search music"),
                     ("podcast", "Search podcasts"),
+                    ("pod", "Search podcasts"),
                     ("twitter", "Twitter link help"),
                     ("instagram", "Instagram link help"),
                     ("tiktok", "TikTok link help"),

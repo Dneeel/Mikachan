@@ -1,5 +1,39 @@
 # Test report — 2026-10-16
 
+## Latest user report investigation
+
+The 23-item owner report prompted changes to native Telegram delivery, metadata,
+collection browsing, direct episode matching, and search ranking. Local Ruff,
+mypy, and 27 automated tests passed before deployment. A synthetic VP9 WebM
+converted to H.264 MP4 and passed ffprobe. These tests do not establish that
+every third-party source is anonymously accessible.
+
+Read-only checks on the supplied Freestyle VM found:
+
+- The owner's SoundCloud short playlist resolved to three public tracks. A flat
+  yt-dlp listing omitted all three titles; full metadata extraction returned
+  their actual titles, uploaders, URLs, and durations. The browser now requests
+  full SoundCloud metadata and resolves short URLs before classifying them.
+- The sample Spotify track resolves as **Soldier Side — System Of A Down**,
+  duration 220 seconds, with cover art. YouTube Music returned a matching public
+  221-second recording; actual audio download and Telegram delivery require
+  separate acceptance checks.
+- The sample Spotify playlist embed exposed 87 tracks with titles and artists.
+  The Jafekri public RSS feed exposed 221 episodes. The bot now browses up to
+  300 items with ten-per-page controls.
+- The supplied Instagram story requires login according to yt-dlp. The supplied
+  Instagram carousel also failed anonymous yt-dlp extraction. Neither is
+  claimed fixed.
+- The supplied Pornhub URL returns HTTP 410 Gone at source. It cannot verify a
+  working adapter; a live public sample is required for that claim.
+- A TikTok music-page extractor is currently unsupported upstream; music from
+  photo posts is handled separately when the public post API exposes it.
+
+The VM should be paused after final deployment to preserve the owner's free
+quota. A paused VM means the Telegram bot is offline until resumed.
+
+## Previous baseline
+
 Executed on the supplied Freestyle Ubuntu 24.04 VM in `/opt/mika-nexus`:
 
 - Locked dependencies include `yt-dlp==2026.8.19`, `gallery-dl==1.32.16`, `yt-dlp-ejs==0.8.0`, and `deno==2.9.7`. Ruff, mypy and **26 automated tests** pass.

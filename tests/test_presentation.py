@@ -13,7 +13,7 @@ def test_public_post_caption_survives(tmp_path):
     caption, overflow = Worker._caption("https://example.org/post/1", tmp_path)
     assert "متن اصلی پست &amp; عکس‌ها" in caption
     assert "Creator" in caption
-    assert "https://example.org/post/1" in caption
+    assert "https://example.org/post/1" not in caption
     assert overflow == ""
 
 

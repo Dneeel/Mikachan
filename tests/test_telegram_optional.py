@@ -157,11 +157,11 @@ class TelegramFlowTests(unittest.IsolatedAsyncioTestCase):
             )
             message = FakePrompt(SimpleNamespace(id=1, type="private"), 20)
             await app.callback(StaleCallback(f"s:{sid}:d:0:0", message))
-            self.assertIn("Request public media", str(app.bot.edits[-1][1]["reply_markup"]))
+            self.assertIn("⬇️ دریافت", str(app.bot.edits[-1][1]["reply_markup"]))
             await app.callback(StaleCallback(f"s:{sid}:r:0:0", message))
             self.assertEqual(len(app.bot.sent), 1)
             self.assertEqual(app.store.jobs(1), [])
-            self.assertFalse(public_media_result({"source": "spotify", "kind": "track"}))
+            self.assertTrue(public_media_result({"source": "spotify", "kind": "track"}))
 
     async def test_consent_and_silent_text(self):
         with tempfile.TemporaryDirectory() as d:

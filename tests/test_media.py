@@ -4,7 +4,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
-from mika_nexus.media import groups
+from mika_nexus.media import groups, media_kind, verify
 
 
 class GalleryTests(unittest.TestCase):
@@ -20,6 +20,29 @@ class GalleryTests(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg required")
 class Mp3Tests(unittest.IsolatedAsyncioTestCase):
+    async def test_webm_is_delivered_as_playable_mp4(self):
+        from mika_nexus.jobs import Worker
+
+        with tempfile.TemporaryDirectory() as d:
+            original = Path(d) / "clip.webm"
+            subprocess.run(
+                ["ffmpeg", "-v", "error", "-f", "lavfi", "-i",
+                 "testsrc2=size=320x240:rate=10:duration=1", "-c:v", "libvpx-vp9",
+                 "-y", str(original)], check=True,
+            )
+            converted = (await Worker._prepare_media(
+                object.__new__(Worker), [original], 2_000_000,
+            ))[0]
+            self.assertEqual(converted.suffix, ".mp4")
+            self.assertFalse(original.exists())
+            self.assertEqual(media_kind(converted, await verify(converted, 2_000_000)), "video")
+            codec = subprocess.run(
+                ["ffprobe", "-v", "error", "-select_streams", "v:0",
+                 "-show_entries", "stream=codec_name", "-of", "default=nw=1:nk=1",
+                 str(converted)], capture_output=True, text=True, check=True,
+            ).stdout.strip()
+            self.assertEqual(codec, "h264")
+
     async def test_post_audio_is_real_mp3(self):
         from mika_nexus.jobs import Worker
 

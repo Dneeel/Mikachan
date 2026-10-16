@@ -1,12 +1,15 @@
 """Bounded public RSS episode browsing with redirect and DNS checks."""
 
 import re
-from urllib.parse import urljoin, urlsplit
+from difflib import SequenceMatcher
+from urllib.parse import parse_qs, urljoin, urlsplit
+import unicodedata
 
 import feedparser  # type: ignore[import-untyped]
 import httpx
 
 from .security import clean_url, validate_dns
+from .catalog import _Meta
 
 
 def is_feed_url(url: str) -> bool:
@@ -39,7 +42,9 @@ async def episodes(url: str) -> tuple[list[dict[str, str]], str]:
     if not parsed.entries:
         raise ValueError("No public podcast episodes found")
     items: list[dict[str, str]] = []
-    for entry in parsed.entries[:60]:
+    feed_title = str(parsed.feed.get("title") or "Podcast")[:150]
+    feed_image = str((parsed.feed.get("image") or {}).get("href") or "")
+    for entry in parsed.entries[:300]:
         enclosures = entry.get("enclosures", [])
         audio = next(
             (
@@ -59,14 +64,21 @@ async def episodes(url: str) -> tuple[list[dict[str, str]], str]:
             target = clean_url(str(audio))
         except ValueError:
             continue
-        title = str(entry.get("title") or "Episode")
-        date = str(entry.get("published") or "")[:24]
-        items.append({"title": f"{title} · {date}"[:100], "url": target})
-        if len(items) >= 30:
-            break
+        title = str(entry.get("title") or "Episode")[:180]
+        try:
+            source_url = clean_url(str(entry.get("link") or current))
+        except ValueError:
+            source_url = current
+        image = str((entry.get("image") or {}).get("href") or feed_image)
+        items.append({
+            "title": title, "artist": feed_title, "url": target,
+            "source_url": source_url, "cover": image,
+            "description": str(entry.get("summary") or "")[:12000],
+            "kind": "episode", "date": str(entry.get("published") or "")[:24],
+        })
     if not items:
         raise ValueError("No downloadable public podcast episodes found")
-    return items, str(parsed.feed.get("title") or "Podcast")[:150]
+    return items, feed_title
 
 
 async def apple_podcast_feed(url: str) -> str:
@@ -81,3 +93,72 @@ async def apple_podcast_feed(url: str) -> str:
     if not feed_url:
         raise ValueError("Apple podcast feed unavailable")
     return clean_url(feed_url)
+
+
+def _similar(a: str, b: str) -> float:
+    def normalize(value: str) -> str:
+        value = unicodedata.normalize("NFKC", value).casefold().replace("\u200c", " ")
+        return " ".join(re.findall(r"[^\W_]+", value, re.UNICODE))
+    return SequenceMatcher(None, normalize(a), normalize(b)).ratio()
+
+
+async def resolve_episode_link(url: str) -> dict[str, str | int] | None:
+    """Resolve a specific Apple/Spotify episode to a verified public enclosure."""
+    clean = clean_url(url)
+    host = urlsplit(clean).hostname or ""
+    if not (
+        host == "podcasts.apple.com" and "i=" in urlsplit(clean).query
+        or host == "open.spotify.com" and urlsplit(clean).path.startswith("/episode/")
+    ):
+        return None
+    current = clean
+    async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
+        for _ in range(4):
+            validate_dns(current)
+            page = await client.get(current, headers={"User-Agent": "Mozilla/5.0"})
+            if page.status_code not in {301, 302, 303, 307, 308}:
+                page.raise_for_status()
+                break
+            location = page.headers.get("location")
+            if not location:
+                raise ValueError("podcast episode redirect is incomplete")
+            current = clean_url(urljoin(current, location))
+        else:
+            raise ValueError("too many podcast episode redirects")
+        parser = _Meta()
+        parser.feed(page.text[:500_000])
+        title = parser.data.get("og:title", "").strip()
+        description = parser.data.get("og:description", "")
+        if not title:
+            raise ValueError("episode title is unavailable")
+        show = description.split(" · ")[0].strip()
+        if host == "podcasts.apple.com" and show.lower() == "podcast episode":
+            parts = description.split(" · ")
+            show = parts[1].strip() if len(parts) > 1 else ""
+        lookup = await client.get(
+            "https://itunes.apple.com/search",
+            params={"term": title, "entity": "podcastEpisode", "limit": 100},
+        )
+        lookup.raise_for_status()
+    identifier = parse_qs(urlsplit(current).query).get("i", [""])[0]
+    candidates = lookup.json().get("results", [])
+    matches = [
+        episode for episode in candidates
+        if episode.get("episodeUrl")
+        and (_similar(title, str(episode.get("trackName") or "")) >= 0.90)
+        and (not show or _similar(show, str(episode.get("collectionName") or "")) >= 0.70)
+    ]
+    if identifier:
+        matches = [episode for episode in matches if str(episode.get("trackId")) == identifier]
+    if not matches:
+        raise ValueError("نسخهٔ عمومیِ منطبق با این اپیزود پیدا نشد")
+    match = matches[0]
+    return {
+        "url": clean_url(str(match["episodeUrl"])),
+        "title": str(match.get("trackName") or title),
+        "artist": str(match.get("collectionName") or show),
+        "duration": int(match.get("trackTimeMillis") or 0) // 1000,
+        "cover": str(match.get("artworkUrl600") or parser.data.get("og:image") or ""),
+        "source_url": clean, "kind": "episode",
+        "description": description,
+    }

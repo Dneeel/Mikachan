@@ -17,6 +17,12 @@ class CatalogTrack:
     url: str
     duration: int | None = None
     isrc: str | None = None
+    cover: str = ""
+
+
+def _spotify_art(entity: dict) -> str:
+    pictures = (entity.get("visualIdentity") or {}).get("image") or []
+    return str(max(pictures, key=lambda x: x.get("maxWidth", 0)).get("url") or "") if pictures else ""
 
 
 class _Meta(HTMLParser):
@@ -79,6 +85,7 @@ async def resolve_track(url: str) -> CatalogTrack | None:
                 data.get("artistName", ""),
                 url,
                 int(data["trackTimeMillis"]) // 1000 if data.get("trackTimeMillis") else None,
+                cover=str(data.get("artworkUrl100") or "").replace("100x100bb", "600x600bb"),
             )
         if provider == "deezer":
             identifier = path.rstrip("/").split("/")[-1]
@@ -95,7 +102,31 @@ async def resolve_track(url: str) -> CatalogTrack | None:
                 url,
                 data.get("duration"),
                 data.get("isrc"),
+                str((data.get("album") or {}).get("cover_medium") or ""),
             )
+        identifier = path.strip("/").split("/")[1]
+        embed = await client.get(
+            f"https://open.spotify.com/embed/track/{identifier}",
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        if embed.status_code == 200:
+            parser = _Meta()
+            parser.feed(embed.text[:900_000])
+            try:
+                entity = json.loads(parser.next_data)["props"]["pageProps"]["state"]["data"][
+                    "entity"
+                ]
+                artists = ", ".join(
+                    str(x.get("name") or "") for x in entity.get("artists", []) if x.get("name")
+                )
+                if entity.get("title") and artists:
+                    return CatalogTrack(
+                        str(entity["title"]), artists, url,
+                        int(entity["duration"]) // 1000 if entity.get("duration") else None,
+                        cover=_spotify_art(entity),
+                    )
+            except (ValueError, KeyError, TypeError):
+                pass
         response = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
         response.raise_for_status()
         parser = _Meta()
@@ -145,9 +176,14 @@ async def resolve_collection(url: str) -> tuple[list[dict[str, str]], str] | Non
             items = [
                 {
                     "title": str(x.get("title") or "Untitled")[:100],
+                    "artist": str(x.get("subtitle") or entity.get("subtitle") or "")[:100],
+                    "duration": int(x["duration"]) // 1000 if x.get("duration") else 0,
                     "url": "https://open.spotify.com/track/" + x["uri"].split(":")[-1],
+                    "source_url": "https://open.spotify.com/track/" + x["uri"].split(":")[-1],
+                    "cover": _spotify_art(entity) if kind == "album" else "",
+                    "kind": "track",
                 }
-                for x in entity.get("trackList", [])[:30]
+                for x in entity.get("trackList", [])[:300]
                 if str(x.get("uri", "")).startswith("spotify:track:")
             ]
             return items, str(entity.get("title") or entity.get("name") or "Collection")
@@ -158,9 +194,13 @@ async def resolve_collection(url: str) -> tuple[list[dict[str, str]], str] | Non
             response = await client.get(f"https://api.deezer.com/{kind}/{identifier}")
             response.raise_for_status()
             data = response.json()
-            tracks = (data.get("tracks") or {}).get("data", [])[:30]
+            tracks = (data.get("tracks") or {}).get("data", [])[:300]
             items = [
-                {"title": str(x.get("title") or "Untitled")[:100], "url": x["link"]}
+                {"title": str(x.get("title") or "Untitled")[:100], "url": x["link"],
+                 "artist": str((x.get("artist") or {}).get("name") or ""),
+                 "duration": x.get("duration") or 0,
+                 "cover": str((x.get("album") or {}).get("cover_medium") or ""),
+                 "kind": "track", "source_url": x["link"]}
                 for x in tracks
                 if x.get("link")
             ]
@@ -170,13 +210,17 @@ async def resolve_collection(url: str) -> tuple[list[dict[str, str]], str] | Non
             return None
         response = await client.get(
             "https://itunes.apple.com/lookup",
-            params={"id": identifier, "entity": "song", "limit": 30},
+            params={"id": identifier, "entity": "song", "limit": 300},
         )
         response.raise_for_status()
         results = response.json().get("results", [])
         items = [
-            {"title": str(x.get("trackName") or "Untitled")[:100], "url": x["trackViewUrl"]}
+            {"title": str(x.get("trackName") or "Untitled")[:100], "url": x["trackViewUrl"],
+             "artist": str(x.get("artistName") or ""),
+             "duration": int(x["trackTimeMillis"]) // 1000 if x.get("trackTimeMillis") else 0,
+             "cover": str(x.get("artworkUrl100") or "").replace("100x100bb", "600x600bb"),
+             "kind": "track", "source_url": x["trackViewUrl"]}
             for x in results
             if x.get("wrapperType") == "track" and x.get("trackViewUrl")
-        ][:30]
+        ][:300]
         return items, str(results[0].get("collectionName") or "Album") if results else "Album"
