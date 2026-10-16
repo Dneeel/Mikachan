@@ -30,7 +30,7 @@ from .security import source, validate_dns, collection, clean_url
 from .store import Store
 from .media import groups, media_kind, verify
 from .catalog import _Meta, recording_search_alias, resolve_collection, resolve_track
-from .matching import match_score
+from .matching import match_score, version
 from .search import Searcher
 from .podcasts import apple_podcast_feed, episodes, is_feed_url, resolve_episode_link
 
@@ -839,51 +839,61 @@ class Worker:
         core = re.split(r"[（(]", track.title, maxsplit=1)[0].strip(" -")
         search_core = re.sub(r"[^\w\s]+", " ", core.replace("'", "").replace("’", ""))
         query = f"{search_core} {alias[1]}" if alias else f"{track.artist} {track.title}"
-        hits, _ = await Searcher().search(
-            query.strip(),
-            {"track"},
-            {"soundcloud", "ytmusic"},
-        )
-        ranked = sorted(
-            (
-                (
-                    max(
-                        match_score(track.title, track.artist, h.title, h.creator,
-                                    track.duration, h.duration),
-                        match_score(search_core, alias[1], h.title, h.creator,
-                                    track.duration, h.duration) if alias else 0.0,
-                    ),
-                    h,
-                )
-                for h in hits
-            ),
-            key=lambda item: item[0] + (0.03 if item[1].source == "ytmusic" else 0.0),
-            reverse=True,
-        )
-        for score, hit in ranked[:8]:
-            if score < 0.84 or (track.duration and hit.duration and
-                                abs(track.duration - hit.duration) > 10):
-                continue
-            try:
-                paths = await self._ytdlp(clean_url(hit.url), directory, max_bytes, "audio")
-                if len(paths) != 1:
-                    raise ValueError("recording has unexpected files")
-                if track.duration:
-                    proc = await asyncio.create_subprocess_exec(
-                        "ffprobe", "-v", "error", "-show_entries", "format=duration",
-                        "-of", "default=nw=1:nk=1", str(paths[0]),
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.DEVNULL,
+        searcher = Searcher()
+        queries = [
+            (query.strip(), {"soundcloud", "ytmusic"}),
+            (f"{alias[0]} {alias[1]}" if alias else search_core,
+             {"soundcloud", "ytmusic", "youtube"}),
+        ]
+        tried: set[str] = set()
+        for text_query, providers in queries:
+            hits, _ = await searcher.search(text_query, {"track"}, providers)
+            def score_hit(hit: object) -> float:
+                from .search import Hit
+                assert isinstance(hit, Hit)
+                scores = [match_score(track.title, track.artist, hit.title, hit.creator,
+                                      track.duration, hit.duration)]
+                if alias:
+                    scores.append(match_score(alias[0], alias[1], hit.title, hit.creator,
+                                              track.duration, hit.duration))
+                    scores.append(match_score(search_core, alias[1], hit.title, hit.creator,
+                                              track.duration, hit.duration))
+                if version(track.title) == frozenset({"remaster"}):
+                    base = re.sub(r"(?i)[\s(-]*\b(?:19|20)\d\d\s+remaster(?:ed)?\b[\s)-]*", "", track.title)
+                    scores.append(match_score(base, track.artist, hit.title, hit.creator,
+                                              track.duration, hit.duration) - 0.04)
+                return max(scores)
+            ranked = sorted(hits, key=lambda h: score_hit(h) +
+                            (0.03 if h.source == "ytmusic" else 0.0), reverse=True)
+            for hit in ranked[:10]:
+                score = score_hit(hit)
+                if score < 0.84 or hit.url in tried or (
+                    track.duration and hit.duration and abs(track.duration - hit.duration) > 10
+                ):
+                    continue
+                tried.add(hit.url)
+                try:
+                    paths = await asyncio.wait_for(
+                        self._ytdlp(clean_url(hit.url), directory, max_bytes, "audio"), 100
                     )
-                    stdout, _ = await asyncio.wait_for(proc.communicate(), 20)
-                    seconds = float(stdout.strip() or 0)
-                    if abs(track.duration - seconds) > 10:
-                        raise ValueError("public recording is not the full track")
-                return paths
-            except (ValueError, TimeoutError, OSError):
-                for file in directory.iterdir():
-                    if file.is_file():
-                        file.unlink()
+                    if len(paths) != 1:
+                        raise ValueError("recording has unexpected files")
+                    if track.duration:
+                        proc = await asyncio.create_subprocess_exec(
+                            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                            "-of", "default=nw=1:nk=1", str(paths[0]),
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.DEVNULL,
+                        )
+                        stdout, _ = await asyncio.wait_for(proc.communicate(), 20)
+                        seconds = float(stdout.strip() or 0)
+                        if abs(track.duration - seconds) > 10:
+                            raise ValueError("public recording is not the full track")
+                    return paths
+                except (ValueError, TimeoutError, OSError):
+                    for file in directory.iterdir():
+                        if file.is_file():
+                            file.unlink()
         raise ValueError("No complete public recording matched this track")
 
     async def _direct(

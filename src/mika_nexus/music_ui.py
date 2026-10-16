@@ -4,7 +4,9 @@ import re
 from urllib.parse import quote
 
 import httpx
+from bs4 import BeautifulSoup
 
+from .catalog import CatalogTrack, recording_search_alias
 from .matching import match_score
 
 
@@ -32,24 +34,27 @@ async def verified_lyrics(title: str, creator: str, duration: int | None = None)
     if not title.strip() or not creator.strip():
         return None
     async with httpx.AsyncClient(timeout=10) as client:
-        try:
-            response = await client.get(
-                "https://lrclib.net/api/search",
-                params={"track_name": title, "artist_name": creator},
-                headers={"User-Agent": "MIKA-NEXUS/1.0 (lyrics lookup)"},
-            )
-            response.raise_for_status()
-            payload = response.json()
-        except (httpx.HTTPError, ValueError):
-            payload = []
-        candidates: list[tuple[int, str]] = []
-        if isinstance(payload, list):
+        variants = [(title, creator)]
+        async def lrclib(wanted_title: str, wanted_artist: str) -> str | None:
+            try:
+                response = await client.get(
+                    "https://lrclib.net/api/search",
+                    params={"track_name": wanted_title, "artist_name": wanted_artist},
+                    headers={"User-Agent": "MIKA-NEXUS/1.0 (lyrics lookup)"},
+                )
+                response.raise_for_status()
+                payload = response.json()
+            except (httpx.HTTPError, ValueError):
+                return None
+            if not isinstance(payload, list):
+                return None
+            candidates: list[tuple[int, str]] = []
             for item in payload[:50]:
                 if not isinstance(item, dict):
                     continue
                 matched_title = str(item.get("trackName") or "")
                 matched_artist = str(item.get("artistName") or "")
-                if match_score(title, creator, matched_title, matched_artist) < 0.85:
+                if match_score(wanted_title, wanted_artist, matched_title, matched_artist) < 0.83:
                     continue
                 item_duration = item.get("duration")
                 if duration and isinstance(item_duration, (int, float)) and abs(duration - item_duration) > 15:
@@ -60,20 +65,71 @@ async def verified_lyrics(title: str, creator: str, duration: int | None = None)
                     lines = sum(bool(line.strip()) for line in plain.splitlines())
                     if lines:
                         candidates.append((lines, plain))
-        if candidates:
-            best_lines, best = max(candidates, key=lambda pair: (pair[0], len(pair[1])))
-            if best_lines >= 8:
-                return best
-        try:
-            response = await client.get(
-                f"https://api.lyrics.ovh/v1/{quote(creator, safe='')}/{quote(title, safe='')}"
-            )
-            response.raise_for_status()
-            lyric = response.json().get("lyrics")
-            if isinstance(lyric, str):
-                plain = _plain_lyrics(lyric)
-                if sum(bool(line.strip()) for line in plain.splitlines()) >= 8:
-                    return plain
-        except (httpx.HTTPError, ValueError, AttributeError):
-            pass
+            if candidates:
+                best_lines, best = max(candidates, key=lambda pair: (pair[0], len(pair[1])))
+                if best_lines >= 8:
+                    return best
+            return None
+
+        first = await lrclib(title, creator)
+        if first:
+            return first
+        alias = await recording_search_alias(CatalogTrack(title, creator, "", duration))
+        if alias:
+            variants.append(alias)
+            found = await lrclib(*alias)
+            if found:
+                return found
+        for wanted_title, wanted_artist in variants:
+            try:
+                response = await client.get(
+                    f"https://api.lyrics.ovh/v1/{quote(wanted_artist, safe='')}/{quote(wanted_title, safe='')}"
+                )
+                response.raise_for_status()
+                lyric = response.json().get("lyrics")
+                if isinstance(lyric, str):
+                    plain = _plain_lyrics(lyric)
+                    if sum(bool(line.strip()) for line in plain.splitlines()) >= 8:
+                        return plain
+            except (httpx.HTTPError, ValueError, AttributeError):
+                pass
+        for wanted_title, wanted_artist in variants:
+            found = await _genius_lyrics(client, wanted_title, wanted_artist)
+            if found:
+                return found
+    return None
+
+
+async def _genius_lyrics(client: httpx.AsyncClient, title: str, artist: str) -> str | None:
+    """Read a full public lyric page only after validating its search metadata."""
+    try:
+        response = await client.get(
+            "https://genius.com/api/search/multi",
+            params={"q": f"{artist} {title}", "per_page": 5},
+        )
+        response.raise_for_status()
+        sections = response.json().get("response", {}).get("sections", [])
+        candidates = [hit.get("result", {}) for section in sections
+                      for hit in section.get("hits", [])]
+        for item in candidates:
+            found_title = str(item.get("title") or "")
+            found_artist = str((item.get("primary_artist") or {}).get("name") or "")
+            url = str(item.get("url") or "")
+            if (not found_title or not found_artist or not url.startswith("https://genius.com/")
+                    or match_score(title, artist, found_title, found_artist) < 0.82):
+                continue
+            page = await client.get(url)
+            page.raise_for_status()
+            soup = BeautifulSoup(page.text, "html.parser")
+            blocks = soup.select("[data-lyrics-container]")
+            parts = []
+            for block in blocks:
+                for br in block.find_all("br"):
+                    br.replace_with("\n")
+                parts.append(block.get_text().strip())
+            lyric = _plain_lyrics("\n".join(part for part in parts if part))
+            if sum(bool(line.strip()) for line in lyric.splitlines()) >= 8:
+                return lyric
+    except (httpx.HTTPError, ValueError, AttributeError, TypeError):
+        pass
     return None

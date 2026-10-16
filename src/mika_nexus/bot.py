@@ -87,6 +87,7 @@ def public_media_result(hit: dict[str, object]) -> bool:
     return (hit.get("source"), hit.get("kind")) in {
         ("soundcloud", "track"),
         ("ytmusic", "track"),
+        ("youtube", "track"),
         ("ytmusic", "episode"),
         ("apple_podcasts", "episode"),
         ("spotify", "track"),
@@ -278,7 +279,7 @@ class App:
                 else {"track", "album", "playlist", "artist"}
             )
         )
-        sources = {"apple", "apple_podcasts", "deezer", "soundcloud", "ytmusic"}
+        sources = {"apple", "apple_podcasts", "deezer", "soundcloud", "ytmusic", "youtube"}
         pref = self.store.preferences(m.from_user.id)
         if pref:
             saved_kinds, sources = pref

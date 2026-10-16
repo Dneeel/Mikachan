@@ -24,32 +24,40 @@ class CatalogTrack:
 
 async def recording_search_alias(track: CatalogTrack) -> tuple[str, str] | None:
     """Find an alternate published title/artist for non-Latin catalog metadata."""
-    if track.artist.isascii():
+    if track.artist.isascii() and track.title.isascii():
         return None
     core = re.split(r"[（(]", track.title, maxsplit=1)[0].strip(" -")
     wanted = tokens(core)
     if not wanted:
         return None
     async with httpx.AsyncClient(timeout=8) as client:
-        try:
-            response = await client.get(
-                "https://itunes.apple.com/search",
-                params={"term": track.artist, "entity": "song", "limit": 30},
-            )
-            response.raise_for_status()
-            results = response.json().get("results", [])
-        except (httpx.HTTPError, ValueError):
-            return None
-    for item in results:
-        title, artist = str(item.get("trackName") or ""), str(item.get("artistName") or "")
-        if not title or not artist or artist == track.artist:
-            continue
-        if len(wanted & tokens(title)) / len(wanted) < 0.7:
-            continue
-        item_duration = item.get("trackTimeMillis")
-        if track.duration and item_duration and abs(track.duration - int(item_duration) / 1000) > 6:
-            continue
-        return title, artist
+        for term in (f"{core} {track.artist}", core, track.artist):
+            try:
+                response = await client.get(
+                    "https://itunes.apple.com/search",
+                    params={"term": term, "entity": "song", "limit": 30},
+                )
+                response.raise_for_status()
+                results = response.json().get("results", [])
+            except (httpx.HTTPError, ValueError):
+                continue
+            for item in results:
+                title = str(item.get("trackName") or "")
+                artist = str(item.get("artistName") or "")
+                if not title or not artist or (title == track.title and artist == track.artist):
+                    continue
+                item_duration = item.get("trackTimeMillis")
+                if not track.duration or not item_duration:
+                    continue
+                delta = abs(track.duration - int(item_duration) / 1000)
+                title_overlap = len(wanted & tokens(title)) / len(wanted)
+                original_artist = tokens(track.artist)
+                artist_overlap = (len(original_artist & tokens(artist)) / len(original_artist)
+                                  if original_artist else 0.0)
+                if title_overlap >= 0.7 and delta <= 6:
+                    return title, artist
+                if term != track.artist and artist_overlap >= 0.6 and delta <= 3:
+                    return title, artist
     return None
 
 
