@@ -19,6 +19,7 @@ from aiogram.types import (
     InputMediaDocument,
     InputMediaPhoto,
     InputMediaVideo,
+    Message,
 )
 
 from .config import Settings
@@ -109,8 +110,14 @@ class Worker:
         from .bot import kb
 
         message_id = self.store.progress_message(jid)
-        label = f"MIKA NEXUS · {stage}\nJob: <code>{jid}</code>"
-        keyboard = kb([[("Cancel", f"j:{jid}:cancel")]]) if active else None
+        labels = {
+            "Resolving": "🔎 در حال بررسی لینک…",
+            "Downloading": "⬇️ در حال دریافت رسانه…",
+            "Processing": "🎛 در حال آماده‌سازی فایل…",
+            "Uploading": "📤 در حال ارسال به تلگرام…",
+        }
+        label = labels.get(stage, stage)
+        keyboard = kb([[("لغو ✕", f"j:{jid}:cancel")]]) if active else None
         try:
             if message_id is None:
                 message = await self.bot.send_message(chat, label, reply_markup=keyboard)
@@ -122,6 +129,55 @@ class Worker:
         except Exception:
             # Progress messages are advisory; media delivery must continue.
             pass
+
+    async def _clear_progress(self, jid: str, chat: int) -> None:
+        message_id = self.store.progress_message(jid)
+        if message_id is not None:
+            try:
+                await self.bot.delete_message(chat, message_id)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _caption(url: str, directory: Path) -> tuple[str, str]:
+        """Keep public post text from the extractor, bounded by Telegram caption limits."""
+        meta: dict[str, object] = {}
+        sidecar = directory / ".nexus-meta.json"
+        files = [sidecar] if sidecar.exists() else sorted(directory.glob("*.info.json"))
+        if files:
+            try:
+                value = json.loads(files[0].read_text(errors="replace"))
+                if isinstance(value, dict):
+                    meta = value
+            except (OSError, ValueError):
+                pass
+        raw = next(
+            (
+                str(meta[key]).strip()
+                for key in ("description", "content", "caption", "title")
+                if isinstance(meta.get(key), str) and str(meta[key]).strip()
+            ),
+            "",
+        )
+        creator = next(
+            (
+                str(meta[key]).strip()
+                for key in ("uploader", "artist", "nickname", "channel")
+                if isinstance(meta.get(key), str) and str(meta[key]).strip()
+            ),
+            "",
+        )
+        header = (f"👤 {creator[:80]}\n" if creator else "")
+        suffix = f"\n\n🔗 {url[:300]}"
+        budget = max(0, 1000 - len(header) - len(suffix))
+        short = raw[:budget]
+        caption = html.escape(header + short + suffix)
+        # Escaped HTML may be longer in bytes, but Telegram counts visible text.
+        return caption, raw[budget:]
+
+    @staticmethod
+    def _save_meta(directory: Path, data: dict[str, object]) -> None:
+        (directory / ".nexus-meta.json").write_text(json.dumps(data, ensure_ascii=False))
 
     async def _run(self, jid: str) -> None:
         row = self.store.job(jid)
@@ -148,8 +204,23 @@ class Worker:
                 self.store.transition(jid, "RESOLVING", "DELIVERING")
                 try:
                     send = self.bot.send_audio if mode == "audio" else self.bot.send_document
+                    stored_caption = self.store.db.execute(
+                        "SELECT caption FROM cache_captions WHERE key=?", (key,)
+                    ).fetchone()
+                    stored_audio = self.store.db.execute(
+                        "SELECT has_audio FROM cache_audio WHERE key=?", (key,)
+                    ).fetchone()
+                    from .bot import kb
+
                     sent = await send(
-                        chat, cached["file_id"], caption="MIKA NEXUS · " + html.escape(url[:900])
+                        chat,
+                        cached["file_id"],
+                        caption=stored_caption[0] if stored_caption else html.escape(f"🔗 {url[:900]}"),
+                        reply_markup=(
+                            kb([[("🎵 دریافت صدای MP3", f"j:{jid}:audio")]])
+                            if mode != "audio" and stored_audio and stored_audio[0]
+                            else None
+                        ),
                     )
                 except Exception as exc:
                     self.store.transition(
@@ -166,7 +237,7 @@ class Worker:
                     else None,
                 )
                 self.store.transition(jid, "DELIVERING", "COMPLETED", receipt_id=sent.message_id)
-                await self._progress(jid, chat, "Completed", active=False)
+                await self._clear_progress(jid, chat)
                 return
             if mode != "audio" and await self._catalog_matches(jid, url, chat, row["user_id"]):
                 return
@@ -189,7 +260,7 @@ class Worker:
                     "UPDATE collections SET message_id=? WHERE id=?", (sent.message_id, cid)
                 )
                 self.store.transition(jid, "RESOLVING", "COMPLETED", receipt_id=sent.message_id)
-                await self._progress(jid, chat, "Collection ready", active=False)
+                await self._clear_progress(jid, chat)
                 return
             self.store.transition(jid, "RESOLVING", "DOWNLOADING")
             await self._progress(jid, chat, "Downloading")
@@ -264,11 +335,12 @@ class Worker:
             if sum(p.stat().st_size for p in paths) > max_bytes:
                 raise ValueError("gallery exceeds Bot API mode limit")
             checks = [await verify(path, max_bytes) for path in paths]
+            caption, overflow = self._caption(url, job_dir)
             if not self.store.transition(jid, "VERIFYING", "DELIVERING"):
                 return
             await self._progress(jid, chat, "Uploading")
             try:
-                sent_messages = []
+                sent_messages: list[Message] = []
                 for chunk in groups(paths):
                     if len(chunk) == 1:
                         send = (
@@ -276,11 +348,19 @@ class Worker:
                             if chunk[0].suffix.lower() == ".mp3"
                             else self.bot.send_document
                         )
+                        from .bot import kb
+
+                        audio_button = (
+                            kb([[("🎵 دریافت صدای MP3", f"j:{jid}:audio")]])
+                            if len(paths) == 1 and mode != "audio" and checks[0]["audio"]
+                            else None
+                        )
                         sent_messages.append(
                             await send(
                                 chat,
                                 FSInputFile(chunk[0]),
-                                caption="MIKA NEXUS · " + html.escape(url[:900]),
+                                caption=caption if not sent_messages else None,
+                                reply_markup=audio_button,
                             )
                         )
                     else:
@@ -289,7 +369,7 @@ class Worker:
                         ] = [
                             InputMediaDocument(
                                 media=FSInputFile(path),
-                                caption=("MIKA NEXUS · " + html.escape(url[:900]))
+                                caption=caption
                                 if i == 0 and not sent_messages
                                 else None,
                             )
@@ -308,7 +388,11 @@ class Worker:
             self.store.transition(
                 jid, "DELIVERING", "COMPLETED", receipt_id=sent_messages[0].message_id
             )
-            await self._progress(jid, chat, "Completed", active=False)
+            await self._clear_progress(jid, chat)
+            for start in range(0, len(overflow), 3500):
+                if start >= 10500:
+                    break
+                await self.bot.send_message(chat, html.escape(overflow[start : start + 3500]))
             if len(paths) == 1 and sent_messages[0].document:
                 self.store.db.execute(
                     "INSERT OR REPLACE INTO cache VALUES (?,?,?,?,strftime('%s','now'))",
@@ -319,7 +403,15 @@ class Worker:
                     "INSERT OR REPLACE INTO cache VALUES (?,?,?,?,strftime('%s','now'))",
                     (key, sent_messages[0].audio.file_id, "audio", row["user_id"]),
                 )
-            if mode != "audio" and any(x["audio"] for x in checks):
+            if len(paths) == 1 and (sent_messages[0].document or sent_messages[0].audio):
+                self.store.db.execute(
+                    "INSERT OR REPLACE INTO cache_captions VALUES (?,?)", (key, caption)
+                )
+                self.store.db.execute(
+                    "INSERT OR REPLACE INTO cache_audio VALUES (?,?)",
+                    (key, int(bool(checks[0]["audio"]))),
+                )
+            if len(paths) > 1 and mode != "audio" and any(x["audio"] for x in checks):
                 from .bot import kb
 
                 await self.bot.send_message(
@@ -340,8 +432,7 @@ class Worker:
                     else type(exc).__name__
                 )
                 self.store.transition(jid, current["state"], "FAILED", error=safe)
-                await self._progress(jid, chat, "Failed", active=False)
-                await self.bot.send_message(chat, f"MIKA NEXUS · Could not process link: {safe}")
+                await self._progress(jid, chat, f"⚠️ دریافت انجام نشد\n{html.escape(safe)}", active=False)
         finally:
             shutil.rmtree(job_dir, ignore_errors=True)
 
@@ -708,6 +799,14 @@ class Worker:
                     path = await self._direct(target, directory, remaining, stem=f"{index:02d}")
                     paths.append(path)
                     remaining -= path.stat().st_size
+                author = data.get("author") or {}
+                self._save_meta(
+                    directory,
+                    {
+                        "description": data.get("title") or data.get("content_desc") or "",
+                        "uploader": author.get("nickname", "") if isinstance(author, dict) else "",
+                    },
+                )
                 return paths
             except httpx.HTTPError:
                 if attempt:
@@ -727,7 +826,7 @@ class Worker:
             return None
         proc = await asyncio.create_subprocess_exec(
             "gallery-dl",
-            "-g",
+            "-j",
             "--range",
             "1-31",
             url,
@@ -750,11 +849,19 @@ class Worker:
             raise
         if proc.returncode:
             return None
-        urls = [
-            line
-            for line in stdout.decode(errors="replace").splitlines()
-            if line.startswith(("https://", "http://"))
-        ]
+        try:
+            messages = json.loads(stdout)
+        except ValueError:
+            return None
+        urls: list[str] = []
+        for message in messages:
+            if not isinstance(message, list) or len(message) < 3 or message[0] != 3:
+                continue
+            if not isinstance(message[1], str) or not message[1].startswith(("https://", "http://")):
+                continue
+            urls.append(message[1])
+            if len(urls) == 1 and isinstance(message[2], dict):
+                self._save_meta(directory, message[2])
         if not urls or len(urls) > 31:
             return None
         paths: list[Path] = []
@@ -785,6 +892,7 @@ class Worker:
             "--restrict-filenames",
             "--max-filesize",
             str(max_bytes),
+            "--write-info-json",
             "-o",
             template,
             *audio_args,
@@ -806,7 +914,11 @@ class Worker:
             raise
         if proc.returncode:
             raise ValueError(extractor_error(url, stderr))
-        files = [p for p in directory.iterdir() if p.is_file() and not p.name.endswith(".part")]
+        files = [
+            p for p in directory.iterdir()
+            if p.is_file() and not p.name.endswith((".part", ".info.json"))
+            and not p.name.startswith(".nexus-")
+        ]
         if not 1 <= len(files) <= 10:
             raise ValueError("source returned no bounded deliverable media")
         return sorted(files)

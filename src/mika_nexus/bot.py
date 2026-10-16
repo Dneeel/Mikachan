@@ -23,6 +23,7 @@ from .config import Settings
 from .jobs import Worker
 from .search import KINDS, SOURCES, Searcher
 from .matching import match_score
+from .music_ui import listening_links, verified_lyrics
 from .security import allowed, clean_url, links, source
 from .store import Store
 
@@ -123,7 +124,7 @@ class App:
                     continue
                 label = source(url)
                 prompt = await m.reply(
-                    f"MIKA NEXUS · Link detected\n{html.escape(label.title())} · {index + 1}/{len(urls)}\n<code>{html.escape(url[:300])}</code>\n\nProcess this link?",
+                    f"🔗 <b>{html.escape(label.title())}</b> · لینک {index + 1} از {len(urls)}\n{html.escape(url[:300])}\n\nدریافت شود؟",
                     reply_markup=kb([[("✅ Yes", f"c:{cid}:y"), ("❌ No", f"c:{cid}:n")]]),
                 )
                 self.store.set_prompt(cid, prompt.message_id)
@@ -144,7 +145,7 @@ class App:
         arg = arg.strip()
         if cmd == "/start":
             await m.reply(
-                "<b>MIKA NEXUS</b>\nSend a public link or choose a search:",
+                "✨ <b>MIKA NEXUS</b>\nلینک عمومی بفرست یا برای پیدا کردن موسیقی و پادکست جست‌وجو کن.",
                 reply_markup=kb(
                     [
                         [("🎵 Music", "m:music"), ("🎙 Podcast", "m:podcast")],
@@ -243,7 +244,7 @@ class App:
         if pref:
             kinds, sources = pref
         sid = self.store.create_search(m.from_user.id, m.chat.id, query, kinds, sources)
-        msg = await m.reply("MIKA NEXUS · Searching…")
+        msg = await m.reply("🔎 در حال جست‌وجو…")
         self.store.set_search_message(sid, msg.message_id)
         await self.refresh_search(sid, m.from_user.id, m.chat.id)
 
@@ -277,7 +278,7 @@ class App:
         kinds, sources = set(json.loads(row["kinds"])), set(json.loads(row["sources"]))
         gen, page = row["generation"], row["page"]
         hits = self.store.results(sid, gen)
-        head = f"<b>MIKA NEXUS · Search</b>\nQuery: {html.escape(row['query'])}\nPage: {page + 1}"
+        head = f"🔎 <b>{html.escape(row['query'])}</b> · صفحه {page + 1}"
         buttons: list[list[tuple[str, str]]] = []
         if menu in ("types", "sources"):
             choices = KINDS if menu == "types" else SOURCES
@@ -298,7 +299,7 @@ class App:
             body = "Choose types:" if menu == "types" else "Choose sources:"
         elif detail is not None and 0 <= detail < len(hits):
             h = hits[detail]
-            body = f"{html.escape(h['source'])} · {html.escape(h['kind'])}\n<b>{html.escape(h['title'])}</b>\n{html.escape(h['creator'])}\n{html.escape(h['url'][:700])}"
+            body = f"🎵 {html.escape(h['source'])} · {html.escape(h['kind'])}\n<b>{html.escape(h['title'])}</b>\n👤 {html.escape(h['creator'])}\n{html.escape(h['url'][:700])}"
             if public_media_result(h):
                 body += "\n\nPublic media may be available. Requesting it opens a separate Yes/No confirmation."
                 buttons = [[("Request public media", f"s:{sid}:r:{detail}:{gen}")]]
@@ -324,7 +325,7 @@ class App:
                 page * self.settings.search_page_size : (page + 1) * self.settings.search_page_size
             ]
             body = "\n".join(
-                f"{i + 1:02} [{html.escape(h['source'])} · {html.escape(h['kind'])}] {html.escape(h['title'][:70])} — {html.escape(h['creator'][:35])}"
+                f"{i + 1:02}  {'🎵' if h['kind'] == 'track' else '🎙️' if h['kind'] in {'podcast', 'episode'} else '💿'} <b>{html.escape(h['title'][:70])}</b>\n      {html.escape(h['creator'][:35])} · {html.escape(h['source'])}"
                 for i, h in enumerate(current, page * self.settings.search_page_size)
             )
             if not body:
@@ -347,11 +348,28 @@ class App:
             buttons.append([("◀ Previous", f"s:{sid}:prev"), ("Next ▶", f"s:{sid}:next")])
             buttons.append([("🔄 Refresh", f"s:{sid}:refresh"), ("✖ Close", f"s:{sid}:close")])
         try:
+            keyboard = kb(buttons)
+            if detail is not None and 0 <= detail < len(hits) and hits[detail]["kind"] == "track":
+                hit = hits[detail]
+                keyboard.inline_keyboard.insert(
+                    -1,
+                    [InlineKeyboardButton(
+                        text="📝 متن آهنگ", callback_data=f"s:{sid}:y:{detail}:{gen}"
+                    )],
+                )
+                keyboard.inline_keyboard.insert(
+                    -1,
+                    [InlineKeyboardButton(text=label, url=target)
+                     for label, target in listening_links(
+                         str(hit["title"]), str(hit["creator"]),
+                         str(hit["source"]), str(hit["url"])
+                     )],
+                )
             await self.bot.edit_message_text(
                 head + "\n\n" + body,
                 chat_id=chat,
                 message_id=row["message_id"],
-                reply_markup=kb(buttons),
+                reply_markup=keyboard,
             )
         except Exception as exc:
             if "message is not modified" not in str(exc).lower():
@@ -463,8 +481,8 @@ class App:
                         pass
             elif state == "ACCEPTED":
                 await q.message.edit_text(
-                    f"Accepted · Queued\nJob: <code>{jid}</code>",
-                    reply_markup=kb([[("Cancel", f"j:{jid}:cancel")]]),
+                    "⏳ درخواست ثبت شد؛ در حال آماده‌سازی…",
+                    reply_markup=kb([[("لغو ✕", f"j:{jid}:cancel")]]),
                 )
             elif state == "EXPIRED":
                 await q.message.edit_reply_markup(reply_markup=None)
@@ -491,7 +509,7 @@ class App:
                 if created and jid is not None:
                     status = await self.bot.send_message(
                         q.message.chat.id,
-                        f"Queued selected item · <code>{jid}</code>",
+                        "⏳ مورد انتخابی در صف دریافت است…",
                         reply_markup=kb([[("Cancel", f"j:{jid}:cancel")]]),
                     )
                     self.store.bind_progress(jid, status.message_id)
@@ -513,8 +531,15 @@ class App:
                     parts[1], q.from_user.id, q.message.chat.id, "audio"
                 )
                 if created and jid is not None:
-                    await q.message.edit_text(f"MP3 queued · <code>{jid}</code>")
-                    self.store.bind_progress(jid, q.message.message_id)
+                    if q.message.document or q.message.video:
+                        await q.message.edit_reply_markup(reply_markup=None)
+                        status = await self.bot.send_message(
+                            q.message.chat.id, "🎵 در حال آماده‌سازی MP3…"
+                        )
+                        self.store.bind_progress(jid, status.message_id)
+                    else:
+                        await q.message.edit_text("🎵 در حال آماده‌سازی MP3…")
+                        self.store.bind_progress(jid, q.message.message_id)
             return
         if not data.startswith("s:"):
             await acknowledge(q)
@@ -568,6 +593,32 @@ class App:
             and int(parts[4]) == row["generation"]
         ):
             await self.render_search(sid, q.from_user.id, q.message.chat.id, detail=int(parts[3]))
+        elif (
+            action == "y"
+            and len(parts) == 5
+            and parts[3].isdigit()
+            and parts[4].isdigit()
+            and int(parts[4]) == row["generation"]
+        ):
+            hit = self.store.result(sid, row["generation"], int(parts[3]))
+            if not hit or hit.get("kind") != "track":
+                return
+            try:
+                lyric = await verified_lyrics(str(hit["title"]), str(hit["creator"]))
+            except Exception:
+                lyric = None
+            if lyric:
+                title = html.escape(str(hit["title"])[:150])
+                for offset in range(0, min(len(lyric), 12000), 3500):
+                    await self.bot.send_message(
+                        q.message.chat.id,
+                        (f"📝 <b>{title}</b>\n" if offset == 0 else "")
+                        + html.escape(lyric[offset : offset + 3500]),
+                    )
+            else:
+                await self.bot.send_message(
+                    q.message.chat.id, "متن تأییدشده‌ای برای این نسخه پیدا نشد."
+                )
         elif (
             action == "l"
             and len(parts) == 5

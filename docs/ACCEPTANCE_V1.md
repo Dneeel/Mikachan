@@ -190,7 +190,7 @@ This records every checkbox in the owner-supplied checklist. `PASS` requires a r
 - **UNVERIFIED** (source line 234): حفظ ترتیب تصاویر.
 - **NOT IMPLEMENTED** (source line 235): دریافت متن کپشن در صورت دسترسی.
 - **NOT IMPLEMENTED** (source line 236): دریافت Sound Metadata در صورت دسترسی.
-- **UNVERIFIED** (source line 237): استخراج صدای ویدئو.
+- **PASS** (source line 237): استخراج صدای ویدئو.
 - **NOT IMPLEMENTED** (source line 238): استفاده از نسخه بدون واترمارک، فقط وقتی منبع واقعی آن را ارائه می‌کند.
 - **UNVERIFIED** (source line 239): تشخیص لینک Creator Profile.
 - **NOT IMPLEMENTED** (source line 240): نمایش اطلاعات عمومی پروفایل.
