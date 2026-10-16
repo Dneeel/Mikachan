@@ -4,7 +4,7 @@
 
 The 23-item owner report prompted changes to native Telegram delivery, metadata,
 collection browsing, direct episode matching, and search ranking. Local Ruff,
-mypy, and 29 automated tests passed before deployment. A synthetic VP9 WebM
+mypy, and 30 automated tests passed before deployment. A synthetic VP9 WebM
 converted to H.264 MP4 and passed ffprobe; an oversize synthetic episode was
 compressed below the test upload limit. These tests do not establish that
 every third-party source is anonymously accessible.
@@ -15,7 +15,10 @@ Read-only checks on the supplied Freestyle VM found:
   yt-dlp listing omitted all three titles; full metadata extraction returned
   their actual titles, uploaders, URLs, and durations. The browser now requests
   full SoundCloud metadata, resolves short URLs, and recognizes `/sets/` as a
-  collection.
+  collection. A live Telegram job opened a selection menu with all three real
+  titles. One earlier attempt failed on temporary DNS resolution; a bounded
+  DNS retry was added. The owner's SoundCloud short track completed Telegram
+  audio delivery with its correct title and uploader.
 - The sample Spotify track resolves as **Soldier Side — System Of A Down**,
   duration 220 seconds, with cover art. YouTube Music returned a matching public
   221-second recording. The deployed strict matcher downloaded a 7,867,053-byte
@@ -32,7 +35,8 @@ Read-only checks on the supplied Freestyle VM found:
 - The owner's Castbox `vi/1012217789` link redirects to an episode page whose
   title exactly matches a unique Apple Podcasts public enclosure. The new
   resolver returns its 4,140-second audio with the original Castbox Link;
-  Telegram upload is still pending.
+  a live owner test completed with one Telegram media receipt and the correct
+  Persian episode title, podcast name, and original Castbox Link.
 - A TikTok music-page extractor is currently unsupported upstream; music from
   photo posts is handled separately when the public post API exposes it.
 

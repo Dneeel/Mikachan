@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import socket
 from pathlib import Path
 from unittest.mock import patch
 
@@ -30,6 +31,13 @@ class SecurityTests(unittest.TestCase):
         answers = [(2, 1, 6, "", ("8.8.8.8", 443)), (2, 1, 6, "", ("10.0.0.1", 443))]
         with patch("socket.getaddrinfo", return_value=answers), self.assertRaises(ValueError):
             validate_dns("https://example.com/file")
+
+    def test_dns_transient_failure_retries(self):
+        public = [(2, 1, 6, "", ("8.8.8.8", 443))]
+        with patch("socket.getaddrinfo", side_effect=[socket.gaierror(), public]) as resolver:
+            with patch("mika_nexus.security.time.sleep"):
+                validate_dns("https://example.com/file")
+        self.assertEqual(resolver.call_count, 2)
 
     def test_links_and_auth(self):
         urls, extra = links("https://a.com/x https://b.com/y https://c.com/z", 2)

@@ -3,6 +3,7 @@
 import ipaddress
 import re
 import socket
+import time
 from urllib.parse import urlsplit, urlunsplit
 
 URL_RE = re.compile(r"https?://[^\s<>\"']+", re.I)
@@ -39,7 +40,16 @@ def clean_url(raw: str) -> str:
 def validate_dns(url: str) -> None:
     """Reject hosts with any nonpublic answer. Recheck on every redirect."""
     p = urlsplit(clean_url(url))
-    answers = socket.getaddrinfo(p.hostname, p.port or (443 if p.scheme == "https" else 80))
+    for attempt in range(3):
+        try:
+            answers = socket.getaddrinfo(
+                p.hostname, p.port or (443 if p.scheme == "https" else 80)
+            )
+            break
+        except socket.gaierror:
+            if attempt == 2:
+                raise ValueError("public host DNS temporarily unavailable") from None
+            time.sleep(0.2 * (attempt + 1))
     if not answers or any(not ipaddress.ip_address(a[4][0]).is_global for a in answers):
         raise ValueError("DNS has a nonpublic address")
 
