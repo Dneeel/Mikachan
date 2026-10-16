@@ -16,7 +16,7 @@ support from confirmed delivery in Telegram.
 | Podcast source Link, transcript placeholder, oversized audio compression | Implemented; large Telegram upload acceptance pending |
 | Instagram story/highlight/carousel and sound pages | Anonymous source access unreliable; supplied story explicitly requires login; no successful acceptance |
 | TikTok music pages | Upstream extractor does not currently work for the tested music URL; no successful acceptance |
-| YouTube Shorts/community image posts | No successful acceptance for the owner's image-post samples |
+| YouTube community image posts | Both owner samples completed Telegram delivery as native photo groups, with nine and three image receipts; a distinct Shorts slideshow remains unverified |
 | Pornhub sample | Source returns HTTP 410 Gone; a live public URL is needed to test platform support |
 
 Spotify, Apple Music, and Deezer catalog pages do not supply downloadable full

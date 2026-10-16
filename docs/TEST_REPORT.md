@@ -4,7 +4,7 @@
 
 The 23-item owner report prompted changes to native Telegram delivery, metadata,
 collection browsing, direct episode matching, and search ranking. Local Ruff,
-mypy, and 30 automated tests passed before deployment. A synthetic VP9 WebM
+mypy, and 31 automated tests passed before deployment. A synthetic VP9 WebM
 converted to H.264 MP4 and passed ffprobe; an oversize synthetic episode was
 compressed below the test upload limit. These tests do not establish that
 every third-party source is anonymously accessible.
@@ -37,6 +37,9 @@ Read-only checks on the supplied Freestyle VM found:
   resolver returns its 4,140-second audio with the original Castbox Link;
   a live owner test completed with one Telegram media receipt and the correct
   Persian episode title, podcast name, and original Castbox Link.
+- A pinned community-post extractor returned nine and three ordered images for
+  the owner's two YouTube `/post/` samples. Both live Telegram jobs completed
+  with nine and three native photo receipts respectively.
 - A TikTok music-page extractor is currently unsupported upstream; music from
   photo posts is handled separately when the public post API exposes it.
 
