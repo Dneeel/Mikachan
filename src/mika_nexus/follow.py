@@ -13,8 +13,11 @@ import re
 import secrets
 import signal
 import sqlite3
+import shutil
+import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
@@ -148,6 +151,10 @@ class FollowStore:
         CREATE TABLE IF NOT EXISTS follow_baselines (
           follow_id TEXT NOT NULL, category TEXT NOT NULL,
           PRIMARY KEY(follow_id,category));
+        CREATE TABLE IF NOT EXISTS follow_health (
+          follow_id TEXT NOT NULL, category TEXT NOT NULL,
+          failures INTEGER NOT NULL DEFAULT 0, warned INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY(follow_id,category));
         CREATE INDEX IF NOT EXISTS follows_due ON follows(next_check);
         CREATE TABLE IF NOT EXISTS follow_downloads (
           token TEXT PRIMARY KEY, follow_id TEXT NOT NULL, user_id INTEGER NOT NULL,
@@ -194,6 +201,7 @@ class FollowStore:
         if row:
             self.db.execute("DELETE FROM follow_seen WHERE follow_id=?", (token,))
             self.db.execute("DELETE FROM follow_baselines WHERE follow_id=?", (token,))
+            self.db.execute("DELETE FROM follow_health WHERE follow_id=?", (token,))
         return bool(row)
 
 
@@ -241,9 +249,19 @@ def settings_panel(session) -> tuple[str, InlineKeyboardMarkup]:
 
 
 async def _extract(command: list[str], timeout: int) -> object:
+    executable = shutil.which(command[0]) or str(Path(sys.executable).with_name(command[0]))
+    if not Path(executable).is_file():
+        raise ValueError("public source extractor is not installed")
+    command = [executable, *command[1:]]
+    if Path(executable).name == "gallery-dl":
+        command = [command[0], "--config-ignore", "--cache-file", ":memory:", *command[1:]]
+    network_env = {key: value for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+                    "NO_PROXY", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE")
+                   if (value := os.environ.get(key))}
+    network_env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + os.environ.get("PATH", "")
     proc = await asyncio.create_subprocess_exec(
         *command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-        start_new_session=True, env={"PATH": os.environ.get("PATH", "")})
+        start_new_session=True, env=network_env)
     try:
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout)
     except (TimeoutError, asyncio.CancelledError):
@@ -258,9 +276,11 @@ async def _extract(command: list[str], timeout: int) -> object:
 def _gallery_items(data: object, target: Target, kind: str) -> list[tuple[str, str, str]]:
     if not isinstance(data, list):
         raise ValueError("invalid gallery response")
+    if any(isinstance(message, list) and message and message[0] == -1 for message in data):
+        raise ValueError("public gallery source returned an error")
     found: dict[str, tuple[str, str, str]] = {}
     for message in data:
-        if not isinstance(message, list) or len(message) < 3 or not isinstance(message[-1], dict):
+        if not isinstance(message, list) or len(message) < 2 or not isinstance(message[-1], dict):
             continue
         meta = message[-1]
         if target.platform == "instagram":
@@ -284,7 +304,9 @@ def _gallery_items(data: object, target: Target, kind: str) -> list[tuple[str, s
             url = clean_url(url)
         except ValueError:
             continue
-        found[str(item_id)] = (event_kind, url, str(meta.get("description") or meta.get("title") or "")[:300])
+        found[str(item_id)] = (event_kind, url,
+                               str(meta.get("description") or meta.get("content")
+                                   or meta.get("title") or "")[:300])
     return list(found.values())[:15]
 
 
@@ -324,7 +346,7 @@ async def public_profile(target: Target) -> dict[str, str]:
             data = await _extract(["gallery-dl", "-J", "--range", "1-1", endpoint], 25)
             if isinstance(data, list):
                 for message in data:
-                    if not isinstance(message, list) or len(message) < 3 or not isinstance(message[-1], dict):
+                    if not isinstance(message, list) or len(message) < 2 or not isinstance(message[-1], dict):
                         continue
                     meta = message[-1]
                     if target.platform == "instagram":
@@ -406,6 +428,27 @@ class FollowService:
             except Exception:
                 pass
 
+    async def _source_health(self, row, category: str, healthy: bool) -> None:
+        if healthy:
+            self.db.db.execute("DELETE FROM follow_health WHERE follow_id=? AND category=?",
+                               (row["id"], category))
+            return
+        self.db.db.execute("INSERT INTO follow_health VALUES (?,?,1,0) "
+                           "ON CONFLICT(follow_id,category) DO UPDATE SET failures=failures+1",
+                           (row["id"], category))
+        entry = self.db.db.execute("SELECT failures,warned FROM follow_health "
+                                   "WHERE follow_id=? AND category=?",
+                                   (row["id"], category)).fetchone()
+        if entry["failures"] == 3 and not entry["warned"]:
+            self.db.db.execute("UPDATE follow_health SET warned=1 WHERE follow_id=? AND category=?",
+                               (row["id"], category))
+            try:
+                await self.bot.send_message(row["chat_id"],
+                    f"⚠️ Follow @{html.escape(row['handle'])}: public {html.escape(category)} "
+                    "checks are unavailable. Other selected categories will keep working.")
+            except Exception:
+                pass
+
     async def check(self, row) -> None:
         target = Target(row["platform"], row["handle"], row["url"])
         selected = set(json.loads(row["features"]))
@@ -415,8 +458,11 @@ class FollowService:
         main_ok = False
         story_ok = False
         if selected & {"posts", "reels", "tweets", "videos"}:
-            batches.extend(await public_items(target))
-            main_ok = True
+            try:
+                batches.extend(await public_items(target))
+                main_ok = True
+            except (ValueError, TimeoutError, OSError, json.JSONDecodeError):
+                pass
         shorts_ok = False
         if "shorts" in selected:
             try:
@@ -438,6 +484,17 @@ class FollowService:
                 pass
         if not main_ok and not shorts_ok and not story_ok and not profile:
             raise ValueError("no public data")
+        health = {}
+        if selected & {"posts", "reels", "tweets", "videos"}:
+            health["timeline"] = main_ok
+        if "shorts" in selected:
+            health["shorts"] = shorts_ok
+        if "stories" in selected:
+            health["stories"] = story_ok
+        if selected & {"bio", "name", "avatar"}:
+            health["profile"] = bool(profile)
+        for category, healthy in health.items():
+            await self._source_health(row, category, healthy)
         old_profile = json.loads(row["profile_data"])
         for event_kind, url, title in reversed(batches):
             if event_kind not in selected:
