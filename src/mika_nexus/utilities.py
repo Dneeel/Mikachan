@@ -56,6 +56,8 @@ def open_image(raw: bytes) -> Image.Image:
         raise ValueError("File exceeds the 8 MiB utility limit")
     try:
         image = Image.open(io.BytesIO(raw))
+        if image.width * image.height > 20_000_000:
+            raise ValueError("Image exceeds the 20 MP utility limit")
         image.verify()
         image = Image.open(io.BytesIO(raw))
         if getattr(image, "n_frames", 1) != 1:
