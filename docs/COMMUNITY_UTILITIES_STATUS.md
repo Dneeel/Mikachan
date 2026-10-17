@@ -1,6 +1,6 @@
 # Community and Utilities delivery ledger — 2026-10-17
 
-This ledger separates code and offline tests from Telegram acceptance. The integrated source passes 63 offline tests, Ruff and mypy. No bot token, production chat, existing server, or live Telegram update was used for this build.
+This ledger separates code and offline tests from Telegram acceptance. The current workspace source passes 69 offline tests, Ruff and mypy. The previous Daytona acceptance used an earlier 63-test build. No live Telegram update has exercised the new market inputs; a direct market API request did succeed from this workspace.
 
 | Feature IDs | Delivered behavior | Current evidence / remaining limit |
 | --- | --- | --- |
@@ -12,7 +12,7 @@ This ledger separates code and offline tests from Telegram acceptance. The integ
 | F041 | Create/add/remove a Telegram static sticker pack, bound to the numeric creator ID, via Telegram's sticker-set API. | Implemented; live Telegram ownership/API acceptance pending. |
 | F049, F050, F055, F056 | Unicode QR creation and independent decode, QR/barcode scan, local Tesseract OCR, real CSV↔JSON conversion for flat tables. | QR decode, image and table validity offline-tested. OCR is English-only on this host (`fas` language data absent); Persian OCR pending. Barcode and Telegram file handling acceptance pending. |
 | F057+F058 | Open-Meteo geocoding, modeled current conditions and 3-day forecast; ambiguous places ask for refinement. | Provider endpoints returned HTTP 200 in read-only probe; live Telegram presentation pending. |
-| F060+F062 | Fiat reference pair and BTC/ETH spot pair, with fixed provider choices persisted for owner control. | Frankfurter, Open ER API, CoinGecko and CoinPaprika endpoints returned HTTP 200 in read-only probes. No Iranian cash-rate claim. Live Telegram output pending. |
+| F060+F062 | Fiat reference pair and BTC/ETH spot pair, with fixed provider choices persisted for owner control; exact `دلار`, `سکه`, `ارز` and `/rate USD|EUR|AED|SEKE IRT` use a bounded Toman market snapshot. | Global provider probes and direct Gheymat API response passed. Iranian quotes are a named multi-source estimate; upstream trade time is unavailable, so fetch time is labelled separately. Mocked access, provider failure, units, and cache tests pass. Telegram presentation pending. |
 | F066+F067 | IANA-zone local/Gregorian/Jalali time; per-user list of up to 10 saved zones. | Offline code and zone data; Telegram acceptance pending. |
 | F071 | Dated NASA APOD metadata and media URL, including media type. If today's endpoint returns HTTP 500 before publication, request yesterday's entry and display its actual date. | Today's NASA endpoint returned HTTP 500; previous day's returned HTTP 200 in read-only probe. Live Telegram presentation pending. |
 | F111 | Explicit `/translate en|fa TEXT` or approved Persian exact-prefix forms; reply-based input; configurable HTTPS LibreTranslate-compatible provider. | **Pending configured provider and owner privacy choice.** No text is sent when unconfigured. Text sent to a configured third party is labeled in the response. |

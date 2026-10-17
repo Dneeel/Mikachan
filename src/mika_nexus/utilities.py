@@ -23,6 +23,7 @@ from aiogram.types import BufferedInputFile, InputSticker, Message
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 from .config import Settings
+from .market_prices import MarketPrices
 
 MAX_INPUT = 8 * 1024 * 1024
 Image.MAX_IMAGE_PIXELS = 20_000_000
@@ -142,6 +143,7 @@ class Utilities:
     def __init__(self, bot: Bot, settings: Settings, db: sqlite3.Connection):
         self.bot, self.settings, self.db = bot, settings, db
         self.media_slots = asyncio.Semaphore(2)
+        self.market_prices = MarketPrices()
         db.execute("CREATE TABLE IF NOT EXISTS utility_packs (name TEXT PRIMARY KEY, owner_id INTEGER NOT NULL)")
         db.execute("CREATE TABLE IF NOT EXISTS favorite_zones (user_id INTEGER NOT NULL, "
                    "zone TEXT NOT NULL, PRIMARY KEY(user_id,zone))")
@@ -231,13 +233,15 @@ class Utilities:
                     codes = await asyncio.to_thread(decode_codes, raw)
                 await m.reply(html.escape("\n".join(codes)[:3500] if codes else "No readable code found."))
             elif cmd == "/ocr":
-                open_image(raw)
-                languages = subprocess.run(["tesseract", "--list-langs"], capture_output=True,
-                                           text=True, timeout=5).stdout
-                lang = "eng+fas" if "fas" in languages else "eng"
-                if arg.strip().lower() == "fas" and "fas" not in languages:
-                    raise ValueError("Persian OCR data is not installed on this host")
-                data = await asyncio.to_thread(self._ocr, raw, lang)
+                async with self.media_slots:
+                    await asyncio.to_thread(open_image, raw)
+                    languages = (await asyncio.to_thread(
+                        subprocess.run, ["tesseract", "--list-langs"],
+                        capture_output=True, text=True, timeout=5)).stdout
+                    lang = "eng+fas" if "fas" in languages else "eng"
+                    if arg.strip().lower() == "fas" and "fas" not in languages:
+                        raise ValueError("Persian OCR data is not installed on this host")
+                    data = await asyncio.to_thread(self._ocr, raw, lang)
                 await m.reply(html.escape(data[:3500] or "No text recognized.") +
                               ("\nEnglish OCR only on this host." if lang == "eng" else ""))
             elif cmd == "/sticker":
@@ -271,7 +275,8 @@ class Utilities:
             if not sticker or not sticker.is_animated:
                 raise ValueError("Reply to an animated TGS sticker with /gif")
             raw, _ = await self.reply_file(m)
-            result = await self.tgs_to_gif(raw)
+            async with self.media_slots:
+                result = await self.tgs_to_gif(raw)
             await m.reply_document(BufferedInputFile(result, "sticker.gif"))
         elif cmd == "/pack":
             if not m.from_user:
@@ -362,9 +367,16 @@ class Utilities:
         elif cmd == "/rate":
             parts = arg.upper().split()
             if len(parts) != 2 or not all(p.isalpha() and len(p) <= 5 for p in parts):
-                raise ValueError("Use /rate USD EUR or /rate BTC USD")
+                raise ValueError("Use /rate USD EUR, /rate BTC USD, or /rate USD IRT")
             base, quote = parts
-            if base in {"BTC", "ETH"} and quote in {"USD", "EUR"}:
+            if quote == "IRT" and base in {"USD", "EUR", "AED", "SEKE"}:
+                await m.reply(html.escape(await self.market_prices.report((base,))))
+            elif "IRT" in {base, quote}:
+                raise ValueError("Supported Iranian Toman quotes: USD, EUR, AED and SEKE / IRT")
+            elif "IRR" in {base, quote}:
+                raise ValueError("Official IRR reference rates do not represent Iran's open market. "
+                                 "Use /rate USD IRT for a Toman market estimate.")
+            elif base in {"BTC", "ETH"} and quote in {"USD", "EUR"}:
                 if self.provider("crypto") == "coinpaprika":
                     asset = "btc-bitcoin" if base == "BTC" else "eth-ethereum"
                     data = await self.api(f"https://api.coinpaprika.com/v1/tickers/{asset}",

@@ -6,6 +6,7 @@ import json
 import time
 from collections.abc import Mapping, Sequence
 
+import httpx
 from aiogram import Bot, Dispatcher, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
@@ -109,7 +110,8 @@ HELP_TEXT = (
     "/nickname, /del, /mute, /modlog.\n"
     "<b>Utilities:</b> /qr TEXT, /scan, /ocr, /image png|jpeg|webp, /sticker, "
     "/stickerimage, /gif, /pack, /convert csv|json, /weather CITY, /rate BASE QUOTE, "
-    "/time IANA_ZONE, /apod, /translate en|fa TEXT. File tools use a reply; "
+    "exact دلار, سکه, ارز for Toman market quotes; /time IANA_ZONE, /apod, "
+    "/translate en|fa TEXT. File tools use a reply; "
     "translation sends selected text to the configured external provider.\n"
     "<b>Owner:</b> /admin. Cultural content requires reviewed imports."
 )
@@ -161,7 +163,7 @@ class App:
                 return
         if m.chat.type in {"group", "supergroup"}:
             command_name = text.split(" ", 1)[0].split("@")[0].lower().lstrip("/")
-            explicit_text = (text in {"فال", "شعر", "ارز"} or
+            explicit_text = (text in {"فال", "شعر", "ارز", "دلار", "سکه"} or
                              text.startswith(("ارز ", "ترجمه ")))
             builtin = command_name in {
                 "help", "search", "music", "podcast", "pod", "twitter", "instagram",
@@ -177,13 +179,21 @@ class App:
                 self.community.store.use(m.chat.id, m.from_user.id, "request")
         if (m.chat.type in {"group", "supergroup"} and
                 not self.community.store.enabled(m.chat.id, "utilities") and
-                (text == "ارز" or text.startswith(("ارز ", "ترجمه ")))):
+                (text in {"ارز", "دلار", "سکه"} or
+                 text.startswith(("ارز ", "ترجمه ")))):
             return
         if text in {"فال", "شعر"}:
             await self.community.command(m, "/fal" if text == "فال" else "/poem", "")
             return
         if text == "ارز":
-            await m.reply("Use /rate BASE QUOTE, for example /rate USD EUR or /rate BTC USD.")
+            try:
+                await m.reply(html.escape(await self.utilities.market_prices.report(
+                    ("USD", "EUR", "AED"))))
+            except (ValueError, httpx.HTTPError) as exc:
+                await m.reply(html.escape(str(exc)[:300]))
+            return
+        if text in {"دلار", "سکه"}:
+            await self.utilities.command(m, "/rate", "USD IRT" if text == "دلار" else "SEKE IRT")
             return
         if text.startswith("ارز "):
             await self.utilities.command(m, "/rate", text[4:].strip())

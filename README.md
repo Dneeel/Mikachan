@@ -6,7 +6,7 @@ The downloader asks for **✅ Yes / ❌ No** before processing each submitted UR
 
 ## Current build status
 
-The integrated build passes **63 tests**, Ruff, and mypy on the Daytona deployment. Telegram accepted its identity and command list, and an outbound owner message succeeded. Daytona's tier restricts access to external content providers, so live weather, rates, APOD, and downloader source delivery are not verified there. The sandbox is stopped when tests are complete. See the [Daytona deployment check](docs/DAYTONA_DEPLOYMENT_2026-10-17.md), [new feature ledger](docs/COMMUNITY_UTILITIES_STATUS.md), [downloader test report](docs/TEST_REPORT.md), and [owner status](docs/OWNER_ACCEPTANCE.md).
+The current workspace build passes **69 tests**, Ruff, and mypy. The earlier Daytona deployment passed 63 tests; Telegram accepted its identity and command list, and an outbound owner message succeeded. Daytona's tier restricts access to external content providers, so live weather, rates, APOD, and downloader source delivery are not verified there. The sandbox is stopped when tests are complete. A direct Iranian market API read succeeded from this workspace, but Telegram delivery of the new quotes remains unverified. See the [Daytona deployment check](docs/DAYTONA_DEPLOYMENT_2026-10-17.md), [new feature ledger](docs/COMMUNITY_UTILITIES_STATUS.md), [market data research](docs/MARKET_DATA_RESEARCH_2026-10-17.md), [downloader test report](docs/TEST_REPORT.md), and [owner status](docs/OWNER_ACCEPTANCE.md).
 
 ## Commands
 
@@ -14,7 +14,7 @@ Downloader: `/help`, `/search [query]`, `/music [query]`, `/podcast [query]`, `/
 
 Community: `/fal` or exact `فال`, `/poem` or exact `شعر`, `/joke`, `/quote`, `/dice`; in groups `/rules`, `/note NAME`, `/groupstats`, `/groupsettings`. Group admins/owner can use `/setrules TEXT`, `/setnote NAME TEXT`, `/delnote NAME`, `/setcmd NAME TEXT`, `/delcmd NAME`, `/welcome on|off|TEXT`, `/nickname NAME` (reply to the member, or omit to remove), `/del`, `/mute` (reply to the target message), `/modlog`, and `/groupsettings culture|notes|utilities on|off`. The cultural catalog starts empty until reviewed content is imported.
 
-Utilities: `/qr TEXT` (or reply to text), `/scan`, `/ocr`, `/image png|jpeg|webp`, `/sticker`, `/stickerimage`, `/gif`, `/pack create SHORTNAME|TITLE|EMOJI`, `/pack add SHORTNAME|EMOJI`, `/pack remove`, `/convert json|csv`, `/weather CITY[, COUNTRY]`, `/rate USD EUR` or `/rate BTC USD`, `/time Asia/Tehran`, `/time add|remove|list`, `/apod`, `/translate en|fa TEXT`. File tools require a reply to selected media. `/admin provider fiat|crypto NAME` sets a fixed price provider. `/groupsettings`, commands, callbacks and exact triggers still require both user and group authorization.
+Utilities: `/qr TEXT` (or reply to text), `/scan`, `/ocr`, `/image png|jpeg|webp`, `/sticker`, `/stickerimage`, `/gif`, `/pack create SHORTNAME|TITLE|EMOJI`, `/pack add SHORTNAME|EMOJI`, `/pack remove`, `/convert json|csv`, `/weather CITY[, COUNTRY]`, `/rate USD EUR`, `/rate BTC USD`, `/rate USD IRT`, exact `دلار`, `سکه`, or `ارز`, `/time Asia/Tehran`, `/time add|remove|list`, `/apod`, `/translate en|fa TEXT`. Iranian market quotes are Toman estimates with source and fetch time, not official IRR rates or guaranteed executable prices. File tools require a reply to selected media. `/admin provider fiat|crypto NAME` sets a fixed global reference-rate provider. `/groupsettings`, commands, callbacks and exact triggers still require both user and group authorization.
 
 ## Setup in isolated Ubuntu workspace
 
