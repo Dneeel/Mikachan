@@ -21,7 +21,6 @@ import httpx
 from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from .catalog import _Meta
 from .security import allowed, clean_url, source, validate_dns
 from .store import Store
 
@@ -120,7 +119,7 @@ def creator_from_post(url: str, meta: dict[str, object] | None = None) -> Target
         if found:
             return found
     if platform == "instagram":
-        candidate = meta.get("username") or meta.get("uploader")
+        candidate = meta.get("username") or meta.get("uploader_id") or meta.get("uploader")
         if (isinstance(candidate, str) and re.fullmatch(r"[\w.]{1,30}", candidate)
                 and not candidate.isdigit()):
             return profile_target(f"https://www.instagram.com/{candidate}/")
@@ -156,6 +155,7 @@ class FollowStore:
         """)
 
     def session(self, user: int, chat: int, target: Target) -> str:
+        self.db.execute("DELETE FROM follow_sessions WHERE expires<?", (time.time(),))
         token = secrets.token_urlsafe(8)
         defaults = [x for x in FEATURES[target.platform] if x not in {"stories", "bio", "name", "avatar"}]
         self.db.execute("INSERT INTO follow_sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -315,7 +315,7 @@ async def public_items(target: Target, kind: str = "posts") -> list[tuple[str, s
 
 
 async def public_profile(target: Target) -> dict[str, str]:
-    """Prefer structured public profile fields; OG summaries are not a reliable bio."""
+    """Use structured public fields; OG summaries are not reliable change signals."""
     await asyncio.to_thread(validate_dns, target.url)
     if target.platform in {"instagram", "twitter", "tiktok"}:
         endpoint = (target.url.rstrip("/") + "/info" if target.platform != "tiktok"
@@ -354,13 +354,7 @@ async def public_profile(target: Target) -> dict[str, str]:
                         return _stable_profile(result)
         except (ValueError, TimeoutError, OSError, json.JSONDecodeError):
             pass
-    async with httpx.AsyncClient(timeout=12, follow_redirects=False) as client:
-        response = await client.get(target.url, headers={"User-Agent": "facebookexternalhit/1.1"})
-        response.raise_for_status()
-    parser = _Meta()
-    parser.feed(response.text[:500_000])
-    data = parser.data
-    return _stable_profile({"name": data.get("og:title", ""), "avatar": data.get("og:image", "")})
+    raise ValueError("structured public profile data unavailable")
 
 
 def _stable_profile(data: dict[str, object]) -> dict[str, str]:
@@ -502,6 +496,7 @@ class FollowService:
              InlineKeyboardButton(text="⬇️ Download", callback_data=f"fd:{row['id']}:{secrets.token_urlsafe(5)}")]])
         # A short token maps to a validated URL; callback data never contains URLs.
         token = markup.inline_keyboard[0][1].callback_data.split(":")[-1]
+        self.db.db.execute("DELETE FROM follow_downloads WHERE expires<?", (time.time(),))
         self.db.db.execute("INSERT INTO follow_downloads VALUES (?,?,?,?,?)",
                            (token, row["id"], row["user_id"], url, time.time() + 86400))
         await self.bot.send_message(row["chat_id"],
