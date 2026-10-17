@@ -91,6 +91,7 @@ def public_media_result(hit: dict[str, object]) -> bool:
         ("ytmusic", "episode"),
         ("apple_podcasts", "episode"),
         ("spotify", "track"),
+        ("spotify", "episode"),
         ("apple", "track"),
         ("deezer", "track"),
     }
@@ -280,6 +281,8 @@ class App:
             )
         )
         sources = {"apple", "apple_podcasts", "deezer", "soundcloud", "ytmusic", "youtube"}
+        if self.searcher.health["spotify"] != "credentials required":
+            sources.add("spotify")
         pref = self.store.preferences(m.from_user.id)
         if pref:
             saved_kinds, sources = pref
@@ -357,7 +360,7 @@ class App:
             }:
                 body += "\n\nBrowse available items in this collection."
                 buttons = [[("Browse items", f"s:{sid}:l:{detail}:{gen}")]]
-            elif h["kind"] == "podcast" and h["source"] == "apple_podcasts":
+            elif h["kind"] == "podcast" and h["source"] in {"apple_podcasts", "spotify"}:
                 body += "\n\nBrowse public episodes."
                 buttons = [[("Browse episodes", f"s:{sid}:l:{detail}:{gen}")]]
             else:

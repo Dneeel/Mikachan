@@ -5,6 +5,14 @@ from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+class ProviderSettings(BaseSettings):
+    """Optional catalog credentials, read from the same .env as the bot."""
+
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    spotify_client_id: str = ""
+    spotify_client_secret: str = ""
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
     bot_token: str

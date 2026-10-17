@@ -1,4 +1,15 @@
-# Test report — 2026-10-16
+# Test report — 2026-10-17
+
+## Local downloader hardening after the 21-repository audit
+
+- No Freestyle VM or production VPS was used. Local Python environment: **51 tests passed**, Ruff clean, mypy clean. These checks cover matching, media preparation, search adapters, SQLite behavior, and presentation; they do not establish live Telegram or source-site success.
+- Music matching now rejects a candidate with the same title and duration but a different artist, and rejects a candidate more than 20 seconds from the requested duration before download. `unofficial`, `tribute`, and `slow`/`slowed` are explicit version distinctions. Spotify catalog aliases with non-Latin titles are rejected when Apple returns multiple equally plausible titles for the same artist and duration; a remaster no longer silently matches an unlabelled recording.
+- Apple, Apple Podcasts, Deezer and YouTube Music subtype requests now run concurrently with bounded concurrency. A failed subtype can leave successful subtype results intact. Spotify search now supports shows and episodes and reuses its client-credentials token until expiry; configured Spotify search is selected by default. Spotify shows, albums and playlists can be browsed in order through up to 300 official API records when catalog credentials are available; mocked 121-item show and playlist pagination tests passed. Public music embeds remain a fallback when the official API cannot serve a collection. Search retains up to 150 independently paginated results.
+- Gallery transfer now has separate per-file and bounded total budgets: a collection of valid photos need not fit inside one file's Telegram limit. JPEG/PNG/WebP signatures and near-zero video duration are checked before native delivery. Already compatible H.264/AAC MP4 is preserved; incompatible audio/video is converted for Telegram. A definite invalid cached Telegram file ID triggers a fresh download; ambiguous delivery errors still become `DELIVERY_UNCERTAIN` to prevent duplicates.
+- A read-only probe of the five reported Spotify track URLs was attempted locally. It could not reach source metadata because this execution environment's DNS lookup failed and its configured HTTP proxy refused connections. No live success is claimed for those tracks on this build.
+- Optional Spotify catalog credentials are now read from the project's `.env` through `ProviderSettings`, for search and collection browsing. Previously those paths used `os.getenv`, so values placed only in `.env` were invisible to them. The doctor command reports configured/unconfigured status without printing secrets.
+
+## Previous results (2026-10-16)
 
 ## Music and interface follow-up
 

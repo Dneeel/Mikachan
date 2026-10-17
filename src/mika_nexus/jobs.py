@@ -14,6 +14,7 @@ from urllib.parse import urljoin, urlsplit
 
 import httpx
 from aiogram import Bot
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import (
     FSInputFile,
     InlineKeyboardButton,
@@ -28,9 +29,9 @@ from aiogram.types import (
 from .config import Settings
 from .security import source, validate_dns, collection, clean_url
 from .store import Store
-from .media import groups, media_kind, verify
+from .media import gallery_budget, groups, media_kind, verify
 from .catalog import _Meta, recording_search_alias, resolve_collection, resolve_track
-from .matching import match_score, version
+from .matching import match_score
 from .search import Searcher
 from .podcasts import apple_podcast_feed, episodes, is_feed_url, resolve_episode_link
 
@@ -45,6 +46,14 @@ MIME_EXT = {
     "application/pdf": ".pdf",
     "application/zip": ".zip",
 }
+
+
+def invalid_cached_file_id(exc: TelegramBadRequest) -> bool:
+    """Only a definite file-ID rejection permits a fresh download and resend."""
+    detail = str(exc).lower()
+    return any(text in detail for text in (
+        "wrong file identifier", "file_id is invalid", "wrong remote file identifier",
+    ))
 
 
 def extractor_error(url: str, stderr: bytes) -> str:
@@ -294,22 +303,34 @@ class Worker:
                         sent = await self.bot.send_document(
                             chat, cached["file_id"], caption=value, reply_markup=markup,
                         )
+                except TelegramBadRequest as exc:
+                    if invalid_cached_file_id(exc):
+                        self.store.db.execute("DELETE FROM cache WHERE key=?", (key,))
+                        self.store.db.execute("DELETE FROM cache_captions WHERE key=?", (key,))
+                        self.store.db.execute("DELETE FROM cache_audio WHERE key=?", (key,))
+                        self.store.transition(jid, "DELIVERING", "RESOLVING")
+                    else:
+                        self.store.transition(
+                            jid, "DELIVERING", "DELIVERY_UNCERTAIN", error=type(exc).__name__
+                        )
+                        return
                 except Exception as exc:
                     self.store.transition(
                         jid, "DELIVERING", "DELIVERY_UNCERTAIN", error=type(exc).__name__
                     )
                     return
-                self.store.receipt(
-                    jid,
-                    sent.message_id,
-                    sent.audio.file_id if sent.audio else
-                    sent.video.file_id if sent.video else
-                    sent.photo[-1].file_id if sent.photo else
-                    sent.document.file_id if sent.document else None,
-                )
-                self.store.transition(jid, "DELIVERING", "COMPLETED", receipt_id=sent.message_id)
-                await self._clear_progress(jid, chat)
-                return
+                else:
+                    self.store.receipt(
+                        jid,
+                        sent.message_id,
+                        sent.audio.file_id if sent.audio else
+                        sent.video.file_id if sent.video else
+                        sent.photo[-1].file_id if sent.photo else
+                        sent.document.file_id if sent.document else None,
+                    )
+                    self.store.transition(jid, "DELIVERING", "COMPLETED", receipt_id=sent.message_id)
+                    await self._clear_progress(jid, chat)
+                    return
             if await self._profile(jid, original_url, chat, job_dir):
                 return
             if collection(url):
@@ -415,7 +436,7 @@ class Worker:
                 return
             self.store.transition(jid, "DOWNLOADING", "VERIFYING", artifact=str(job_dir))
             await self._progress(jid, chat, "Processing")
-            if sum(p.stat().st_size for p in paths) > max_bytes:
+            if sum(p.stat().st_size for p in paths) > gallery_budget(max_bytes):
                 raise ValueError("gallery exceeds Bot API mode limit")
             if mode != "document":
                 paths = await self._prepare_media(paths, max_bytes)
@@ -762,28 +783,30 @@ class Worker:
             f"https://www.tiktok.com/@{username}/avatar" if provider == "tiktok"
             else f"https://www.instagram.com/{username}/avatar/"
         )
-        proc = await asyncio.create_subprocess_exec(
-            "gallery-dl", "-j", "--range", "1-1", avatar_target,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-            start_new_session=True, env={"PATH": os.environ.get("PATH", "")},
-        )
-        try:
-            stdout, _ = await asyncio.wait_for(proc.communicate(), 25)
-            messages = json.loads(stdout)
-            for message in messages:
-                if isinstance(message, list) and len(message) >= 3 and message[0] == 3:
-                    avatar_url = clean_url(str(message[1]))
-                    meta = message[2] if isinstance(message[2], dict) else {}
-                    user = meta.get("user") if isinstance(meta.get("user"), dict) else meta
-                    if isinstance(user, dict):
-                        display = str(user.get("nickname") or user.get("full_name") or display)
-                        bio = str(user.get("signature") or user.get("biography") or "")
-                    break
-        except (TimeoutError, ValueError, OSError):
-            import signal
-            if proc.returncode is None:
-                os.killpg(proc.pid, signal.SIGTERM)
-                await proc.wait()
+        if shutil.which("gallery-dl"):
+            proc: asyncio.subprocess.Process | None = None
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "gallery-dl", "-j", "--range", "1-1", avatar_target,
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+                    start_new_session=True, env={"PATH": os.environ.get("PATH", "")},
+                )
+                stdout, _ = await asyncio.wait_for(proc.communicate(), 25)
+                messages = json.loads(stdout)
+                for message in messages:
+                    if isinstance(message, list) and len(message) >= 3 and message[0] == 3:
+                        avatar_url = clean_url(str(message[1]))
+                        meta = message[2] if isinstance(message[2], dict) else {}
+                        user = meta.get("user") if isinstance(meta.get("user"), dict) else meta
+                        if isinstance(user, dict):
+                            display = str(user.get("nickname") or user.get("full_name") or display)
+                            bio = str(user.get("signature") or user.get("biography") or "")
+                        break
+            except (TimeoutError, ValueError, OSError):
+                import signal
+                if proc is not None and proc.returncode is None:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                    await proc.wait()
         if not avatar_url:
             validate_dns(url)
             async with httpx.AsyncClient(timeout=12, follow_redirects=False) as client:
@@ -858,10 +881,6 @@ class Worker:
                                               track.duration, hit.duration))
                     scores.append(match_score(search_core, alias[1], hit.title, hit.creator,
                                               track.duration, hit.duration))
-                if version(track.title) == frozenset({"remaster"}):
-                    base = re.sub(r"(?i)[\s(-]*\b(?:19|20)\d\d\s+remaster(?:ed)?\b[\s)-]*", "", track.title)
-                    scores.append(match_score(base, track.artist, hit.title, hit.creator,
-                                              track.duration, hit.duration) - 0.04)
                 return max(scores)
             ranked = sorted(hits, key=lambda h: score_hit(h) +
                             (0.03 if h.source == "ytmusic" else 0.0), reverse=True)
@@ -1001,20 +1020,33 @@ class Worker:
         for path in paths:
             check = await verify(path, max_bytes)
             suffix = path.suffix.lower()
-            codec = ""
+            video_codec = ""
+            audio_codec = ""
             if check["video"] and suffix == ".mp4":
                 probe = await asyncio.create_subprocess_exec(
-                    "ffprobe", "-v", "error", "-select_streams", "v:0",
-                    "-show_entries", "stream=codec_name", "-of", "default=nw=1:nk=1",
+                    "ffprobe", "-v", "error", "-show_entries",
+                    "stream=codec_type,codec_name", "-of", "json",
                     str(path), stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.DEVNULL,
                 )
                 stdout, _ = await asyncio.wait_for(probe.communicate(), 20)
-                codec = stdout.decode(errors="replace").strip()
+                if probe.returncode == 0:
+                    streams = json.loads(stdout).get("streams", [])
+                    video_codec = next(
+                        (str(s.get("codec_name") or "") for s in streams
+                         if s.get("codec_type") == "video"), ""
+                    )
+                    audio_codec = next(
+                        (str(s.get("codec_name") or "") for s in streams
+                         if s.get("codec_type") == "audio"), ""
+                    )
             if check["audio"] and not check["video"]:
                 if suffix != ".mp3":
                     path = await self._transcode_mp3(path, max_bytes)
-            elif check["video"] and (suffix != ".mp4" or codec not in {"h264", "avc1"}):
+            elif check["video"] and (
+                suffix != ".mp4" or video_codec not in {"h264", "avc1"}
+                or check["audio"] and audio_codec != "aac"
+            ):
                 target = path.with_name(path.stem + ".telegram.mp4")
                 proc = await asyncio.create_subprocess_exec(
                     "ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(path),
@@ -1140,11 +1172,11 @@ class Worker:
             raise ValueError("TikTok photo unavailable; source may require login")
         if len(candidates) > 35:
             raise ValueError("TikTok photo collection is too large")
-        media_urls = [clean_url(candidate) for candidate in candidates[:10]]
+        media_urls = [clean_url(candidate) for candidate in candidates]
         paths: list[Path] = []
-        remaining = max_bytes
+        remaining = gallery_budget(max_bytes)
         for index, media_url in enumerate(media_urls):
-            path = await self._direct(media_url, directory, remaining, stem=f"{index:02d}")
+            path = await self._direct(media_url, directory, min(max_bytes, remaining), stem=f"{index:02d}")
             paths.append(path)
             remaining -= path.stat().st_size
         return paths
@@ -1173,12 +1205,12 @@ class Worker:
                         raise ValueError("TikTok video exceeds the Bot API limit")
                     candidates = [data.get("play")]
                 paths: list[Path] = []
-                remaining = max_bytes
+                remaining = gallery_budget(max_bytes)
                 for index, candidate in enumerate(candidates):
                     if not isinstance(candidate, str):
                         return None
                     target = clean_url(urljoin("https://www.tikwm.com", candidate))
-                    path = await self._direct(target, directory, remaining, stem=f"{index:02d}")
+                    path = await self._direct(target, directory, min(max_bytes, remaining), stem=f"{index:02d}")
                     paths.append(path)
                     remaining -= path.stat().st_size
                 if match[1] == "photo":
@@ -1188,7 +1220,7 @@ class Worker:
                     if isinstance(music_url, str) and music_url.startswith("https://"):
                         try:
                             sound = await self._direct(
-                                clean_url(music_url), directory, remaining, stem="sound"
+                                clean_url(music_url), directory, min(max_bytes, remaining), stem="sound"
                             )
                             paths.append(sound)
                         except (ValueError, httpx.HTTPError):
@@ -1259,9 +1291,9 @@ class Worker:
         if not urls or len(urls) > 31:
             return None
         paths: list[Path] = []
-        remaining = max_bytes
+        remaining = gallery_budget(max_bytes)
         for index, item in enumerate(urls):
-            path = await self._direct(clean_url(item), directory, remaining, stem=f"{index:02d}")
+            path = await self._direct(clean_url(item), directory, min(max_bytes, remaining), stem=f"{index:02d}")
             paths.append(path)
             remaining -= path.stat().st_size
         return paths

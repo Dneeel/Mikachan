@@ -53,6 +53,19 @@ class MusicLookupTests(unittest.IsolatedAsyncioTestCase):
             alias = await recording_search_alias(track)
         self.assertEqual(alias, ("Dress", "BUCK-TICK"))
 
+    async def test_ambiguous_same_artist_and_duration_is_not_an_alias(self):
+        track = CatalogTrack("魔法の鏡", "Yumi Arai", "url", 194)
+        client = MagicMock()
+        client.get = AsyncMock(return_value=response({"results": [
+            {"trackName": "Mirror", "artistName": "Yumi Arai", "trackTimeMillis": 194000},
+            {"trackName": "Magic", "artistName": "Yumi Arai", "trackTimeMillis": 194500},
+        ]}))
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=None)
+        with patch("mika_nexus.catalog.httpx.AsyncClient", return_value=client):
+            alias = await recording_search_alias(track)
+        self.assertIsNone(alias)
+
     async def test_genius_uses_attributed_full_page(self):
         api = response({"response": {"sections": [{"hits": [{"result": {
             "title": "ドレス (Dress)", "primary_artist": {"name": "BUCK-TICK"},

@@ -4,10 +4,14 @@ import subprocess
 import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
-from mika_nexus.media import groups, media_kind, verify
+from mika_nexus.media import gallery_budget, groups, media_kind, verify
 
 
 class GalleryTests(unittest.TestCase):
+    def test_gallery_has_bounded_total_distinct_from_one_file_limit(self):
+        self.assertEqual(gallery_budget(48 * 1024 * 1024), 288 * 1024 * 1024)
+        self.assertEqual(gallery_budget(1900 * 1024 * 1024), 1900 * 1024 * 1024)
+
     def test_partition_preserves_order(self):
         for n in (1, 2, 9, 10, 11, 12, 20, 21, 31):
             with self.subTest(n=n):
@@ -18,8 +22,53 @@ class GalleryTests(unittest.TestCase):
                 self.assertTrue(all(len(chunk) >= 2 for chunk in chunks[:-1]))
 
 
+class ImageValidationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_rejects_web_page_disguised_as_photo(self):
+        with tempfile.TemporaryDirectory() as d:
+            photo = Path(d) / "photo.jpg"
+            photo.write_bytes(b"<html>Access denied</html>")
+            with self.assertRaisesRegex(ValueError, "image content"):
+                await verify(photo, 1000)
+
+    async def test_accepts_image_signature(self):
+        with tempfile.TemporaryDirectory() as d:
+            photo = Path(d) / "photo.png"
+            photo.write_bytes(b"\x89PNG\r\n\x1a\n" + b"padding")
+            self.assertEqual(media_kind(photo, await verify(photo, 1000)), "photo")
+
+
+class CachedDeliveryTests(unittest.TestCase):
+    def test_only_definite_bad_file_id_is_safe_to_redownload(self):
+        from aiogram.exceptions import TelegramBadRequest
+        from aiogram.methods import SendAudio
+        from mika_nexus.jobs import invalid_cached_file_id
+
+        method = SendAudio(chat_id=1, audio="bad")
+        invalid = TelegramBadRequest(method, "Bad Request: wrong file identifier/HTTP URL specified")
+        uncertain = TelegramBadRequest(method, "Bad Request: message caption is too long")
+        self.assertTrue(invalid_cached_file_id(invalid))
+        self.assertFalse(invalid_cached_file_id(uncertain))
+
+
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg required")
 class Mp3Tests(unittest.IsolatedAsyncioTestCase):
+    async def test_telegram_compatible_video_keeps_original_file(self):
+        from mika_nexus.jobs import Worker
+
+        with tempfile.TemporaryDirectory() as d:
+            original = Path(d) / "original.mp4"
+            subprocess.run(
+                ["ffmpeg", "-v", "error", "-f", "lavfi", "-i",
+                 "testsrc2=size=320x240:rate=10:duration=1", "-f", "lavfi", "-i",
+                 "sine=frequency=440:duration=1", "-c:v", "libx264", "-c:a", "aac",
+                 "-shortest", "-y", str(original)], check=True,
+            )
+            prepared = (await Worker._prepare_media(
+                object.__new__(Worker), [original], 2_000_000,
+            ))[0]
+            self.assertEqual(prepared, original)
+            self.assertTrue(original.exists())
+
     async def test_large_episode_is_reencoded_below_public_upload_limit(self):
         from mika_nexus.jobs import Worker
 
@@ -57,6 +106,17 @@ class Mp3Tests(unittest.IsolatedAsyncioTestCase):
                  str(converted)], capture_output=True, text=True, check=True,
             ).stdout.strip()
             self.assertEqual(codec, "h264")
+
+    async def test_rejects_truncated_video_with_only_one_tiny_frame(self):
+        with tempfile.TemporaryDirectory() as d:
+            tiny = Path(d) / "tiny.mp4"
+            subprocess.run(
+                ["ffmpeg", "-v", "error", "-f", "lavfi", "-i",
+                 "color=size=320x240:rate=10:duration=0.1", "-c:v", "libx264",
+                 "-y", str(tiny)], check=True,
+            )
+            with self.assertRaisesRegex(ValueError, "meaningful duration"):
+                await verify(tiny, 2_000_000)
 
     async def test_post_audio_is_real_mp3(self):
         from mika_nexus.jobs import Worker

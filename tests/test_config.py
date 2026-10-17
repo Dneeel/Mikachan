@@ -1,9 +1,21 @@
 import unittest
+import tempfile
+from pathlib import Path
+from unittest.mock import patch
 from pydantic import ValidationError
-from mika_nexus.config import Settings
+from mika_nexus.config import ProviderSettings, Settings
 
 
 class ConfigTests(unittest.TestCase):
+    def test_optional_spotify_credentials_are_read_from_env_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            env_file = Path(d) / ".env"
+            env_file.write_text("SPOTIFY_CLIENT_ID=example-id\nSPOTIFY_CLIENT_SECRET=example-secret\n")
+            with patch.dict("os.environ", {}, clear=True):
+                providers = ProviderSettings(_env_file=env_file)
+        self.assertEqual(providers.spotify_client_id, "example-id")
+        self.assertEqual(providers.spotify_client_secret, "example-secret")
+
     def test_fail_closed(self):
         values = dict(bot_token="123:fake", owner_telegram_id=1, allowed_telegram_ids="1")
         self.assertEqual(Settings(**values).allowlist, {1})

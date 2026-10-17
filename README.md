@@ -4,7 +4,7 @@ Private, Telegram-native media utility. It asks for **✅ Yes / ❌ No** before 
 
 ## Current build status
 
-The bot is deployed on the supplied Freestyle Ubuntu VM with a dedicated systemd service. The current build has 31 passing automated tests, Ruff and mypy checks. The owner's Spotify sample yielded a verified full-length 220-second MP3 and a completed Telegram media receipt. A public Spotify playlist exposed 87 correctly named tracks, the owner's SoundCloud set opened a Telegram menu with three real titles, and the Jafekri RSS feed exposed 221 episodes. The owner's Castbox episode and SoundCloud track completed Telegram delivery. Both owner-provided YouTube community posts reached Telegram as native groups of nine and three photos. Public Apple and Spotify episode links can also be matched to exact public podcast enclosures. Videos and photos use Telegram's native media methods, with WebM video converted to MP4. **The full acceptance checklist is not yet passing**, especially anonymous Instagram stories/carousels and TikTok sound pages. The supplied Pornhub sample is gone (HTTP 410). The quota-limited VM is paused between test sessions, so the bot is offline while paused. See [test report](docs/TEST_REPORT.md), [owner status](docs/OWNER_ACCEPTANCE.md), [provider matrix](docs/PROVIDER_MATRIX.md), [acceptance ledger](docs/ACCEPTANCE_V1.md), and [research](docs/RESEARCH.md).
+The current source build passes **51 local tests**, Ruff, and mypy. Earlier Freestyle VM tests confirmed several Spotify, SoundCloud, Castbox and YouTube community-post deliveries, but that VM has reached its quota and **this source build has not been deployed or live-tested there**. The Telegram bot on that VM is offline. The full acceptance checklist is still open, especially anonymous Instagram stories/carousels and TikTok sound pages. The supplied Pornhub sample is gone (HTTP 410). See the [test report](docs/TEST_REPORT.md), [owner status](docs/OWNER_ACCEPTANCE.md), [provider matrix](docs/PROVIDER_MATRIX.md), [acceptance ledger](docs/ACCEPTANCE_V1.md), and [21-repository source audit](docs/THIRD_PARTY_SOURCE_AUDIT.md).
 
 ## Commands
 
@@ -13,7 +13,7 @@ The bot is deployed on the supplied Freestyle Ubuntu VM with a dedicated systemd
 ## Setup in isolated Ubuntu workspace
 
 1. Install Python 3.12+, `uv`, `ffmpeg`, and `ffprobe` in the intended deployment environment. yt-dlp, Deno and yt-dlp-ejs are installed through the locked project environment.
-2. Copy `.env.example` to `.env`; set `BOT_TOKEN`, `OWNER_TELEGRAM_ID`, `ALLOWED_TELEGRAM_IDS` (owner plus at most three others). Keep `.env` mode `0600`.
+2. Copy `.env.example` to `.env`; set `BOT_TOKEN`, `OWNER_TELEGRAM_ID`, `ALLOWED_TELEGRAM_IDS` (owner plus at most three others). Optional Spotify catalog search and show browsing require `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET`. Keep `.env` mode `0600`.
 3. Run `UV_CACHE_DIR=/tmp/mika-uv-cache uv sync --locked --extra dev`, then `uv run mika-nexus doctor`, `uv run python -m unittest discover -s tests -v`, and `uv run mika-nexus run`.
 4. Start in `BOT_API_MODE=public`; uploads above 48 MiB are refused. Local Bot API requires deliberate migration and separate server setup (see [installation](docs/INSTALL_UBUNTU.md)).
 

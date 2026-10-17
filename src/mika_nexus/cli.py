@@ -1,7 +1,7 @@
 import argparse
 import asyncio
 import shutil
-from .config import Settings
+from .config import ProviderSettings, Settings
 
 
 def main() -> None:
@@ -16,6 +16,11 @@ def main() -> None:
             print(f"config: valid; mode={s.bot_api_mode}; users={len(s.allowlist)}")
         except Exception:
             print("config: invalid; check required values in .env.example")
+        providers = ProviderSettings()
+        print("Spotify catalog: " + (
+            "configured" if providers.spotify_client_id and providers.spotify_client_secret
+            else "credentials not configured"
+        ))
         print("provider status: unverified until live acceptance")
         return
     from .bot import App
