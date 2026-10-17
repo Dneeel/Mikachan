@@ -1,10 +1,12 @@
-# MIKA NEXUS
+# Mikachan
 
-Private, Telegram-native media utility. It asks for **✅ Yes / ❌ No** before any network work on each submitted URL. `/music`, `/search`, and `/podcast` search public catalogs; provider failures are shown without invented results.
+Mikachan is a multi-purpose, Telegram-first bot in development. **Downloader & Media Discovery is its only currently implemented domain.** Community features, utilities, entertainment, and the planned personality system are separate future work. The existing downloader keeps its `mika_nexus` package and runtime names for compatibility.
+
+The downloader asks for **✅ Yes / ❌ No** before processing each submitted URL. `/music`, `/search`, and `/podcast` search public catalogs; provider failures are shown without invented results. [Architecture and ownership boundaries](docs/ARCHITECTURE_BOUNDARIES.md) describe the current code and how separate feature agents should coordinate changes.
 
 ## Current build status
 
-The current source build passes **51 local tests**, Ruff, and mypy. Earlier Freestyle VM tests confirmed several Spotify, SoundCloud, Castbox and YouTube community-post deliveries, but that VM has reached its quota and **this source build has not been deployed or live-tested there**. The Telegram bot on that VM is offline. The full acceptance checklist is still open, especially anonymous Instagram stories/carousels and TikTok sound pages. The supplied Pornhub sample is gone (HTTP 410). See the [test report](docs/TEST_REPORT.md), [owner status](docs/OWNER_ACCEPTANCE.md), [provider matrix](docs/PROVIDER_MATRIX.md), [acceptance ledger](docs/ACCEPTANCE_V1.md), and [21-repository source audit](docs/THIRD_PARTY_SOURCE_AUDIT.md).
+The current downloader source build passes **51 local tests**, Ruff, and mypy. Earlier Freestyle VM tests confirmed several Spotify, SoundCloud, Castbox and YouTube community-post deliveries, but that VM has reached its quota and **this source build has not been deployed or live-tested there**. The Telegram bot on that VM is offline. The full acceptance checklist is still open, especially anonymous Instagram stories/carousels and TikTok sound pages. The supplied Pornhub sample is gone (HTTP 410). See the [test report](docs/TEST_REPORT.md), [owner status](docs/OWNER_ACCEPTANCE.md), [provider matrix](docs/PROVIDER_MATRIX.md), [acceptance ledger](docs/ACCEPTANCE_V1.md), and [21-repository source audit](docs/THIRD_PARTY_SOURCE_AUDIT.md).
 
 ## Commands
 
