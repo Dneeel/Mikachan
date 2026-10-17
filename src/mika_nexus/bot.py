@@ -329,9 +329,14 @@ class App:
                 )
                 await m.reply("Send your search query in the next 10 minutes.")
         elif cmd in ("/twitter", "/instagram", "/tiktok", "/youtube"):
-            await m.reply(
-                f"Send a public {cmd[1:].title()} link. Every link asks for Yes/No confirmation first."
-            )
+            target = profile_target(arg) if arg.startswith(("http://", "https://")) else command_target(
+                f"{cmd[1:]} {arg}") if arg else None
+            if target and target.platform == cmd[1:]:
+                await self.show_follow(m.chat.id, m.from_user.id, target)
+            else:
+                await m.reply(
+                    f"Send a public {cmd[1:].title()} link or use {cmd} @handle to open Follow."
+                )
         elif cmd == "/queue":
             jobs = self.store.jobs(m.from_user.id)
             await m.reply(
