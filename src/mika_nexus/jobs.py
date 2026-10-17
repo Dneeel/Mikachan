@@ -202,7 +202,8 @@ class Worker:
 
     @staticmethod
     def _buttons(jid: str, url: str, audio: bool, details: bool, lyrics: bool,
-                 transcript: bool = False) -> InlineKeyboardMarkup:
+                 transcript: bool = False,
+                 context: dict[str, object] | None = None) -> InlineKeyboardMarkup:
         row = [InlineKeyboardButton(text="🔗 Link", url=url)]
         if audio:
             row.append(InlineKeyboardButton(text="🎵 MP3", callback_data=f"j:{jid}:audio"))
@@ -216,6 +217,10 @@ class Worker:
             extras.append(InlineKeyboardButton(text="📄 Transcript", callback_data=f"j:{jid}:transcribe"))
         if extras:
             rows.append(extras)
+        from .follow import creator_from_post
+        if creator_from_post(url, context):
+            rows.append([InlineKeyboardButton(text="👤 Profile · Follow",
+                                            callback_data=f"j:{jid}:profile")])
         return InlineKeyboardMarkup(inline_keyboard=rows)
 
     @staticmethod
@@ -282,6 +287,7 @@ class Worker:
                         bool(context.get("description")),
                         stored_kind == "audio" and context.get("kind") == "track",
                         context.get("kind") == "episode",
+                        context,
                     )
                     value = stored_caption[0] if stored_caption else None
                     if stored_kind == "audio":
@@ -452,6 +458,9 @@ class Worker:
                 "artist": ("artist", "uploader", "channel"),
                 "description": ("description", "content", "caption"),
                 "cover": ("thumbnail",),
+                "uploader_url": ("uploader_url", "channel_url"),
+                "uploader_id": ("uploader_id", "channel_id"),
+                "username": ("username",),
             }.items():
                 if not context.get(field):
                     context[field] = next(
@@ -481,6 +490,7 @@ class Worker:
                             jid, source_link,
                             len(paths) == 1 and mode != "audio" and check["audio"],
                             bool(context.get("description")), False,
+                            context=context,
                         )
                         if media_kind(path, check) == "photo":
                             sent = await self.bot.send_photo(
@@ -512,6 +522,7 @@ class Worker:
                         jid, source_link, False, bool(context.get("description")),
                         kind == "audio" and context.get("kind") == "track",
                         context.get("kind") == "episode",
+                        context,
                     )
                     if kind == "audio":
                         title = str(context.get("title") or Path(urlsplit(url).path).stem or "Audio")[:64]
@@ -538,7 +549,8 @@ class Worker:
                     await self.bot.send_message(
                         chat, "🔗 Post link and details",
                         reply_markup=self._buttons(
-                            jid, source_link, False, bool(context.get("description")), False
+                            jid, source_link, False, bool(context.get("description")), False,
+                            context=context,
                         ),
                     )
                 for sent in sent_messages:
@@ -832,6 +844,7 @@ class Worker:
              InlineKeyboardButton(text="🖼 Original avatar", callback_data=f"j:{jid}:avatar")],
             [InlineKeyboardButton(text="⬇️ Latest post", callback_data=f"j:{jid}:latest"),
              InlineKeyboardButton(text="⭕ Stories", callback_data=f"j:{jid}:stories")],
+            [InlineKeyboardButton(text="👀 Follow", callback_data=f"j:{jid}:follow")],
         ])
         if not self.store.transition(jid, "RESOLVING", "DELIVERING"):
             return True

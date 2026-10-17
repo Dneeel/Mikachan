@@ -11,7 +11,7 @@ from aiogram import Bot, Dispatcher, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import (
     BotCommand,
     CallbackQuery,
@@ -31,6 +31,8 @@ from .store import Store
 from .community import Community, CommunityStore
 from .utilities import Utilities
 from .personality import Mode, mode_for, response
+from .follow import (FollowService, FEATURES, Target, command_target, confirm_panel,
+                     creator_from_post, profile_target, settings_panel)
 
 
 def kb(rows: list[list[tuple[str, str]]]) -> InlineKeyboardMarkup:
@@ -72,6 +74,10 @@ def collection_view(
         links.append(InlineKeyboardButton(text="🔗 Link", url=source_url))
     if links:
         markup.inline_keyboard.append(links)
+    target = profile_target(source_url)
+    if target:
+        markup.inline_keyboard.append([
+            InlineKeyboardButton(text="👀 Follow creator", callback_data=f"v:{cid}:follow:0")])
     text = f"📚 <b>{html.escape(title[:150])}</b>\n{len(items)} items · Page {page + 1}"
     return text, markup
 
@@ -104,7 +110,8 @@ def public_media_result(hit: dict[str, object]) -> bool:
 HELP_TEXT = (
     "<b>Mikachan · Help</b>\n"
     "<b>Downloader:</b> /search, /music, /podcast; send eligible links for Yes/No consent. "
-    "/twitter remains available. /queue, /cancel, /status show jobs.\n"
+    "/twitter remains available. /follow PLATFORM HANDLE and /following monitor public profiles. "
+    "/queue, /cancel, /status show jobs.\n"
     "<b>Community:</b> /fal, /poem, /joke, /quote, /dice. In groups: /rules, /note NAME, "
     "/groupstats, /groupsettings. Admins: /setrules, /setnote, /setcmd, /welcome, "
     "/nickname, /del, /mute, /modlog.\n"
@@ -136,6 +143,7 @@ class App:
             settings.bot_token, session=session, default=DefaultBotProperties(parse_mode="HTML")
         )
         self.worker = Worker(settings, self.store, self.bot)
+        self.follow = FollowService(self.store, self.bot, settings.private_chats_only)
         self.community = Community(self.bot, CommunityStore(self.store.db), settings.owner_telegram_id)
         self.utilities = Utilities(self.bot, settings, self.store.db)
         self.router = Router()
@@ -169,6 +177,7 @@ class App:
                              text.startswith(("ارز ", "ترجمه ")))
             builtin = command_name in {
                 "help", "search", "music", "podcast", "pod", "twitter", "instagram",
+                "follow", "following",
                 "tiktok", "youtube", "settings", "queue", "status", "cancel", "admin",
                 "fal", "poem", "joke", "quote", "dice", "nickname", "rules", "setrules",
                 "note", "setnote", "delnote", "setcmd", "delcmd", "welcome", "del",
@@ -246,6 +255,14 @@ class App:
                     reply_markup=kb([[("✅ Yes", f"c:{cid}:y"), ("❌ No", f"c:{cid}:n")]]),
                 )
                 self.store.set_prompt(cid, prompt.message_id)
+                target = profile_target(url)
+                if target:
+                    token = self.follow.db.session(m.from_user.id, m.chat.id, target)
+                    self.follow.db.bind(token, prompt.message_id)
+                    await prompt.edit_reply_markup(reply_markup=kb([
+                        [("✅ Download", f"c:{cid}:y"), ("❌ No", f"c:{cid}:n")],
+                        [("👀 Follow", f"f:{token}:open")],
+                    ]))
             if extra:
                 await m.reply(
                     f"Only the first {self.settings.max_links_per_message} links were offered. Send the rest separately."
@@ -277,6 +294,30 @@ class App:
             personality_mode = (mode_for(m.from_user.id, self.store.allowlist(), self.settings.mommy_ids)
                     if m.chat.type == "private" else Mode.NORMAL)
             await m.reply(HELP_TEXT + "\n" + response("ready", personality_mode))
+        elif cmd == "/follow":
+            target = command_target(arg)
+            if target is None:
+                await m.reply("Use /follow instagram|twitter|youtube|tiktok HANDLE, or /follow PROFILE_URL.")
+            else:
+                await self.show_follow(m.chat.id, m.from_user.id, target)
+        elif cmd == "/following":
+            rows = self.follow.db.db.execute(
+                "SELECT id,platform,handle,chat_id FROM follows WHERE user_id=? "
+                + ("" if m.chat.type == "private" else "AND chat_id=? ")
+                + "ORDER BY platform,handle",
+                (m.from_user.id,) if m.chat.type == "private" else (m.from_user.id, m.chat.id)
+            ).fetchall()
+            if not rows:
+                await m.reply("You are not following any profiles. Use /follow to begin.")
+            else:
+                lines = ["👀 <b>Following</b>"]
+                buttons = []
+                for row in rows:
+                    lines.append(f"{html.escape(row['platform'].title())} · @{html.escape(row['handle'])} "
+                                 f"→ {'private' if row['chat_id'] == m.from_user.id else 'group'}")
+                    buttons.append([InlineKeyboardButton(text=f"✕ Unfollow @{row['handle'][:25]}",
+                                                      callback_data=f"fu:{row['id']}")])
+                await m.reply("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
         elif cmd in ("/search", "/music", "/podcast", "/pod"):
             mode = "podcast" if cmd == "/pod" else cmd[1:]
             if arg:
@@ -546,6 +587,76 @@ class App:
             if "message is not modified" not in str(exc).lower():
                 raise
 
+    async def show_follow(self, chat: int, user: int, target: Target) -> None:
+        token = self.follow.db.session(user, chat, target)
+        body, markup = confirm_panel(target, token)
+        prompt = await self.bot.send_message(chat, body, reply_markup=markup)
+        self.follow.db.bind(token, prompt.message_id)
+
+    async def follow_callback(self, q: CallbackQuery, data: str) -> None:
+        parts = data.split(":")
+        if len(parts) < 3:
+            await acknowledge(q)
+            return
+        token, action = parts[1:3]
+        row = self.follow.db.get_session(
+            token, q.from_user.id, q.message.chat.id, q.message.message_id)
+        if not row:
+            await acknowledge(q, "Follow panel expired")
+            return
+        if action == "no":
+            self.follow.db.db.execute("DELETE FROM follow_sessions WHERE id=?", (token,))
+            await acknowledge(q)
+            await q.message.edit_text("Follow cancelled.")
+            return
+        if action in {"yes", "open"} and row["stage"] == "confirm":
+            self.follow.db.db.execute("UPDATE follow_sessions SET stage='settings' WHERE id=?", (token,))
+        elif row["stage"] != "settings":
+            await acknowledge(q)
+            return
+        elif action == "t" and len(parts) == 4 and parts[3] in FEATURES[row["platform"]]:
+            chosen = set(json.loads(row["features"]))
+            chosen.symmetric_difference_update({parts[3]})
+            self.follow.db.db.execute("UPDATE follow_sessions SET features=? WHERE id=?",
+                                      (json.dumps(sorted(chosen)), token))
+        elif action == "m" and len(parts) == 4 and parts[3] in {"media", "notice"}:
+            self.follow.db.db.execute("UPDATE follow_sessions SET mode=? WHERE id=?", (parts[3], token))
+        elif action == "d" and len(parts) == 4 and parts[3] in {"dm", "here"}:
+            self.follow.db.db.execute("UPDATE follow_sessions SET destination=? WHERE id=?",
+                                      (parts[3], token))
+        elif action == "save":
+            if not json.loads(row["features"]):
+                await acknowledge(q, "Select at least one category")
+                return
+            if row["destination"] == "dm" and q.message.chat.id != q.from_user.id:
+                try:
+                    await self.bot.send_message(q.from_user.id, "👀 Follow notifications will arrive here.")
+                except (TelegramBadRequest, TelegramForbiddenError):
+                    await acknowledge(q, "Open a private chat with this bot first")
+                    return
+            try:
+                self.follow.db.save(row)
+            except ValueError as exc:
+                await acknowledge(q, str(exc))
+                return
+            await acknowledge(q)
+            await q.message.edit_text(
+                f"✅ Following @{html.escape(row['handle'])}. Public updates will be checked "
+                "about every 15 minutes. Use /following to stop.")
+            return
+        else:
+            await acknowledge(q)
+            return
+        updated = self.follow.db.get_session(token, q.from_user.id, q.message.chat.id,
+                                              q.message.message_id)
+        await acknowledge(q)
+        body, markup = settings_panel(updated)
+        try:
+            await q.message.edit_text(body, reply_markup=markup)
+        except TelegramBadRequest as exc:
+            if "message is not modified" not in str(exc).lower():
+                raise
+
     async def callback(self, q: CallbackQuery) -> None:
         if (
             not q.from_user
@@ -557,6 +668,30 @@ class App:
             return
         data = q.data or ""
         if hasattr(self, "community") and await self.community.callback(q, data):
+            return
+        if data.startswith("f:"):
+            await self.follow_callback(q, data)
+            return
+        if data.startswith("fu:"):
+            await acknowledge(q)
+            if self.follow.db.remove(data[3:], q.from_user.id):
+                await q.message.edit_text("Follow removed. Use /following to view the rest.")
+            return
+        if data.startswith("fd:"):
+            await acknowledge(q)
+            parts = data.split(":")
+            if len(parts) != 3:
+                return
+            entry = self.follow.db.db.execute(
+                "SELECT d.url FROM follow_downloads d JOIN follows f ON f.id=d.follow_id "
+                "WHERE d.token=? AND d.follow_id=? AND d.user_id=? AND f.user_id=? "
+                "AND f.chat_id=? AND d.expires>?",
+                (parts[2], parts[1], q.from_user.id, q.from_user.id, q.message.chat.id,
+                 time.time())).fetchone()
+            if entry and self.store.rate(q.from_user.id, "links", 12):
+                jid = self.store.create_job(q.from_user.id, q.message.chat.id, entry["url"])
+                await self.bot.send_message(q.message.chat.id, "⏳ Preparing your download…",
+                    reply_markup=kb([[("Cancel ✕", f"j:{jid}:cancel")]]))
             return
         if data.startswith("m:"):
             await acknowledge(q)
@@ -626,7 +761,11 @@ class App:
             if not row or row["message_id"] != q.message.message_id:
                 return
             items = json.loads(row["items"])
-            if action == "p" and arg.isdigit():
+            if action == "follow":
+                target = profile_target(str(self.store.collection_context(cid).get("source_url") or ""))
+                if target:
+                    await self.show_follow(q.message.chat.id, q.from_user.id, target)
+            elif action == "p" and arg.isdigit():
                 number = int(arg)
                 await self.render_collection(cid, q.from_user.id, q.message.chat.id, number)
             elif action == "q" and (arg == "all" or arg.isdigit() and int(arg) < len(items)):
@@ -675,6 +814,18 @@ class App:
         if data.startswith("j:"):
             await acknowledge(q)
             parts = data.split(":")
+            if len(parts) == 3 and parts[2] in {"follow", "profile"}:
+                job = self.store.job(parts[1])
+                if not job or job["user_id"] != q.from_user.id or job["chat_id"] != q.message.chat.id:
+                    return
+                context = self.store.job_context(parts[1])
+                target = profile_target(str(context.get("profile_url") or "")) or creator_from_post(
+                    str(context.get("source_url") or job["url"]), context)
+                if target:
+                    await self.show_follow(q.message.chat.id, q.from_user.id, target)
+                else:
+                    await self.bot.send_message(q.message.chat.id, "Creator profile is unavailable for this item.")
+                return
             if len(parts) == 3 and parts[2] in {"avatar", "latest", "stories"}:
                 job = self.store.job(parts[1])
                 if not job or job["user_id"] != q.from_user.id or job["chat_id"] != q.message.chat.id:
@@ -1007,6 +1158,8 @@ class App:
                     ("instagram", "Instagram link help"),
                     ("tiktok", "TikTok link help"),
                     ("youtube", "YouTube link help"),
+                    ("follow", "Follow a public profile"),
+                    ("following", "Manage followed profiles"),
                     ("settings", "Preferences"),
                     ("queue", "My jobs"),
                     ("status", "Status"),
@@ -1027,9 +1180,13 @@ class App:
             ]
         )
         task = asyncio.create_task(self.worker.loop())
+        follow_task = asyncio.create_task(self.follow.loop())
         try:
             await self.dp.start_polling(self.bot)
         finally:
+            self.follow.running = False
+            follow_task.cancel()
+            await asyncio.gather(follow_task, return_exceptions=True)
             await self.worker.stop()
             task.cancel()
             await self.bot.session.close()

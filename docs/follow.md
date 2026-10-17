@@ -1,0 +1,11 @@
+# Public profile Follow
+
+`/follow instagram|twitter|youtube|tiktok HANDLE` or `/follow PROFILE_URL` opens a confirmation panel. A profile URL sent as a normal link also offers Follow. Instagram and TikTok profile cards, social collection views, and delivered posts with resolvable creator metadata expose the same entry point. `/following` lists and removes subscriptions.
+
+The user chooses event categories, delivery as queued media or a notification with Link and Download, and (when started in an allowed group) a private chat or that group. Private chat is the default. The first successful check for each category records a baseline and does not send old content. Subsequent checks run about every 15 minutes in a single background task; one user can follow at most 25 profiles. SQLite stores subscriptions, category baselines, event IDs, and short download tokens. The task does not download media until a new event occurs or the user presses Download.
+
+The sources are public `gallery-dl` metadata for Instagram, TikTok, and X, and `yt-dlp` flat channel listings for YouTube videos and Shorts. Structured public profile data is preferred for bio, display name, and avatar changes. The public page's Open Graph description is **not** used as a bio because it can include changing follower counts. Profile changes are reported as text. Anonymous source access can fail; after three failed checks the user receives a warning, and checks continue. Revoked users and disabled groups lose their subscriptions.
+
+Instagram and TikTok stories are best effort. The public extractors may require login or omit stories, so a missed story cannot be ruled out. Reliable Instagram/TikTok live start and username change alerts are not implemented: no stable public, anonymous source was verified. A shorter poll interval would consume more resources without solving unavailable live signals. Private profiles and credentials are outside this feature.
+
+Run `pytest -q tests/test_follow.py` for parser, ownership, baseline, deduplication, delivery mode, and structured profile tests. Live platform acceptance still requires a deployment with network access and representative public accounts.

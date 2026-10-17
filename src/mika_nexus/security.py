@@ -115,6 +115,14 @@ def collection(url: str) -> bool:
         return True
     if provider == "twitter" and len(parts) == 1 and p.hostname != "t.co":
         return True
+    if provider == "youtube" and (
+        len(parts) == 1 and parts[0].startswith("@")
+        or len(parts) == 2 and parts[0] in {"channel", "user", "c"}
+        or len(parts) == 2 and parts[0].startswith("@") and parts[1] in {"videos", "shorts", "streams"}
+        or len(parts) == 3 and parts[0] in {"channel", "user", "c"}
+        and parts[2] in {"videos", "shorts", "streams"}
+    ):
+        return True
     if provider == "soundcloud" and len(parts) == 1:
         return True
     if provider == "soundcloud" and "/sets/" in path:
