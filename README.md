@@ -6,7 +6,7 @@ The downloader asks for **✅ Yes / ❌ No** before processing each submitted UR
 
 ## Current build status
 
-The integrated build passes **63 local tests**, Ruff, and mypy. Read-only provider probes succeeded for weather, fiat and crypto rates; NASA's current-day APOD failed but the prior day's entry loaded. No new feature was accepted through live Telegram, and this source build was not deployed. Earlier Freestyle VM downloader receipts belong to prior revisions. See the [new feature ledger](docs/COMMUNITY_UTILITIES_STATUS.md), [downloader test report](docs/TEST_REPORT.md), and [owner status](docs/OWNER_ACCEPTANCE.md).
+The integrated build passes **63 tests**, Ruff, and mypy on the Daytona deployment. Telegram accepted its identity and command list, and an outbound owner message succeeded. Daytona's tier restricts access to external content providers, so live weather, rates, APOD, and downloader source delivery are not verified there. The sandbox is stopped when tests are complete. See the [Daytona deployment check](docs/DAYTONA_DEPLOYMENT_2026-10-17.md), [new feature ledger](docs/COMMUNITY_UTILITIES_STATUS.md), [downloader test report](docs/TEST_REPORT.md), and [owner status](docs/OWNER_ACCEPTANCE.md).
 
 ## Commands
 
