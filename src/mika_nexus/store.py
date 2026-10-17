@@ -37,6 +37,8 @@ CREATE TABLE IF NOT EXISTS receipts (
  PRIMARY KEY(job_id,message_id));
 CREATE TABLE IF NOT EXISTS access (
  user_id INTEGER PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS allowed_groups (chat_id INTEGER PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS group_access_seeded (singleton INTEGER PRIMARY KEY CHECK(singleton=1));
 CREATE TABLE IF NOT EXISTS admin_pending (
  id TEXT PRIMARY KEY, owner_id INTEGER NOT NULL, chat_id INTEGER NOT NULL,
  message_id INTEGER, target_id INTEGER NOT NULL, action TEXT NOT NULL, expires REAL NOT NULL);
@@ -94,8 +96,25 @@ class Store:
     def allowlist(self) -> set[int]:
         return {int(row[0]) for row in self.db.execute("SELECT user_id FROM access")}
 
+    def seed_groups(self, ids: set[int]) -> None:
+        if self.db.execute("SELECT 1 FROM group_access_seeded").fetchone():
+            return
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            self.db.executemany("INSERT OR IGNORE INTO allowed_groups VALUES (?)", ((x,) for x in ids))
+            self.db.execute("INSERT INTO group_access_seeded VALUES (1)")
+            self.db.execute("COMMIT")
+        except BaseException:
+            self.db.execute("ROLLBACK")
+            raise
+
+    def groups(self) -> set[int]:
+        return {int(row[0]) for row in self.db.execute("SELECT chat_id FROM allowed_groups")}
+
     def propose_access(self, owner: int, chat: int, target: int, action: str) -> str:
-        if not 0 < target < 2**63 or action not in {"add", "remove"}:
+        user_change = action in {"add", "remove"} and 0 < target < 2**63
+        group_change = action in {"group_add", "group_remove"} and -2**63 < target < 0
+        if not (user_change or group_change):
             raise ValueError("invalid access change")
         token = secrets.token_urlsafe(9)
         self.db.execute(
@@ -125,8 +144,20 @@ class Store:
             else:
                 if row["action"] == "add":
                     self.db.execute("INSERT OR IGNORE INTO access VALUES (?)", (row["target_id"],))
-                else:
+                elif row["action"] == "remove":
                     self.db.execute("DELETE FROM access WHERE user_id=?", (row["target_id"],))
+                    self.db.execute("UPDATE jobs SET state='CANCELLED', updated=? "
+                        "WHERE user_id=? AND state IN ('QUEUED','RESOLVING','DOWNLOADING','VERIFYING')",
+                        (time.time(), row["target_id"]))
+                elif row["action"] == "group_add":
+                    self.db.execute("INSERT OR IGNORE INTO allowed_groups VALUES (?)",
+                                    (row["target_id"],))
+                else:
+                    self.db.execute("DELETE FROM allowed_groups WHERE chat_id=?",
+                                    (row["target_id"],))
+                    self.db.execute("UPDATE jobs SET state='CANCELLED', updated=? "
+                        "WHERE chat_id=? AND state IN ('QUEUED','RESOLVING','DOWNLOADING','VERIFYING')",
+                        (time.time(), row["target_id"]))
                 result = f"{row['action']} complete for {row['target_id']}"
             self.db.execute("DELETE FROM admin_pending WHERE id=?", (token,))
             self.db.execute("COMMIT")

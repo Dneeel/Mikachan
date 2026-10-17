@@ -9,8 +9,13 @@ from urllib.parse import urlsplit, urlunsplit
 URL_RE = re.compile(r"https?://[^\s<>\"']+", re.I)
 
 
-def allowed(user_id: int, chat_id: int, chat_type: str, ids: set[int], private_only: bool) -> bool:
-    return user_id in ids and (not private_only or (chat_type == "private" and chat_id == user_id))
+def allowed(user_id: int, chat_id: int, chat_type: str, ids: set[int], private_only: bool,
+            groups: set[int] | None = None) -> bool:
+    return user_id in ids and (
+        (chat_type == "private" and chat_id == user_id)
+        or (not private_only and chat_type in {"group", "supergroup"}
+            and chat_id in (groups or set()))
+    )
 
 
 def clean_url(raw: str) -> str:

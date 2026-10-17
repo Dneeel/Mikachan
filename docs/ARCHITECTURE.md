@@ -1,6 +1,6 @@
 # Architecture
 
-`bot.py` handles authorized Telegram updates and callback ownership. `security.py` validates URL syntax before consent and DNS at fetch time. `store.py` holds all transactional SQLite state. `search.py` federates catalog requests with bounded result count. `jobs.py` schedules two jobs at a time, runs extractors on demand, streams direct files, and records delivery receipts.
+`bot.py` handles authorized Telegram updates and callback ownership. `security.py` validates numeric user and group access, URL syntax before consent and DNS at fetch time. `store.py` holds the shared SQLite connection and downloader transactional state. `community.py` adds group settings, moderated content and culture. `utilities.py` adds explicit media and information commands. `personality.py` holds numeric-ID persona selection. `search.py` federates catalog requests with bounded result count. `jobs.py` schedules two jobs at a time, runs extractors on demand, streams direct files, and records delivery receipts. All domains use one aiogram dispatcher and bot instance.
 
 Consent is inserted before prompt send, then the prompt ID is bound. A callback must match user, chat, message, pending state and expiry. The acceptance update and job creation share a transaction. Crash recovery moves interrupted downloads to `RETRYABLE` and interrupted uploads to `DELIVERY_UNCERTAIN` so uploads are not automatically duplicated.
 

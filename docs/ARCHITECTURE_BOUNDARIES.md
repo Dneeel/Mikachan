@@ -1,6 +1,6 @@
 # Mikachan architecture and ownership boundaries
 
-This map describes the code that exists today. Mikachan is the parent product; the downloader is the only implemented feature domain. It is not a directory migration plan. The current local downloader checks are 51 passing tests, Ruff and mypy. This revision has not been deployed or accepted against live providers.
+This historical handoff describes the pre-integration downloader checkout. For the current integrated `v2` code, see [Existing System Audit](EXISTING_SYSTEM_AUDIT.md) and [Community and Utilities status](COMMUNITY_UTILITIES_STATUS.md). Its downloader ownership notes remain useful, but its implementation and test counts are superseded.
 
 ## Current repository map
 

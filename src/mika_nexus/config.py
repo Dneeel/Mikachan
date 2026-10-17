@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     bot_token: str
     owner_telegram_id: int
     allowed_telegram_ids: str = ""
+    allowed_group_ids: str = ""
+    mommy_telegram_ids: str = ""
     private_chats_only: bool = True
     bot_api_mode: Literal["public", "local"] = "public"
     local_bot_api_url: str | None = None
@@ -30,6 +32,9 @@ class Settings(BaseSettings):
     search_page_size: int = 10
     search_session_ttl_seconds: int = 600
     confirmation_ttl_seconds: int = 900
+    nasa_api_key: str = "DEMO_KEY"
+    translation_api_url: str = ""
+    translation_api_key: str = ""
 
     @field_validator("owner_telegram_id")
     @classmethod
@@ -46,6 +51,13 @@ class Settings(BaseSettings):
         ids = {int(x.strip()) for x in raw}
         if len(ids) != len(raw) or len(ids) > 4 or self.owner_telegram_id not in ids:
             raise ValueError("allowlist must contain owner and at most four distinct users")
+        for value, positive in ((self.allowed_group_ids, False), (self.mommy_telegram_ids, True)):
+            parts = [x.strip() for x in value.split(",") if x.strip()]
+            if any(not x.lstrip("-").isdigit() or (int(x) <= 0 if positive else int(x) >= 0)
+                   for x in parts) or len(parts) != len(set(parts)):
+                raise ValueError("invalid numeric group or personality IDs")
+        if not self.mommy_ids <= ids:
+            raise ValueError("Mommy mode IDs must be authorized")
         if self.bot_token == "CHANGE_ME" or not self.bot_token:
             raise ValueError("configure BOT_TOKEN")
         if self.bot_api_mode == "local":
@@ -63,3 +75,11 @@ class Settings(BaseSettings):
     @property
     def allowlist(self) -> set[int]:
         return {int(x.strip()) for x in self.allowed_telegram_ids.split(",")}
+
+    @property
+    def groups(self) -> set[int]:
+        return {int(x.strip()) for x in self.allowed_group_ids.split(",") if x.strip()}
+
+    @property
+    def mommy_ids(self) -> set[int]:
+        return {int(x.strip()) for x in self.mommy_telegram_ids.split(",") if x.strip()}

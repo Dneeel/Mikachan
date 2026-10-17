@@ -1,0 +1,26 @@
+# Community and Utilities delivery ledger — 2026-10-17
+
+This ledger separates code and offline tests from Telegram acceptance. The integrated source passes 63 offline tests, Ruff and mypy. No bot token, production chat, existing server, or live Telegram update was used for this build.
+
+| Feature IDs | Delivered behavior | Current evidence / remaining limit |
+| --- | --- | --- |
+| F001, F002, F011, F012 | `/fal`, exact `فال`; `/poem`, exact `شعر`, user-bound random/poet/search menu; `/joke`, `/quote`. Reviewed content can be imported through `mika-nexus import-content PATH`. | **Pending owner-supplied licensed corpus.** Empty catalog reports unavailability. No artificial poems, jokes or quotes. Import validation and session binding offline-tested. |
+| F021, F023 | Native Telegram dice; admin/owner-controlled per-group nickname, used sparingly in welcome text. | Code integrated, group isolation offline-tested; Telegram acceptance pending. |
+| F101–F105, F107, F108, F110 | Welcome off by default; rules, notes, exact text custom commands, targeted reply delete or 10-minute mute, action log, group module settings, 30-day observed request counts. | SQLite isolation and authorization checks offline-tested. Actual Telegram admin permission and member-event acceptance pending. Stats count authorized slash/exact/link/search message requests, not all conversation or button actions. |
+| F038, F039, F042 | Explicit reply-based photo to static WebP sticker, static sticker to PNG, PNG/JPEG/WebP image conversion. | Real output decoding/signature tests pass. Telegram upload acceptance pending. 8 MiB input/output and 20 MP pixel limit. |
+| F040 | Animated TGS sticker to actual multi-frame GIF in a 512 MiB/18-second child process; loop and animation verified with a synthetic test-only moving shape. | Offline renderer test passes; varied real Telegram TGS samples pending. Video WebM stickers are unsupported. |
+| F041 | Create/add/remove a Telegram static sticker pack, bound to the numeric creator ID, via Telegram's sticker-set API. | Implemented; live Telegram ownership/API acceptance pending. |
+| F049, F050, F055, F056 | Unicode QR creation and independent decode, QR/barcode scan, local Tesseract OCR, real CSV↔JSON conversion for flat tables. | QR decode, image and table validity offline-tested. OCR is English-only on this host (`fas` language data absent); Persian OCR pending. Barcode and Telegram file handling acceptance pending. |
+| F057+F058 | Open-Meteo geocoding, modeled current conditions and 3-day forecast; ambiguous places ask for refinement. | Provider endpoints returned HTTP 200 in read-only probe; live Telegram presentation pending. |
+| F060+F062 | Fiat reference pair and BTC/ETH spot pair, with fixed provider choices persisted for owner control. | Frankfurter, Open ER API, CoinGecko and CoinPaprika endpoints returned HTTP 200 in read-only probes. No Iranian cash-rate claim. Live Telegram output pending. |
+| F066+F067 | IANA-zone local/Gregorian/Jalali time; per-user list of up to 10 saved zones. | Offline code and zone data; Telegram acceptance pending. |
+| F071 | Dated NASA APOD metadata and media URL, including media type. If today's endpoint returns HTTP 500 before publication, request yesterday's entry and display its actual date. | Today's NASA endpoint returned HTTP 500; previous day's returned HTTP 200 in read-only probe. Live Telegram presentation pending. |
+| F111 | Explicit `/translate en|fa TEXT` or approved Persian exact-prefix forms; reply-based input; configurable HTTPS LibreTranslate-compatible provider. | **Pending configured provider and owner privacy choice.** No text is sent when unconfigured. Text sent to a configured third party is labeled in the response. |
+
+## Runtime setup and inputs
+
+`BOT_TOKEN`, `OWNER_TELEGRAM_ID`, `ALLOWED_TELEGRAM_IDS` remain required. `ALLOWED_GROUP_IDS` seeds negative numeric group IDs on first database initialization, and group handling requires `PRIVATE_CHATS_ONLY=false`; the owner can subsequently use `/admin group add|remove GROUP_ID` with a confirmation. All senders must still be individually allowed. `MOMMY_TELEGRAM_IDS` is optional and must be a subset of the configured user IDs. `NASA_API_KEY` defaults to NASA's limited `DEMO_KEY`. `TRANSLATION_API_URL` and `TRANSLATION_API_KEY` configure an external translation service. `/admin provider fiat frankfurter|open_er_api` and `/admin provider crypto coingecko|coinpaprika` choose fixed price sources.
+
+A reviewed content import is a JSON array of objects with nonempty `kind` (`poem`, `joke`, `quote`), `language`, `body`, `author`, `source`, and `rights`. The owner/operator must verify permission and attribution before import; the tool validates required fields and size, not intellectual property rights. For Hafez fortune, set `author` to `Hafez`, `Hafez Shirazi`, `حافظ`, or `حافظ شیرازی`. Content and settings survive normal restarts in the existing SQLite database. Back up the database including its WAL/checkpoint state through an ordinary SQLite backup before deployment changes.
+
+Next milestone: a terminal management interface for allowlists, settings, backups, diagnostics, and release/service control. It is not implemented here.

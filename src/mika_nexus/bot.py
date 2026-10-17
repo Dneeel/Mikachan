@@ -27,6 +27,9 @@ from .matching import match_score
 from .music_ui import listening_links, verified_lyrics
 from .security import allowed, clean_url, links, source
 from .store import Store
+from .community import Community, CommunityStore
+from .utilities import Utilities
+from .personality import Mode, mode_for, response
 
 
 def kb(rows: list[list[tuple[str, str]]]) -> InlineKeyboardMarkup:
@@ -98,14 +101,17 @@ def public_media_result(hit: dict[str, object]) -> bool:
 
 
 HELP_TEXT = (
-    "<b>MIKA NEXUS · Help</b>\n"
-    "<b>Search:</b> /search query · /music query · /podcast query\n"
-    "<b>Media:</b> send one or more public HTTP(S) links; approve each with Yes. "
-    "Use /youtube, /tiktok, /instagram, or /twitter for platform guidance.\n"
-    "<b>Jobs:</b> /queue · /cancel · /cancel JOB_ID · /status\n"
-    "<b>Settings:</b> /settings; change search type and source filters in results.\n"
-    "<b>Owner:</b> /admin\n"
-    "Catalog links can find matching public recordings. Protected catalog audio is unavailable."
+    "<b>Mikachan · Help</b>\n"
+    "<b>Downloader:</b> /search, /music, /podcast; send eligible links for Yes/No consent. "
+    "/twitter remains available. /queue, /cancel, /status show jobs.\n"
+    "<b>Community:</b> /fal, /poem, /joke, /quote, /dice. In groups: /rules, /note NAME, "
+    "/groupstats, /groupsettings. Admins: /setrules, /setnote, /setcmd, /welcome, "
+    "/nickname, /del, /mute, /modlog.\n"
+    "<b>Utilities:</b> /qr TEXT, /scan, /ocr, /image png|jpeg|webp, /sticker, "
+    "/stickerimage, /gif, /pack, /convert csv|json, /weather CITY, /rate BASE QUOTE, "
+    "/time IANA_ZONE, /apod, /translate en|fa TEXT. File tools use a reply; "
+    "translation sends selected text to the configured external provider.\n"
+    "<b>Owner:</b> /admin. Cultural content requires reviewed imports."
 )
 
 
@@ -115,6 +121,7 @@ class App:
         self.store = Store(settings.data_dir / "nexus.sqlite")
         self.store.recover()
         self.store.seed_access(settings.allowlist)
+        self.store.seed_groups(settings.groups)
         self.searcher = Searcher()
         session = None
         if settings.bot_api_mode == "local":
@@ -126,6 +133,8 @@ class App:
             settings.bot_token, session=session, default=DefaultBotProperties(parse_mode="HTML")
         )
         self.worker = Worker(settings, self.store, self.bot)
+        self.community = Community(self.bot, CommunityStore(self.store.db), settings.owner_telegram_id)
+        self.utilities = Utilities(self.bot, settings, self.store.db)
         self.router = Router()
         self.router.message.register(self.message)
         self.router.callback_query.register(self.callback)
@@ -134,21 +143,76 @@ class App:
 
     def authorized(self, user_id: int, chat_id: int, chat_type: str) -> bool:
         return allowed(
-            user_id, chat_id, chat_type, self.store.allowlist(), self.settings.private_chats_only
+            user_id, chat_id, chat_type, self.store.allowlist(), self.settings.private_chats_only,
+            self.store.groups()
         )
 
     async def message(self, m: Message) -> None:
+        if getattr(m, "new_chat_members", None) and m.chat.id in self.store.groups():
+            await self.community.welcome(m, self.store.allowlist())
         if not m.from_user or not self.authorized(m.from_user.id, m.chat.id, m.chat.type):
             return
         if not m.text:
             return
         text = m.text.strip()
+        if text.startswith("/") and "@" in text.split(" ", 1)[0]:
+            target_bot = text.split(" ", 1)[0].split("@", 1)[1]
+            if getattr(self, "bot_username", "") and target_bot.lower() != self.bot_username.lower():
+                return
+        if m.chat.type in {"group", "supergroup"}:
+            command_name = text.split(" ", 1)[0].split("@")[0].lower().lstrip("/")
+            explicit_text = (text in {"فال", "شعر", "ارز"} or
+                             text.startswith(("ارز ", "ترجمه ")))
+            builtin = command_name in {
+                "help", "search", "music", "podcast", "pod", "twitter", "instagram",
+                "tiktok", "youtube", "settings", "queue", "status", "cancel", "admin",
+                "fal", "poem", "joke", "quote", "dice", "nickname", "rules", "setrules",
+                "note", "setnote", "delnote", "setcmd", "delcmd", "welcome", "del",
+                "mute", "modlog", "groupstats", "groupsettings", "qr", "scan", "ocr",
+                "image", "sticker", "stickerimage", "gif", "pack", "convert", "weather",
+                "rate", "time", "apod", "translate"}
+            custom = text.startswith("/") and self.community.store.item(
+                "group_commands", m.chat.id, command_name) is not None
+            if explicit_text or text.startswith("/") and (builtin or custom):
+                self.community.store.use(m.chat.id, m.from_user.id, "request")
+        if (m.chat.type in {"group", "supergroup"} and
+                not self.community.store.enabled(m.chat.id, "utilities") and
+                (text == "ارز" or text.startswith(("ارز ", "ترجمه ")))):
+            return
+        if text in {"فال", "شعر"}:
+            await self.community.command(m, "/fal" if text == "فال" else "/poem", "")
+            return
+        if text == "ارز":
+            await m.reply("Use /rate BASE QUOTE, for example /rate USD EUR or /rate BTC USD.")
+            return
+        if text.startswith("ارز "):
+            await self.utilities.command(m, "/rate", text[4:].strip())
+            return
+        if text == "ترجمه انگلیسی":
+            await self.utilities.command(m, "/translate", "en")
+            return
+        if text == "ترجمه فارسی":
+            await self.utilities.command(m, "/translate", "fa")
+            return
+        if text.startswith("ترجمه انگلیسی "):
+            await self.utilities.command(m, "/translate", "en " + text[len("ترجمه انگلیسی "):])
+            return
+        if text.startswith("ترجمه فارسی "):
+            await self.utilities.command(m, "/translate", "fa " + text[len("ترجمه فارسی "):])
+            return
+        if text.startswith("ترجمه "):
+            await m.reply("Specify a target: ترجمه انگلیسی TEXT or ترجمه فارسی TEXT.")
+            return
         if text.startswith("/"):
             self.store.clear_query(m.from_user.id, m.chat.id)
             await self.command(m, text)
             return
+        if hasattr(self, "community") and await self.community.search_reply(m):
+            return
         urls, extra = links(text, self.settings.max_links_per_message)
         if urls:
+            if m.chat.type in {"group", "supergroup"}:
+                self.community.store.use(m.chat.id, m.from_user.id, "request")
             if not self.store.rate(m.from_user.id, "links", 12):
                 return
             for index, url in enumerate(urls):
@@ -175,6 +239,8 @@ class App:
             return
         mode = self.store.take_query(m.from_user.id, m.chat.id)
         if mode and 0 < len(text) <= 120:
+            if m.chat.type in {"group", "supergroup"}:
+                self.community.store.use(m.chat.id, m.from_user.id, "request")
             await self.begin_search(m, text, mode)
 
     async def command(self, m: Message, raw: str) -> None:
@@ -183,19 +249,20 @@ class App:
         word, _, arg = raw.partition(" ")
         cmd = word.split("@")[0].lower()
         arg = arg.strip()
-        if cmd == "/start":
-            await m.reply(
-                "✨ <b>MIKA NEXUS</b>\nSend a public link or search for music and podcasts.",
-                reply_markup=kb(
-                    [
-                        [("🎵 Music", "m:music"), ("🎙 Podcast", "m:podcast")],
-                        [("🔎 All search", "m:search"), ("📖 Help", "m:help")],
-                        [("📥 Queue", "m:queue"), ("⚙ Settings", "m:settings")],
-                    ]
-                ),
-            )
-        elif cmd == "/help":
-            await m.reply(HELP_TEXT)
+        if await self.community.command(m, cmd, arg):
+            return
+        if (m.chat.type in {"group", "supergroup"} and
+                not self.community.store.enabled(m.chat.id, "utilities") and
+                cmd in {"/qr", "/scan", "/ocr", "/image", "/sticker", "/stickerimage",
+                        "/gif", "/pack", "/convert", "/weather", "/rate", "/time",
+                        "/apod", "/translate"}):
+            return
+        if await self.utilities.command(m, cmd, arg):
+            return
+        if cmd == "/help":
+            personality_mode = (mode_for(m.from_user.id, self.store.allowlist(), self.settings.mommy_ids)
+                    if m.chat.type == "private" else Mode.NORMAL)
+            await m.reply(HELP_TEXT + "\n" + response("ready", personality_mode))
         elif cmd in ("/search", "/music", "/podcast", "/pod"):
             mode = "podcast" if cmd == "/pod" else cmd[1:]
             if arg:
@@ -248,12 +315,27 @@ class App:
             await m.reply(body)
         elif cmd == "/admin" and m.from_user.id == self.settings.owner_telegram_id:
             parts = arg.split()
-            if len(parts) == 2 and parts[0] in {"add", "remove"} and parts[1].isdigit():
+            if len(parts) == 3 and parts[0] == "provider":
+                try:
+                    self.utilities.set_provider(parts[1], parts[2])
+                except ValueError as exc:
+                    await m.reply(html.escape(str(exc)))
+                else:
+                    await m.reply("Price provider saved.")
+                return
+            group_change = (len(parts) == 3 and parts[0] == "group" and
+                            parts[1] in {"add", "remove"} and
+                            parts[2].startswith("-") and parts[2][1:].isdigit())
+            user_change = (len(parts) == 2 and parts[0] in {"add", "remove"} and
+                           parts[1].isdigit())
+            if group_change or user_change:
+                target = int(parts[2] if group_change else parts[1])
+                action = "group_" + parts[1] if group_change else parts[0]
                 token = self.store.propose_access(
-                    m.from_user.id, m.chat.id, int(parts[1]), parts[0]
+                    m.from_user.id, m.chat.id, target, action
                 )
                 prompt = await m.reply(
-                    f"Confirm {parts[0]} user {parts[1]}?",
+                    f"Confirm {html.escape(action)} {target}?",
                     reply_markup=kb(
                         [[("✅ Confirm", f"a:{token}:yes"), ("❌ Cancel", f"a:{token}:no")]]
                     ),
@@ -262,7 +344,7 @@ class App:
             else:
                 state = ", ".join(f"{k}: {v}" for k, v in self.searcher.health.items())
                 await m.reply(
-                    f"Owner diagnostics\nAllowed IDs: {len(self.store.allowlist())}\nActive jobs: {len(self.worker.tasks)}\nSources: {html.escape(state)}\nUse /admin add ID or /admin remove ID (confirmation required)."
+                    f"Owner diagnostics\nAllowed users: {len(self.store.allowlist())}\nAllowed groups: {len(self.store.groups())}\nActive jobs: {len(self.worker.tasks)}\nSources: {html.escape(state)}\nPrice providers: fiat {self.utilities.provider('fiat')}, crypto {self.utilities.provider('crypto')}\nUse /admin add|remove USER_ID or /admin group add|remove GROUP_ID (confirmation required). /admin provider fiat|crypto NAME changes the fixed price provider."
                 )
 
     async def begin_search(self, m: Message, query: str, mode: str) -> None:
@@ -457,40 +539,13 @@ class App:
             or isinstance(q.message, InaccessibleMessage)
             or not self.authorized(q.from_user.id, q.message.chat.id, q.message.chat.type)
         ):
-            await acknowledge(q, "Unavailable")
+            await acknowledge(q)
             return
         data = q.data or ""
+        if hasattr(self, "community") and await self.community.callback(q, data):
+            return
         if data.startswith("m:"):
             await acknowledge(q)
-            action = data[2:]
-            if action in {"search", "music", "podcast"}:
-                self.store.prompt_query(
-                    q.from_user.id,
-                    q.message.chat.id,
-                    action,
-                    self.settings.search_session_ttl_seconds,
-                )
-                await self.bot.send_message(
-                    q.message.chat.id, "Send your search query in the next 10 minutes."
-                )
-            elif action == "help":
-                await self.bot.send_message(q.message.chat.id, HELP_TEXT)
-            elif action == "queue":
-                jobs = self.store.jobs(q.from_user.id)
-                await self.bot.send_message(
-                    q.message.chat.id,
-                    "\n".join(f"<code>{j['id']}</code> · {j['state']}" for j in jobs) or "No jobs.",
-                )
-            elif action == "settings":
-                pref = self.store.preferences(q.from_user.id)
-                body = (
-                    "Search filters are editable in each result view. "
-                    "Audio recordings are delivered as MP3 when requested."
-                )
-                if pref:
-                    body += "\nTypes: " + ", ".join(sorted(pref[0]))
-                    body += "\nSources: " + ", ".join(sorted(pref[1]))
-                await self.bot.send_message(q.message.chat.id, body)
             return
         if data.startswith("a:"):
             await acknowledge(q)
@@ -498,6 +553,9 @@ class App:
             if len(parts) != 3 or q.from_user.id != self.settings.owner_telegram_id:
                 return
             if parts[2] == "yes":
+                access_pending = self.store.db.execute("SELECT action,target_id FROM admin_pending "
+                    "WHERE id=? AND owner_id=? AND chat_id=? AND message_id=?",
+                    (parts[1], q.from_user.id, q.message.chat.id, q.message.message_id)).fetchone()
                 result = self.store.apply_access(
                     parts[1],
                     q.from_user.id,
@@ -505,6 +563,12 @@ class App:
                     q.message.chat.id,
                     q.message.message_id,
                 )
+                if access_pending and "complete" in result and access_pending["action"] in {"remove", "group_remove"}:
+                    for revocation_jid, active_task in list(self.worker.tasks.items()):
+                        job = self.store.job(revocation_jid)
+                        if job and (job["user_id"] if access_pending["action"] == "remove"
+                                    else job["chat_id"]) == access_pending["target_id"]:
+                            active_task.cancel()
             else:
                 self.store.db.execute(
                     "DELETE FROM admin_pending WHERE id=? AND owner_id=?",
@@ -893,7 +957,7 @@ class App:
             if self.store.claim_prompt(cid):
                 prompt = await self.bot.send_message(
                     q.message.chat.id,
-                    f"MIKA NEXUS · Confirm public media request\n<code>{html.escape(url[:300])}</code>",
+                    f"Mikachan · Confirm public media request\n<code>{html.escape(url[:300])}</code>",
                     reply_markup=kb([[("✅ Yes", f"c:{cid}:y"), ("❌ No", f"c:{cid}:n")]]),
                 )
                 self.store.set_prompt(cid, prompt.message_id)
@@ -914,11 +978,12 @@ class App:
             await self.render_search(sid, q.from_user.id, q.message.chat.id)
 
     async def run(self) -> None:
+        identity = await self.bot.get_me()
+        self.bot_username = identity.username or ""
         await self.bot.set_my_commands(
             [
                 BotCommand(command=x, description=y)
                 for x, y in (
-                    ("start", "Open MIKA NEXUS"),
                     ("help", "How to use"),
                     ("search", "Search music and podcasts"),
                     ("music", "Search music"),
@@ -932,6 +997,18 @@ class App:
                     ("queue", "My jobs"),
                     ("status", "Status"),
                     ("cancel", "Cancel my job"),
+                    ("fal", "Reviewed Hafez fortune"),
+                    ("poem", "Poetry menu"),
+                    ("dice", "Roll a Telegram die"),
+                    ("rules", "Group rules"),
+                    ("note", "Group note"),
+                    ("qr", "Create a QR image"),
+                    ("image", "Convert a replied image"),
+                    ("weather", "Weather and forecast"),
+                    ("rate", "Fiat or crypto reference rate"),
+                    ("time", "Time in an IANA zone"),
+                    ("apod", "NASA astronomy picture"),
+                    ("translate", "Translate selected text"),
                 )
             ]
         )
