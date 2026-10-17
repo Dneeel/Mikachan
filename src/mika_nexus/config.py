@@ -33,6 +33,8 @@ class Settings(BaseSettings):
     search_session_ttl_seconds: int = 600
     confirmation_ttl_seconds: int = 900
     nasa_api_key: str = "DEMO_KEY"
+    navasan_api_key: str = ""
+    navasan_refresh_seconds: int = 28_800
     translation_api_url: str = ""
     translation_api_key: str = ""
 
@@ -70,6 +72,8 @@ class Settings(BaseSettings):
             raise ValueError("download concurrency must be at most two global and one per user")
         if not 1 <= self.max_links_per_message <= 5 or not 1 <= self.search_page_size <= 10:
             raise ValueError("invalid message/search limits")
+        if not 60 <= self.navasan_refresh_seconds <= 86_400:
+            raise ValueError("Navasan refresh must be 60–86400 seconds")
         return self
 
     @property

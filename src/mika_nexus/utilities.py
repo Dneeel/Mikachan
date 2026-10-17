@@ -23,7 +23,7 @@ from aiogram.types import BufferedInputFile, InputSticker, Message
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 from .config import Settings
-from .market_prices import MarketPrices
+from .market_prices import ASSETS, MarketPrices
 
 MAX_INPUT = 8 * 1024 * 1024
 Image.MAX_IMAGE_PIXELS = 20_000_000
@@ -143,7 +143,8 @@ class Utilities:
     def __init__(self, bot: Bot, settings: Settings, db: sqlite3.Connection):
         self.bot, self.settings, self.db = bot, settings, db
         self.media_slots = asyncio.Semaphore(2)
-        self.market_prices = MarketPrices()
+        self.market_prices = MarketPrices(db, settings.navasan_api_key,
+                                         settings.navasan_refresh_seconds)
         db.execute("CREATE TABLE IF NOT EXISTS utility_packs (name TEXT PRIMARY KEY, owner_id INTEGER NOT NULL)")
         db.execute("CREATE TABLE IF NOT EXISTS favorite_zones (user_id INTEGER NOT NULL, "
                    "zone TEXT NOT NULL, PRIMARY KEY(user_id,zone))")
@@ -214,7 +215,9 @@ class Utilities:
         except (ValueError, KeyError, TypeError, IndexError, httpx.HTTPError, TimeoutError,
                 subprocess.SubprocessError, ZoneInfoNotFoundError, UnicodeError, OSError,
                 TelegramAPIError) as exc:
-            await m.reply(html.escape(str(exc)[:300] or type(exc).__name__))
+            detail = ("External provider request failed. Try again later."
+                      if isinstance(exc, httpx.HTTPError) else str(exc)[:300] or type(exc).__name__)
+            await m.reply(html.escape(detail))
         return True
 
     async def _command(self, m: Message, cmd: str, arg: str) -> None:
@@ -366,16 +369,20 @@ class Utilities:
             await m.reply(html.escape("\n".join(lines)))
         elif cmd == "/rate":
             parts = arg.upper().split()
-            if len(parts) != 2 or not all(p.isalpha() and len(p) <= 5 for p in parts):
+            if len(parts) != 2:
                 raise ValueError("Use /rate USD EUR, /rate BTC USD, or /rate USD IRT")
             base, quote = parts
-            if quote == "IRT" and base in {"USD", "EUR", "AED", "SEKE"}:
+            if quote == "IRT":
+                if base not in ASSETS:
+                    raise ValueError("Supported Iranian Toman assets: " + ", ".join(ASSETS))
                 await m.reply(html.escape(await self.market_prices.report((base,))))
-            elif "IRT" in {base, quote}:
-                raise ValueError("Supported Iranian Toman quotes: USD, EUR, AED and SEKE / IRT")
+            elif base == "IRT":
+                raise ValueError("Use ASSET IRT for an Iranian Toman quote")
             elif "IRR" in {base, quote}:
                 raise ValueError("Official IRR reference rates do not represent Iran's open market. "
                                  "Use /rate USD IRT for a Toman market estimate.")
+            elif not all(p.isalpha() and len(p) <= 5 for p in parts):
+                raise ValueError("Use /rate USD EUR, /rate BTC USD, or /rate USD IRT")
             elif base in {"BTC", "ETH"} and quote in {"USD", "EUR"}:
                 if self.provider("crypto") == "coinpaprika":
                     asset = "btc-bitcoin" if base == "BTC" else "eth-ethereum"

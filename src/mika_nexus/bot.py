@@ -110,7 +110,8 @@ HELP_TEXT = (
     "/nickname, /del, /mute, /modlog.\n"
     "<b>Utilities:</b> /qr TEXT, /scan, /ocr, /image png|jpeg|webp, /sticker, "
     "/stickerimage, /gif, /pack, /convert csv|json, /weather CITY, /rate BASE QUOTE, "
-    "exact دلار, سکه, ارز for Toman market quotes; /time IANA_ZONE, /apod, "
+    "exact دلار, سکه, ارز, طلا, تتر, بیت‌کوین for Toman market quotes; "
+    "/time IANA_ZONE, /apod, "
     "/translate en|fa TEXT. File tools use a reply; "
     "translation sends selected text to the configured external provider.\n"
     "<b>Owner:</b> /admin. Cultural content requires reviewed imports."
@@ -163,7 +164,8 @@ class App:
                 return
         if m.chat.type in {"group", "supergroup"}:
             command_name = text.split(" ", 1)[0].split("@")[0].lower().lstrip("/")
-            explicit_text = (text in {"فال", "شعر", "ارز", "دلار", "سکه"} or
+            explicit_text = (text in {"فال", "شعر", "ارز", "دلار", "سکه", "طلا",
+                                      "تتر", "بیت‌کوین", "بیت کوین"} or
                              text.startswith(("ارز ", "ترجمه ")))
             builtin = command_name in {
                 "help", "search", "music", "podcast", "pod", "twitter", "instagram",
@@ -179,7 +181,7 @@ class App:
                 self.community.store.use(m.chat.id, m.from_user.id, "request")
         if (m.chat.type in {"group", "supergroup"} and
                 not self.community.store.enabled(m.chat.id, "utilities") and
-                (text in {"ارز", "دلار", "سکه"} or
+                (text in {"ارز", "دلار", "سکه", "طلا", "تتر", "بیت‌کوین", "بیت کوین"} or
                  text.startswith(("ارز ", "ترجمه ")))):
             return
         if text in {"فال", "شعر"}:
@@ -192,8 +194,10 @@ class App:
             except (ValueError, httpx.HTTPError) as exc:
                 await m.reply(html.escape(str(exc)[:300]))
             return
-        if text in {"دلار", "سکه"}:
-            await self.utilities.command(m, "/rate", "USD IRT" if text == "دلار" else "SEKE IRT")
+        market_inputs = {"دلار": "USD", "سکه": "SEKE", "طلا": "GOLD18",
+                         "تتر": "USDT", "بیت‌کوین": "BTC", "بیت کوین": "BTC"}
+        if text in market_inputs:
+            await self.utilities.command(m, "/rate", f"{market_inputs[text]} IRT")
             return
         if text.startswith("ارز "):
             await self.utilities.command(m, "/rate", text[4:].strip())
