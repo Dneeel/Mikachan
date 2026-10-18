@@ -3,6 +3,7 @@
 import asyncio
 import sqlite3
 import statistics
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -25,12 +26,50 @@ ASSETS = {
     "GOLD18": "18K gold per gram",
     "USDT": "Tether (USDT)",
     "BTC": "Bitcoin (BTC)",
+    "JPY": "Japanese yen cash",
+    "TRY": "Turkish lira cash",
+    "OMR": "Omani rial cash",
+    "IQD": "Iraqi dinar cash",
+    "GBP": "British pound cash",
+    "SAR": "Saudi riyal cash",
+    "INR": "Indian rupee cash",
+    "ETH": "Ethereum (ETH)",
+    "TON": "Gram (formerly Toncoin)",
 }
+CRYPTO_ASSETS = frozenset({"USDT", "BTC", "ETH", "TON"})
 CASH_SOURCES = ("TGJU", "NAVASAN", "BONBAST", "ALAN_CHAND")
 CRYPTO_SOURCES = ("NOBITEX", "BITPIN", "TETHER_LAND", "TABDEAL")
 WALLEX_PAIRS = {"USDT": "USDTTMN", "BTC": "BTCTMN"}
 NAVASAN_ITEMS = {"USD": ("usd_buy", "usd_sell"), "EUR": ("eur",),
                  "AED": ("aed_sell",), "SEKE": ("sekkeh",), "GOLD18": ("18ayar",)}
+ASSET_ALIASES = {
+    "دلار": "USD", "usd": "USD", "یورو": "EUR", "eur": "EUR",
+    "درهم": "AED", "aed": "AED", "سکه": "SEKE", "طلا": "GOLD18",
+    "تتر": "USDT", "usdt": "USDT", "بیت کوین": "BTC", "بیت‌کوین": "BTC",
+    "btc": "BTC", "اتریوم": "ETH", "eth": "ETH", "ین": "JPY", "jpy": "JPY",
+    "لیر": "TRY", "try": "TRY", "ریال عمان": "OMR", "omr": "OMR",
+    "دینار عراق": "IQD", "دینار": "IQD", "iqd": "IQD", "پوند": "GBP",
+    "gbp": "GBP", "ریال سعودی": "SAR", "sar": "SAR", "روپیه": "INR",
+    "inr": "INR",
+    "ton": "TON", "تون": "TON", "gram": "TON", "گرام": "TON",
+}
+
+
+def parse_asset_query(text: str) -> tuple[str, Decimal] | None:
+    """Recognize only an explicit asset name, optionally prefixed with a bounded amount."""
+    digits = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
+    normalized = " ".join(text.translate(digits).casefold().split())
+    match = re.fullmatch(r"(?:(\d{1,12}(?:[.,]\d{1,6})?)\s+)?(.{1,32})", normalized)
+    if not match:
+        return None
+    asset = ASSET_ALIASES.get(match[2])
+    if not asset:
+        return None
+    try:
+        amount = Decimal(match[1].replace(",", "")) if match[1] else Decimal(1)
+    except InvalidOperation:
+        return None
+    return (asset, amount) if 0 < amount <= Decimal("1000000000") else None
 
 
 @dataclass(frozen=True)
@@ -80,7 +119,7 @@ def parse_market_response(payload: object, fetched_at: datetime) -> MarketSnapsh
         name = source.get("symbol")
         if symbol not in ASSETS or not isinstance(name, str):
             continue
-        allowed = CRYPTO_SOURCES if symbol in WALLEX_PAIRS else CASH_SOURCES
+        allowed = CRYPTO_SOURCES if symbol in CRYPTO_ASSETS else CASH_SOURCES
         if name not in allowed or quote.get("symbol") != "IRT":
             continue
         if row.get("symbol") != f"{symbol}-IRT" or row.get("is_up_to_date") is not True:
@@ -94,7 +133,7 @@ def parse_market_response(payload: object, fetched_at: datetime) -> MarketSnapsh
             continue
         found.setdefault(symbol, {})[name] = MarketQuote(name, low, high)
     quotes = {symbol: tuple(rows[name] for name in
-              (CRYPTO_SOURCES if symbol in WALLEX_PAIRS else CASH_SOURCES) if name in rows)
+              (CRYPTO_SOURCES if symbol in CRYPTO_ASSETS else CASH_SOURCES) if name in rows)
               for symbol, rows in found.items()}
     if not quotes:
         raise ValueError("No valid Toman source quotes are available")
@@ -198,6 +237,7 @@ class MarketPrices:
         self._navasan_refresh_seconds = navasan_refresh_seconds
         self._navasan: tuple[dict[str, MarketQuote], float] | None = None
         self._navasan_retry_after = 0.0
+        self._ton: tuple[MarketQuote, float] | None = None
         self._navasan_lock = asyncio.Lock()
         self._locks = {symbol: asyncio.Lock() for symbol in ASSETS}
         self._wallex_locks = {symbol: asyncio.Lock() for symbol in WALLEX_PAIRS}
@@ -309,38 +349,8 @@ class MarketPrices:
             return quotes.get(symbol)
 
     async def _section(self, symbol: str) -> list[str]:
-        snapshot_result, direct_result, navasan_result = await asyncio.gather(
-            self.snapshot(symbol), self.wallex(symbol), self.navasan(symbol),
-            return_exceptions=True)
-        if isinstance(snapshot_result, asyncio.CancelledError):
-            raise snapshot_result
-        if isinstance(direct_result, asyncio.CancelledError):
-            raise direct_result
-        if isinstance(navasan_result, asyncio.CancelledError):
-            raise navasan_result
-        snapshot = None
-        stale = False
-        relay_quotes: list[MarketQuote] = []
-        if not isinstance(snapshot_result, BaseException):
-            snapshot, stale = snapshot_result
-            relay_quotes = list(snapshot.quotes[symbol])
-        direct = direct_result if not isinstance(direct_result, BaseException) else None
-        navasan = navasan_result if not isinstance(navasan_result, BaseException) else None
-        other_relay = [quote for quote in relay_quotes if quote.source != "NAVASAN"]
-        navasan_consistent = True
-        if navasan is not None and other_relay:
-            reference = statistics.median([quote.midpoint for quote in other_relay])
-            navasan_consistent = (Decimal("0.9") <= navasan.midpoint / reference <= Decimal("1.1"))
-        if navasan is not None:
-            relay_quotes = other_relay
-        navasan_recent = bool(navasan and navasan.observed_at and
-                              datetime.now(timezone.utc) - navasan.observed_at < timedelta(hours=2)
-                              and navasan_consistent)
-        quotes = ([direct[0]] if direct else []) + ([navasan] if navasan_recent and navasan else []) + relay_quotes
-        if not quotes:
-            if isinstance(snapshot_result, BaseException):
-                raise snapshot_result
-            raise ValueError(f"No valid {symbol}/IRT source quotes are available")
+        quotes, snapshot, stale, direct, navasan, navasan_consistent, navasan_recent = \
+            await self._collect(symbol)
         midpoints = [quote.midpoint for quote in quotes]
         median = statistics.median(midpoints)
         spread = (max(midpoints) - min(midpoints)) / median * 100 if median else Decimal(0)
@@ -377,7 +387,104 @@ class MarketPrices:
                          "underlying source trade times unknown.")
         elif direct or navasan_recent:
             lines.append("  Relay provider unavailable; only a direct quote is shown.")
+        elif symbol == "TON" and quotes[0].observed_at:
+            lines.append(f"  Bitpin observed {quotes[0].observed_at:%Y-%m-%d %H:%M:%S} UTC.")
         return lines
+
+    async def _collect(self, symbol: str) -> tuple[list[MarketQuote], MarketSnapshot | None,
+                                                   bool, tuple[MarketQuote, datetime] | None,
+                                                   MarketQuote | None, bool, bool]:
+        if symbol == "TON":
+            quote = await self.bitpin_ton()
+            return [quote], None, False, None, None, True, False
+        snapshot_result, direct_result, navasan_result = await asyncio.gather(
+            self.snapshot(symbol), self.wallex(symbol), self.navasan(symbol),
+            return_exceptions=True)
+        if isinstance(snapshot_result, asyncio.CancelledError):
+            raise snapshot_result
+        if isinstance(direct_result, asyncio.CancelledError):
+            raise direct_result
+        if isinstance(navasan_result, asyncio.CancelledError):
+            raise navasan_result
+        snapshot = None
+        stale = False
+        relay_quotes: list[MarketQuote] = []
+        if not isinstance(snapshot_result, BaseException):
+            snapshot, stale = snapshot_result
+            relay_quotes = list(snapshot.quotes[symbol])
+        direct = direct_result if not isinstance(direct_result, BaseException) else None
+        navasan = navasan_result if not isinstance(navasan_result, BaseException) else None
+        other_relay = [quote for quote in relay_quotes if quote.source != "NAVASAN"]
+        navasan_consistent = True
+        if navasan is not None and other_relay:
+            reference = statistics.median([quote.midpoint for quote in other_relay])
+            navasan_consistent = (Decimal("0.9") <= navasan.midpoint / reference <= Decimal("1.1"))
+        if navasan is not None:
+            relay_quotes = other_relay
+        navasan_recent = bool(navasan and navasan.observed_at and
+                              datetime.now(timezone.utc) - navasan.observed_at < timedelta(hours=2)
+                              and navasan_consistent)
+        quotes = ([direct[0]] if direct else []) + ([navasan] if navasan_recent and navasan else []) + relay_quotes
+        if not quotes:
+            if isinstance(snapshot_result, BaseException):
+                raise snapshot_result
+            raise ValueError(f"No valid {symbol}/IRT source quotes are available")
+        return quotes, snapshot, stale, direct, navasan, navasan_consistent, navasan_recent
+
+    async def bitpin_ton(self) -> MarketQuote:
+        """Bitpin lists the renamed Toncoin market as GRAM_IRT."""
+        if self._ton and time.monotonic() < self._ton[1]:
+            return self._ton[0]
+        async with self._locks["TON"]:
+            if self._ton and time.monotonic() < self._ton[1]:
+                return self._ton[0]
+            async with httpx.AsyncClient(timeout=12, follow_redirects=False) as client:
+                response = await client.get("https://api.bitpin.ir/v1/mkt/markets/")
+                response.raise_for_status()
+                if len(response.content) > 4_000_000:
+                    raise ValueError("Bitpin market catalog is too large")
+                payload = response.json()
+            rows = payload.get("results") if isinstance(payload, dict) else None
+            if not isinstance(rows, list):
+                raise ValueError("Bitpin market catalog is unavailable")
+            market = next((row for row in rows if isinstance(row, dict) and
+                           row.get("code") == "GRAM_IRT" and row.get("tradable") is True and
+                           row.get("suspended") is False), None)
+            if market is None or not isinstance(market.get("price_info"), dict):
+                raise ValueError("Gram/Toman market is unavailable")
+            info = market["price_info"]
+            try:
+                price = _price(info["price"])
+                observed = datetime.fromtimestamp(float(info["created_at"]), timezone.utc)
+            except (KeyError, ValueError, TypeError, OSError, OverflowError) as exc:
+                raise ValueError("Bitpin returned an invalid Gram quote") from exc
+            now = datetime.now(timezone.utc)
+            if not now - timedelta(minutes=15) <= observed <= now + timedelta(minutes=2):
+                raise ValueError("Gram/Toman quote is stale")
+            quote = MarketQuote("Bitpin direct", price, price, observed)
+            self._ton = quote, time.monotonic() + 120
+            return quote
+
+    async def amount_card(self, symbol: str, amount: Decimal) -> str:
+        if symbol not in ASSETS or not amount.is_finite() or not 0 < amount <= Decimal("1000000000"):
+            raise ValueError("Unsupported asset or amount")
+        quotes, snapshot, stale, direct, navasan, _, _ = await self._collect(symbol)
+        midpoints = [quote.midpoint for quote in quotes]
+        median = statistics.median(midpoints)
+        spread = (max(midpoints) - min(midpoints)) / median * 100
+        if spread > 5:
+            raise ValueError(f"Sources disagree on {symbol} ({spread:.1f}% spread). Try again later.")
+        value = _number(median * amount)
+        basis = "one source" if len(quotes) == 1 else f"median of {len(quotes)} sources"
+        source_time = (snapshot.fetched_at if snapshot else
+                       direct[1] if direct else navasan.observed_at if navasan else
+                       quotes[0].observed_at or datetime.now(timezone.utc))
+        note = "Cached snapshot · " if stale else ""
+        return (f"💱 <b>{_number(amount)} {ASSETS[symbol]}</b>\n"
+                f"💰 <b>~{value} Toman</b>\n"
+                f"1 {symbol} ≈ {_number(median)} Toman · {basis}\n"
+                f"{note}Fetched {source_time:%Y-%m-%d %H:%M} UTC"
+                "\nIndicative quote · source trade times may differ")
 
     async def report(self, symbols: tuple[str, ...]) -> str:
         if not symbols or any(symbol not in ASSETS for symbol in symbols):

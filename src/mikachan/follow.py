@@ -221,6 +221,10 @@ class FollowStore:
         CREATE TABLE IF NOT EXISTS follow_downloads (
           token TEXT PRIMARY KEY, follow_id TEXT NOT NULL, user_id INTEGER NOT NULL,
           url TEXT NOT NULL, expires REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS follow_notifications (
+          token TEXT PRIMARY KEY, follow_id TEXT NOT NULL, user_id INTEGER NOT NULL,
+          chat_id INTEGER NOT NULL, message_id INTEGER, kind TEXT NOT NULL,
+          expires REAL NOT NULL);
         """)
 
     def session(self, user: int, chat: int, target: Target) -> str:
@@ -304,6 +308,14 @@ class FollowStore:
             self.db.execute("DELETE FROM follow_baselines WHERE follow_id=?", (token,))
             self.db.execute("DELETE FROM follow_health WHERE follow_id=?", (token,))
         return bool(row)
+
+    def notification(self, token: str, user: int, chat: int, message: int):
+        return self.db.execute(
+            "SELECT n.*,f.platform,f.handle,f.url FROM follow_notifications n "
+            "JOIN follows f ON f.id=n.follow_id "
+            "WHERE n.token=? AND n.user_id=? AND n.chat_id=? AND n.message_id=? "
+            "AND n.expires>? AND f.user_id=?",
+            (token, user, chat, message, time.time(), user)).fetchone()
 
 
 def confirm_panel(target: Target, token: str) -> tuple[str, InlineKeyboardMarkup]:
@@ -439,7 +451,11 @@ async def public_items(target: Target, kind: str = "posts") -> list[tuple[str, s
         url = target.url.rstrip("/") + ("/stories" if kind == "stories" else "")
     else:
         url = target.url.rstrip("/") + "/tweets"
-    data = await _extract(["gallery-dl", "-J", "--range", "1-15", url], 35)
+    command = ["gallery-dl", "-J", "--range", "1-15"]
+    if target.platform == "twitter":
+        # gallery-dl omits text-only tweets unless this option is enabled.
+        command.extend(["-o", "extractor.twitter.text-tweets=true"])
+    data = await _extract([*command, url], 35)
     return _gallery_items(data, target, kind)
 
 
@@ -473,10 +489,13 @@ async def public_profile(target: Target, *, display_avatar: bool = False) -> dic
                         if "description" not in meta:
                             result.pop("bio")
                     else:
-                        user = meta.get("user") if isinstance(meta.get("user"), dict) else meta
+                        user: dict = meta["user"] if isinstance(meta.get("user"), dict) else meta
                         result = {"name": user.get("nickname") or "",
-                                  "bio": user.get("signature") or "",
-                                  "avatar": user.get("avatarLarger") or user.get("avatarMedium") or ""}
+                                  "bio": user.get("signature") or ""}
+                        # Signed CDN URLs rotate without a profile edit. Only a stable
+                        # provider avatar identifier may trigger a change alert.
+                        if isinstance(user.get("avatarUri"), str) and user["avatarUri"]:
+                            result["avatar"] = user["avatarUri"]
                         if "signature" not in user:
                             result.pop("bio")
                     if any(result.values()):
@@ -566,14 +585,25 @@ class FollowService:
         story_ok = False
         if selected & {"posts", "reels", "tweets", "videos"}:
             try:
-                batches.extend(await public_items(target))
+                items = await public_items(target)
+                previously_seen = self.db.db.execute(
+                    "SELECT 1 FROM follow_seen WHERE follow_id=? LIMIT 1", (row["id"],)).fetchone()
+                if not items and previously_seen:
+                    raise ValueError("timeline unexpectedly empty")
+                batches.extend(items)
                 main_ok = True
             except (ValueError, TimeoutError, OSError, json.JSONDecodeError):
                 pass
         shorts_ok = False
         if "shorts" in selected:
             try:
-                batches.extend(await public_items(target, "shorts"))
+                items = await public_items(target, "shorts")
+                previously_seen = self.db.db.execute(
+                    "SELECT 1 FROM follow_seen WHERE follow_id=? AND event_key LIKE 'shorts:%' LIMIT 1",
+                    (row["id"],)).fetchone()
+                if not items and previously_seen:
+                    raise ValueError("shorts timeline unexpectedly empty")
+                batches.extend(items)
                 shorts_ok = True
             except (ValueError, TimeoutError, OSError, json.JSONDecodeError):
                 pass
@@ -627,12 +657,22 @@ class FollowService:
         for key in selected & {"bio", "name", "avatar"}:
             if key in baselines and key in profile and key in old_profile and profile[key] != old_profile[key]:
                 value = "Avatar updated" if key == "avatar" else html.escape(profile[key][:500])
-                await self.bot.send_message(row["chat_id"],
+                token = secrets.token_urlsafe(8)
+                buttons = [[InlineKeyboardButton(text="🔗 Link", url=target.url)],
+                           [InlineKeyboardButton(text="👤 Profile panel", callback_data=f"fn:{token}:profile")]]
+                if key == "avatar":
+                    buttons.append([InlineKeyboardButton(text="⬇️ Fetch profile photo",
+                                                         callback_data=f"fn:{token}:fetch")])
+                buttons.append([InlineKeyboardButton(text="✅ Thank you",
+                                                     callback_data=f"fn:{token}:thanks")])
+                sent = await self.bot.send_message(row["chat_id"],
                     f"👀 <b>{target.platform.title()} · @{html.escape(target.handle)}</b>\n"
                     f"{LABELS[key]}\n\n{value}",
-                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                        [InlineKeyboardButton(text="🔗 Profile", url=target.url)]]))
-        categories = []
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+                self.db.db.execute("INSERT INTO follow_notifications VALUES (?,?,?,?,?,?,?)",
+                    (token, row["id"], row["user_id"], row["chat_id"],
+                     getattr(sent, "message_id", None), key, time.time() + 86400))
+        categories: list[str] = []
         if main_ok:
             categories.extend(selected & {"posts", "reels", "tweets", "videos"})
         if story_ok:
@@ -655,15 +695,23 @@ class FollowService:
                                   {"kind": "post", "source_url": url,
                                    "profile_url": target.url, "follow_event": kind})
             return
+        notice_token = secrets.token_urlsafe(8)
         markup = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🔗 Link", url=url),
-             InlineKeyboardButton(text="⬇️ Download", callback_data=f"fd:{row['id']}:{secrets.token_urlsafe(5)}")]])
+             InlineKeyboardButton(text="⬇️ Download", callback_data=f"fd:{row['id']}:{secrets.token_urlsafe(5)}")],
+            [InlineKeyboardButton(text="👤 Profile panel", callback_data=f"fn:{notice_token}:profile")],
+            [InlineKeyboardButton(text="✅ Thank you", callback_data=f"fn:{notice_token}:thanks")]])
         # A short token maps to a validated URL; callback data never contains URLs.
-        token = markup.inline_keyboard[0][1].callback_data.split(":")[-1]
+        callback = markup.inline_keyboard[0][1].callback_data
+        assert callback is not None
+        token = callback.split(":")[-1]
         self.db.db.execute("DELETE FROM follow_downloads WHERE expires<?", (time.time(),))
         self.db.db.execute("INSERT INTO follow_downloads VALUES (?,?,?,?,?)",
                            (token, row["id"], row["user_id"], url, time.time() + 86400))
-        await self.bot.send_message(row["chat_id"],
+        sent = await self.bot.send_message(row["chat_id"],
             f"👀 <b>{target.platform.title()} · @{html.escape(target.handle)}</b>\n"
             f"New {html.escape(kind)}{': ' + html.escape(title[:200]) if title else ''}",
             reply_markup=markup)
+        self.db.db.execute("INSERT INTO follow_notifications VALUES (?,?,?,?,?,?,?)",
+            (notice_token, row["id"], row["user_id"], row["chat_id"],
+             getattr(sent, "message_id", None), kind, time.time() + 86400))

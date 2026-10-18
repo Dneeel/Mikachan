@@ -37,6 +37,7 @@ from .security import allowed, clean_url, collection, links, source, validate_dn
 from .store import Store
 from .community import Community, CommunityStore
 from .utilities import Utilities, _market_card
+from .market_prices import parse_asset_query
 from .personality import Mode, mode_for, response
 from .follow import (FollowService, FEATURES, Target, command_target, confirm_panel,
                      creator_from_post, profile_target, public_items,
@@ -173,11 +174,11 @@ HELP_TEXT = (
     "/search · /music · /podcast · /twitter\n"
     "/follow · /following · /queue · /cancel\n\n"
     "👥 <b>Community</b>\n"
-    "/fal · /poem · /joke · /quote · /dice\n"
+    "/fal · /poem · /quote · /dice\n"
     "Groups: /rules · /note · /groupstats · /groupsettings\n\n"
     "🛠 <b>Utilities</b>\n"
-    "/qr · /scan · /ocr · /image · /sticker · /gif · /convert\n"
-    "/weather CITY · /rate BASE QUOTE · /time ZONE\n"
+    "/qr · /scan · /ocr\n"
+    "/weather CITY · /rate ASSET IRT · /now [CITY]\n"
     "/apod · /translate en|fa TEXT\n\n"
     "💱 Toman quotes: send exactly دلار, سکه, طلا, تتر or ارز.\n"
     "For file tools, reply to the file with a command."
@@ -251,26 +252,32 @@ class App:
                 return
         if m.chat.type in {"group", "supergroup"}:
             command_name = text.split(" ", 1)[0].split("@")[0].lower().lstrip("/")
-            explicit_text = (text in {"فال", "شعر", "ارز", "دلار", "سکه", "طلا",
-                                      "تتر", "بیت‌کوین", "بیت کوین"} or
-                             text.startswith(("ارز ", "ترجمه ")))
+            explicit_text = (text in {"فال", "شعر", "ارز"} or parse_asset_query(text) is not None or
+                             text.startswith(("ارز ", "ترجمه ", "هواشناسی ", "اکنون ")) or
+                             text in {"هواشناسی", "اکنون"})
             builtin = command_name in {
                 "help", "search", "music", "podcast", "pod", "twitter", "instagram",
                 "follow", "following",
                 "tiktok", "youtube", "settings", "queue", "status", "cancel", "admin",
-                "fal", "poem", "joke", "quote", "dice", "nickname", "rules", "setrules",
+                "fal", "poem", "quote", "dice", "nickname", "rules", "setrules",
                 "note", "setnote", "delnote", "setcmd", "delcmd", "welcome", "del",
                 "mute", "modlog", "groupstats", "groupsettings", "qr", "scan", "ocr",
-                "image", "sticker", "stickerimage", "gif", "pack", "convert", "weather",
-                "rate", "time", "apod", "translate"}
+                "weather", "rate", "now", "apod", "translate"}
             custom = text.startswith("/") and self.community.store.item(
                 "group_commands", m.chat.id, command_name) is not None
             if explicit_text or text.startswith("/") and (builtin or custom):
                 self.community.store.use(m.chat.id, m.from_user.id, "request")
         if (m.chat.type in {"group", "supergroup"} and
                 not self.community.store.enabled(m.chat.id, "utilities") and
-                (text in {"ارز", "دلار", "سکه", "طلا", "تتر", "بیت‌کوین", "بیت کوین"} or
-                 text.startswith(("ارز ", "ترجمه ")))):
+                (text == "ارز" or parse_asset_query(text) is not None or
+                 text.startswith(("ارز ", "ترجمه ", "هواشناسی ", "اکنون ")) or
+                 text in {"هواشناسی", "اکنون"})):
+            return
+        if text == "اکنون" or text.startswith("اکنون "):
+            await self.utilities.command(m, "/now", text.removeprefix("اکنون").strip())
+            return
+        if text == "هواشناسی" or text.startswith("هواشناسی "):
+            await self.utilities.command(m, "/weather", text.removeprefix("هواشناسی").strip())
             return
         if text in {"فال", "شعر"}:
             await self.community.command(m, "/fal" if text == "فال" else "/poem", "")
@@ -282,10 +289,11 @@ class App:
             except (ValueError, httpx.HTTPError) as exc:
                 await m.reply(html.escape(str(exc)[:300]))
             return
-        market_inputs = {"دلار": "USD", "سکه": "SEKE", "طلا": "GOLD18",
-                         "تتر": "USDT", "بیت‌کوین": "BTC", "بیت کوین": "BTC"}
-        if text in market_inputs:
-            await self.utilities.command(m, "/rate", f"{market_inputs[text]} IRT")
+        asset_query = parse_asset_query(text)
+        if asset_query:
+            symbol, amount = asset_query
+            await self.utilities.command(m, "/rate", f"{symbol} IRT" if amount == 1 else
+                                         f"{amount} {symbol} IRT")
             return
         if text.startswith("ارز "):
             await self.utilities.command(m, "/rate", text[4:].strip())
@@ -310,6 +318,9 @@ class App:
             await self.command(m, text)
             return
         if hasattr(self, "community") and await self.community.search_reply(m):
+            return
+        if hasattr(self, "utilities") and hasattr(self.utilities, "now") and \
+                await self.utilities.now.reply(m):
             return
         urls, extra = links(text, self.settings.max_links_per_message)
         if urls:
@@ -359,8 +370,7 @@ class App:
             return
         if (m.chat.type in {"group", "supergroup"} and
                 not self.community.store.enabled(m.chat.id, "utilities") and
-                cmd in {"/qr", "/scan", "/ocr", "/image", "/sticker", "/stickerimage",
-                        "/gif", "/pack", "/convert", "/weather", "/rate", "/time",
+                cmd in {"/qr", "/scan", "/ocr", "/weather", "/rate", "/now",
                         "/apod", "/translate"}):
             return
         if await self.utilities.command(m, cmd, arg):
@@ -438,7 +448,7 @@ class App:
             if pref:
                 body += "\nTypes · " + html.escape(", ".join(sorted(pref[0])))
                 body += "\nSources · " + html.escape(", ".join(sorted(pref[1])))
-            body += "\nTime zones · /time list\nQueue · /queue"
+            body += "\nLocal time · /now\nQueue · /queue"
             await m.reply(body)
         elif cmd == "/admin" and m.from_user.id == self.settings.owner_telegram_id:
             parts = arg.split()
@@ -881,6 +891,9 @@ class App:
             await acknowledge(q)
             return
         data = q.data or ""
+        if hasattr(self, "utilities") and hasattr(self.utilities, "now") and \
+                await self.utilities.now.callback(q, data):
+            return
         if hasattr(self, "community") and await self.community.callback(q, data):
             return
         if data.startswith("p:"):
@@ -953,6 +966,32 @@ class App:
             await acknowledge(q)
             if self.follow.db.remove(data[3:], q.from_user.id):
                 await q.message.edit_text("Follow removed. Use /following to view the rest.")
+            return
+        if data.startswith("fn:"):
+            parts = data.split(":")
+            if len(parts) != 3 or parts[2] not in {"profile", "fetch", "thanks"}:
+                await acknowledge(q)
+                return
+            notice = self.follow.db.notification(parts[1], q.from_user.id,
+                                                 q.message.chat.id, q.message.message_id)
+            if not notice:
+                await acknowledge(q, "This notification belongs to another user or has expired")
+                return
+            await acknowledge(q)
+            target = Target(notice["platform"], notice["handle"], notice["url"])
+            if parts[2] == "profile":
+                await self.show_profile(q.message.chat.id, q.from_user.id, target)
+            elif parts[2] == "fetch" and notice["kind"] == "avatar" and self.store.rate(
+                    q.from_user.id, "profile", 8):
+                jid = self.store.create_job(q.from_user.id, q.message.chat.id, target.url)
+                prompt = await self.bot.send_message(q.message.chat.id, "⏳ Checking public profile photo…")
+                self.store.bind_progress(jid, prompt.message_id)
+            elif parts[2] == "thanks":
+                self.follow.db.db.execute("DELETE FROM follow_notifications WHERE token=?", (parts[1],))
+                try:
+                    await q.message.delete()
+                except (TelegramBadRequest, TelegramForbiddenError):
+                    await q.message.edit_reply_markup(reply_markup=None)
             return
         if data.startswith("fd:"):
             await acknowledge(q)
@@ -1521,10 +1560,11 @@ class App:
                     ("rules", "Group rules"),
                     ("note", "Group note"),
                     ("qr", "Create a QR image"),
-                    ("image", "Convert a replied image"),
+                    ("scan", "Scan a replied QR or barcode"),
+                    ("ocr", "Read text in a replied image"),
                     ("weather", "Weather and forecast"),
                     ("rate", "Fiat or crypto reference rate"),
-                    ("time", "Time in an IANA zone"),
+                    ("now", "Local time and calendars"),
                     ("apod", "NASA astronomy picture"),
                     ("translate", "Translate selected text"),
                 )

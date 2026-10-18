@@ -29,6 +29,8 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 
 from .config import Settings
 from .market_prices import ASSETS, MarketPrices
+from .now_service import CITY_ALIASES, NowService
+from .geocoding import nominatim_places
 
 MAX_INPUT = 8 * 1024 * 1024
 Image.MAX_IMAGE_PIXELS = 20_000_000
@@ -44,6 +46,23 @@ def weather_label(code: int) -> str:
     }
     return next((label for label, values in groups.items() if code in values),
                 f"WMO weather code {code}")
+
+
+def aqi_label(value: int) -> str:
+    """US EPA AQI bands; the index is modeled by Open-Meteo, not a local sensor."""
+    if value < 0 or value > 500:
+        raise ValueError("Air quality index is outside the supported range")
+    if value <= 50:
+        return "Good · air is satisfactory"
+    if value <= 100:
+        return "Moderate · unusually sensitive people should take care"
+    if value <= 150:
+        return "Unhealthy for sensitive groups · children and people with heart or lung conditions should limit prolonged outdoor activity"
+    if value <= 200:
+        return "Unhealthy · everyone should reduce prolonged outdoor activity"
+    if value <= 300:
+        return "Very unhealthy · avoid prolonged outdoor activity"
+    return "Hazardous · avoid outdoor activity"
 
 
 def _place_key(value: str) -> str:
@@ -105,9 +124,12 @@ def _market_card(report: str) -> str:
     relayed = sorted({line.strip().split(" via Gheymat:", 1)[0]
                       for line in lines if line.startswith("  ") and " via Gheymat:" in line})
     direct = sorted({line.strip().split(":", 1)[0]
-                     for line in lines if line.startswith(("  Wallex direct:", "  Navasan direct:"))})
+                     for line in lines if line.startswith(("  Wallex direct:", "  Navasan direct:",
+                                                           "  Bitpin direct:"))})
     fetched = next((line.strip().removeprefix("Relay fetched ").split(";", 1)[0]
-                    for line in lines if line.startswith("  Relay fetched ")), "not supplied")
+                    for line in lines if line.startswith("  Relay fetched ")), None)
+    fetched = fetched or next((line.strip().removeprefix("Bitpin observed ").rstrip(".")
+                              for line in lines if line.startswith("  Bitpin observed ")), "not supplied")
     body = ["💱 <b>Iran market</b> · Toman per unit"]
     body += [html.escape(line) for line in summary]
     if relayed:
@@ -223,6 +245,7 @@ class Utilities:
         self.media_slots = asyncio.Semaphore(2)
         self.market_prices = MarketPrices(db, settings.navasan_api_key,
                                          settings.navasan_refresh_seconds)
+        self.now = NowService(db)
         self._apod_cache: tuple[dict[str, Any], float] | None = None
         db.execute("CREATE TABLE IF NOT EXISTS utility_packs (name TEXT PRIMARY KEY, owner_id INTEGER NOT NULL)")
         db.execute("CREATE TABLE IF NOT EXISTS favorite_zones (user_id INTEGER NOT NULL, "
@@ -377,8 +400,7 @@ class Utilities:
         return data
 
     async def command(self, m: Message, cmd: str, arg: str) -> bool:
-        if cmd not in {"/qr", "/scan", "/ocr", "/image", "/sticker", "/stickerimage",
-                       "/gif", "/pack", "/convert", "/weather", "/rate", "/time",
+        if cmd not in {"/qr", "/scan", "/ocr", "/weather", "/rate", "/now",
                        "/apod", "/translate"}:
             return False
         try:
@@ -393,7 +415,9 @@ class Utilities:
 
     async def _command(self, m: Message, cmd: str, arg: str) -> None:
         data: Any
-        if cmd == "/qr":
+        if cmd == "/now":
+            await self.now.command(m, arg)
+        elif cmd == "/qr":
             value = arg or (m.reply_to_message.text if m.reply_to_message else "") or ""
             if not value:
                 raise ValueError("Use /qr TEXT or reply to text with /qr")
@@ -412,9 +436,13 @@ class Utilities:
                     languages = (await asyncio.to_thread(
                         subprocess.run, ["tesseract", "--list-langs"],
                         capture_output=True, text=True, timeout=5)).stdout
-                    lang = "eng+fas" if "fas" in languages else "eng"
-                    if arg.strip().lower() == "fas" and "fas" not in languages:
+                    requested = arg.strip().lower()
+                    if requested not in {"", "fa", "fas", "en", "eng"}:
+                        raise ValueError("Use /ocr, /ocr fa, or /ocr en on a replied image")
+                    if requested in {"fa", "fas"} and "fas" not in languages:
                         raise ValueError("Persian OCR data is not installed on this host")
+                    lang = ("fas+eng" if "fas" in languages else "eng") if not requested else \
+                        "fas+eng" if requested in {"fa", "fas"} else "eng"
                     data = await asyncio.to_thread(self._ocr, raw, lang)
                 await m.reply(html.escape(data[:3500] or "No text recognized.") +
                               ("\nEnglish OCR only on this host." if lang == "eng" else ""))
@@ -507,12 +535,15 @@ class Utilities:
             if len(segments) > 3:
                 raise ValueError("Use /weather CITY[, COUNTRY[, REGION]]")
             city = segments[0]
-            country = segments[1] if len(segments) > 1 else ""
+            lookup, alias_country = CITY_ALIASES.get(city.casefold(), (city, ""))
+            country = segments[1] if len(segments) > 1 else alias_country
             region = segments[2] if len(segments) > 2 else ""
-            geo = await self.api("https://geocoding-api.open-meteo.com/v1/search",
-                                 {"name": city.strip(), "count": 20,
-                                  "language": "fa" if re.search(r"[\u0600-\u06ff]", city) else "en"})
-            places = geo.get("results") or []
+            if any(ord(char) > 127 for char in lookup):
+                places = await nominatim_places(lookup)
+            else:
+                geo = await self.api("https://geocoding-api.open-meteo.com/v1/search",
+                                     {"name": lookup.strip(), "count": 20, "language": "en"})
+                places = geo.get("results") or []
             if country.strip():
                 places = [p for p in places if _place_key(str(p.get("country", ""))) ==
                           _place_key(country.strip()) or str(p.get("country_code", "")).casefold() ==
@@ -521,40 +552,80 @@ class Utilities:
                 places = [p for p in places if _place_key(str(p.get("admin1", ""))) == _place_key(region)]
             if not places:
                 raise ValueError("Location not found. Try CITY, COUNTRY (for example Tehran, IR).")
-            place, suggestions = select_place(places, city)
+            place, suggestions = select_place(places, lookup)
             if place is None:
                 await m.reply("📍 <b>Choose a location</b>\n" +
                               "\n".join(html.escape(f"• {p['name']}, {p.get('country', '')}, "
                                                    f"{p.get('admin1', '')}") for p in suggestions) +
                               "\nTry /weather CITY, COUNTRY, REGION")
                 return
-            data = await self.api("https://api.open-meteo.com/v1/forecast", {
-                "latitude": str(place["latitude"]), "longitude": str(place["longitude"]),
+            location = {"latitude": str(place["latitude"]),
+                        "longitude": str(place["longitude"]),
+                        "timezone": str(place.get("timezone") or "auto")}
+            results = await asyncio.gather(self.api("https://api.open-meteo.com/v1/forecast", {
+                **location,
                 "current": "temperature_2m,precipitation,wind_speed_10m,weather_code",
-                "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum",
-                "forecast_days": 3, "timezone": str(place.get("timezone") or "UTC")})
-            now, daily = data["current"], data["daily"]
+                "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum,weather_code",
+                "forecast_days": 3}),
+                self.api("https://air-quality-api.open-meteo.com/v1/air-quality", {
+                    **location, "current": "us_aqi"}), return_exceptions=True)
+            if isinstance(results[0], BaseException):
+                raise ValueError("Weather provider is unavailable. Try again later.") from results[0]
+            forecast = results[0]
+            air = results[1]
+            now, daily = forecast["current"], forecast["daily"]
+            location["timezone"] = str(forecast.get("timezone") or location["timezone"])
             def safe(value: Any) -> str:
                 return html.escape(str(value))
+            current_date, _, current_time = str(now["time"]).partition("T")
+            today_low = daily["temperature_2m_min"][0]
+            today_high = daily["temperature_2m_max"][0]
+            air_line = "AQI unavailable"
+            if not isinstance(air, BaseException):
+                try:
+                    index = int(air["current"]["us_aqi"])
+                    air_line = f"US AQI {index} · {aqi_label(index)}"
+                except (KeyError, TypeError, ValueError):
+                    pass
             lines = [f"🌤 <b>{html.escape(str(place['name']))}, "
-                     f"{html.escape(str(place.get('country', '')))}</b>",
-                     f"Now · {safe(now['temperature_2m'])} °C · {weather_label(int(now['weather_code']))}",
-                     f"Rain {safe(now['precipitation'])} mm  ·  Wind {safe(now['wind_speed_10m'])} km/h",
+                     f"{html.escape(str(place.get('country', '')))}</b>", "",
+                     f"🌡 <b>{safe(now['temperature_2m'])} °C</b> · today {safe(today_low)}–{safe(today_high)} °C",
+                     f"🌤 {html.escape(weather_label(int(now['weather_code'])))}",
+                     f"🌧 Rain {safe(now['precipitation'])} mm",
+                     f"🌪 Wind {safe(now['wind_speed_10m'])} km/h",
+                     f"⚠️ {html.escape(air_line)}", "",
+                     f"📅 {safe(current_date.replace('-', '/'))}",
+                     f"🕓 {safe(current_time[:5])} local · {safe(location['timezone'])}",
                      "", "<b>Next 3 days</b>"]
-            lines += [f"{safe(d)}: {safe(lo)}–{safe(hi)} °C · rain {safe(rain)} mm" for d, lo, hi, rain in
-                      zip(daily["time"], daily["temperature_2m_min"], daily["temperature_2m_max"],
-                          daily["precipitation_sum"])]
-            lines.append(f"Open-Meteo · {safe(now['time'])} local")
+            for day, low, high, rain, code in zip(
+                daily["time"], daily["temperature_2m_min"], daily["temperature_2m_max"],
+                daily["precipitation_sum"], daily["weather_code"]):
+                label = weather_label(int(code))
+                icon = "🌨" if "Snow" in label else "⛈" if "Thunder" in label else \
+                    "🌧" if "Rain" in label or "Drizzle" in label else "☀️"
+                lines.extend(("", f"{icon} <b>{safe(str(day).replace('-', '/'))}</b> · {html.escape(label)}",
+                              f"🌡 {safe(low)}–{safe(high)} °C", f"🌧 Rain {safe(rain)} mm"))
+            lines.append("\nOpen-Meteo forecast and modeled air quality · OpenStreetMap geocoding where used")
             await m.reply("\n".join(lines))
         elif cmd == "/rate":
             parts = arg.upper().split()
-            if len(parts) != 2:
-                raise ValueError("Use /rate USD EUR, /rate BTC USD, or /rate USD IRT")
+            amount = Decimal(1)
+            if len(parts) == 3:
+                try:
+                    amount = Decimal(parts[0].replace(",", ""))
+                except InvalidOperation as exc:
+                    raise ValueError("Use /rate AMOUNT ASSET IRT") from exc
+                parts = parts[1:]
+            if len(parts) != 2 or not amount.is_finite() or not 0 < amount <= Decimal("1000000000"):
+                raise ValueError("Use /rate USD EUR, /rate BTC USD, or /rate 100 USD IRT")
             base, quote = parts
             if quote == "IRT":
                 if base not in ASSETS:
                     raise ValueError("Supported Iranian Toman assets: " + ", ".join(ASSETS))
-                await m.reply(_market_card(await self.market_prices.report((base,))))
+                if amount == 1:
+                    await m.reply(_market_card(await self.market_prices.report((base,))))
+                else:
+                    await m.reply(await self.market_prices.amount_card(base, amount))
             elif base == "IRT":
                 raise ValueError("Use ASSET IRT for an Iranian Toman quote")
             elif "IRR" in {base, quote}:
@@ -563,6 +634,8 @@ class Utilities:
             elif not all(p.isalpha() and len(p) <= 5 for p in parts):
                 raise ValueError("Use /rate USD EUR, /rate BTC USD, or /rate USD IRT")
             else:
+                if amount != 1:
+                    raise ValueError("Amounts are supported for Toman quotes only")
                 await m.reply(await self.reference_rate(base, quote))
         elif cmd == "/time":
             if not m.from_user:
@@ -614,16 +687,21 @@ class Utilities:
             date = datetime.strptime(str(data["date"]), "%Y-%m-%d").date().isoformat()
             media = str(data.get("url", ""))
             explanation = str(data.get("explanation", "")).strip()
-            excerpt = explanation[:420].rsplit(" ", 1)[0] if len(explanation) > 420 else explanation
-            if len(explanation) > 420:
+            excerpt = explanation[:240].rsplit(" ", 1)[0] if len(explanation) > 240 else explanation
+            if len(explanation) > 240:
                 excerpt += "…"
             credit = str(data.get("copyright") or "NASA APOD")
             preview_video = bool(data.get("preview"))
+            is_video = preview_video or data.get("media_type") == "video"
             if "nasa-logo" in media.casefold():
                 media = ""
-            caption = (f"🌌 <b>NASA · {'APOD video preview' if preview_video else 'Picture of the Day'}</b>\n"
+            media_note = ("This is a preview image. NASA's video turns astronomy data into sound; "
+                          "open the story to watch and listen.\n\n") if is_video and \
+                         ("sonif" in title.casefold() or "sonif" in explanation.casefold()) else \
+                         "This is a video preview. Open NASA's story for the full video.\n\n" if is_video else ""
+            caption = (f"🌌 <b>NASA · {'Video of the Day' if is_video else 'Picture of the Day'}</b>\n"
                        f"<b>{html.escape(title[:120])}</b> · {html.escape(date)}\n\n"
-                       f"{html.escape(excerpt)}\n\nCredit · {html.escape(credit[:100])}")
+                       f"{media_note}{html.escape(excerpt)}\n\nCredit · {html.escape(credit[:100])}")
             page = "https://science.nasa.gov/apod/" if data.get("preview") is not None else \
                 f"https://apod.nasa.gov/apod/ap{date[2:4]}{date[5:7]}{date[8:10]}.html"
             button = InlineKeyboardMarkup(inline_keyboard=[[
@@ -666,7 +744,17 @@ class Utilities:
 
     @staticmethod
     def _ocr(raw: bytes, lang: str) -> str:
-        result = subprocess.run(["tesseract", "stdin", "stdout", "-l", lang], input=raw,
+        with Image.open(io.BytesIO(raw)) as image:
+            image.load()
+            gray = ImageOps.autocontrast(ImageOps.grayscale(image))
+            if max(gray.size) < 1800:
+                scale = min(3, 1800 / max(gray.size))
+                gray = gray.resize((max(1, int(gray.width * scale)),
+                                    max(1, int(gray.height * scale))), Image.Resampling.LANCZOS)
+            output = io.BytesIO()
+            gray.save(output, format="PNG")
+        result = subprocess.run(["tesseract", "stdin", "stdout", "-l", lang,
+                                 "--psm", "6" if "fas" in lang else "3"], input=output.getvalue(),
                                 capture_output=True, timeout=20)
         if result.returncode:
             raise ValueError("OCR failed to read this image")

@@ -8,9 +8,13 @@ import sqlite3
 import time
 from pathlib import Path
 
+import httpx
+
 from aiogram import Bot
 from aiogram.enums import ChatMemberStatus
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+
+from .ganjoor import Ganjoor, render_poem
 
 PROTECTED = {"start", "help", "search", "music", "podcast", "pod", "twitter", "instagram",
              "tiktok", "youtube", "queue", "cancel", "status", "settings", "admin", "fal",
@@ -115,7 +119,7 @@ class CommunityStore:
             raise ValueError("content import must be a JSON list of at most 5000 items")
         rows = []
         for entry in data:
-            if not isinstance(entry, dict) or entry.get("kind") not in {"poem", "joke", "quote"}:
+            if not isinstance(entry, dict) or entry.get("kind") not in {"poem", "quote"}:
                 raise ValueError("invalid content kind")
             values = tuple(str(entry.get(k, "")).strip() for k in
                            ("kind", "language", "body", "author", "source", "rights"))
@@ -198,6 +202,7 @@ class CommunityStore:
 class Community:
     def __init__(self, bot: Bot, store: CommunityStore, owner_id: int):
         self.bot, self.store, self.owner_id = bot, store, owner_id
+        self.ganjoor = Ganjoor()
 
     async def admin(self, chat: int, user: int) -> bool:
         if user == self.owner_id:
@@ -222,23 +227,20 @@ class Community:
             return False
         chat, user = m.chat.id, m.from_user.id
         group = m.chat.type in {"group", "supergroup"}
-        if group and cmd in {"/fal", "/poem", "/joke", "/quote", "/dice"} and not self.store.enabled(chat, "culture"):
+        if group and cmd in {"/fal", "/poem", "/quote", "/dice"} and not self.store.enabled(chat, "culture"):
             return True
         if group and cmd in {"/rules", "/note"} and not self.store.enabled(chat, "notes"):
             return True
-        if cmd in {"/fal", "/poem", "/joke", "/quote"}:
+        if cmd in {"/fal", "/poem", "/quote"}:
             self.store.use(chat, user, cmd[1:])
             if cmd == "/poem":
-                if not self.store.poets():
-                    await m.reply("📜 No reviewed poetry is installed. The owner can import a licensed catalog.")
-                    return True
                 sid = self.store.new_session(user, chat, "poem")
                 markup = InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="Random poem", callback_data=f"u:{sid}:random")],
                     [InlineKeyboardButton(text="Choose poet", callback_data=f"u:{sid}:poets")],
                     [InlineKeyboardButton(text="Search poetry", callback_data=f"u:{sid}:search")],
                 ])
-                sent = await m.reply("📜 <b>Poetry</b>\nChoose how to browse the reviewed collection.",
+                sent = await m.reply("📜 <b>Poetry</b>\nBrowse Ganjoor's public catalog or search for a verse.",
                                      reply_markup=markup)
                 self.store.db.execute("UPDATE community_sessions SET message_id=? WHERE id=?",
                                       (sent.message_id, sid))
@@ -393,34 +395,47 @@ class Community:
             await q.answer("This menu is unavailable.")
             return True
         if action == "random":
-            row = self.store.content("poem")
             await q.answer()
-            await q.message.answer(self.render_content(row) if row else
-                                   "No reviewed poetry is available yet.")
+            try:
+                await q.message.answer(render_poem(await self.ganjoor.random()))
+            except (ValueError, httpx.HTTPError):
+                row = self.store.content("poem")
+                await q.message.answer(self.render_content(row) if row else
+                                       "Poetry provider is unavailable. Try again later.")
         elif action == "poets":
-            poets = self.store.poets()
             await q.answer()
-            if poets:
-                markup = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text=p[:40], callback_data=f"u:{sid}:p:{i}")]
-                    for i, p in enumerate(poets)])
-                await self.bot.edit_message_text("Choose a poet:", chat_id=q.message.chat.id,
-                                                 message_id=q.message.message_id,
-                                                 reply_markup=markup)
-            else:
-                await q.message.answer("No reviewed poetry is available yet.")
+            try:
+                poets = await self.ganjoor.poets()
+                page = int(parts[3]) if len(parts) == 4 and parts[3].isdigit() else 0
+                if page < 0 or page >= (len(poets) + 11) // 12:
+                    raise ValueError("Invalid poet page")
+                controls = []
+                if page:
+                    controls.append(InlineKeyboardButton(text="◀ Previous", callback_data=f"u:{sid}:poets:{page-1}"))
+                if (page + 1) * 12 < len(poets):
+                    controls.append(InlineKeyboardButton(text="Next ▶", callback_data=f"u:{sid}:poets:{page+1}"))
+                rows = [[InlineKeyboardButton(text=name, callback_data=f"u:{sid}:p:{pid}")]
+                        for pid, name in poets[page*12:(page+1)*12]]
+                if controls:
+                    rows.append(controls)
+                await self.bot.edit_message_text(f"📜 <b>Choose a poet</b> · {page+1}/{(len(poets)+11)//12}",
+                    chat_id=q.message.chat.id, message_id=q.message.message_id,
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+            except (ValueError, httpx.HTTPError):
+                await q.message.answer("Poet catalog is unavailable. Try again later.")
         elif action == "p" and len(parts) == 4 and parts[3].isdigit():
-            poets = self.store.poets()
-            index = int(parts[3])
             await q.answer()
-            if index < len(poets):
-                row = self.store.content("poem", author=poets[index])
-                if row:
-                    await q.message.answer(self.render_content(row))
+            try:
+                poet_id = int(parts[3])
+                if poet_id not in {pid for pid, _ in await self.ganjoor.poets()}:
+                    raise ValueError("Unknown poet")
+                await q.message.answer(render_poem(await self.ganjoor.random(poet_id)))
+            except (ValueError, httpx.HTTPError):
+                await q.message.answer("This poet's work is unavailable. Try again later.")
         elif action == "search":
             self.store.db.execute("UPDATE community_sessions SET kind='poem_search' WHERE id=?", (sid,))
             await q.answer()
-            prompt = await q.message.answer("Reply to this message with a word or phrase to search reviewed poetry.")
+            prompt = await q.message.answer("Reply with a word or phrase to search Ganjoor poetry.")
             self.store.db.execute("UPDATE community_sessions SET message_id=? WHERE id=?",
                                   (prompt.message_id, sid))
         return True
@@ -433,7 +448,16 @@ class Community:
             (m.from_user.id, m.chat.id, m.reply_to_message.message_id, time.time())).fetchone()
         if row:
             self.store.db.execute("DELETE FROM community_sessions WHERE id=?", (row[0],))
-            poem = self.store.content("poem", query=m.text.strip()[:100])
-            await m.reply(self.render_content(poem) if poem else "No matching reviewed poem found.")
+            term = m.text.strip()[:100]
+            try:
+                poem = await self.ganjoor.search(term)
+                if poem:
+                    await m.reply(render_poem(poem))
+                else:
+                    await m.reply("No matching poem found in Ganjoor.")
+            except (ValueError, httpx.HTTPError):
+                local_poem = self.store.content("poem", query=term)
+                await m.reply(self.render_content(local_poem) if local_poem else
+                              "Poetry search is unavailable. Try again later.")
             return True
         return False
