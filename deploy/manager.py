@@ -784,7 +784,7 @@ class Manager:
         return f"Activated {branch}@{sha[:12]}; backup {snapshot}"
 
     def install(self, config: dict[str, str] | None = None, *, branch: str = "v2",
-                checks: bool = True) -> str:
+                checks: bool = True, reuse_existing_config: bool = False) -> str:
         if self.require_root:
             self._root()
             self._require_host()
@@ -803,7 +803,9 @@ class Manager:
             self._fetch()
             sha = self._target(branch)
             release = self._stage(sha, checks=checks)
-            values = dict(config) if config is not None else None
+            values = dict(config) if config is not None else (
+                _parse_env(self.paths.env) if reuse_existing_config and self.paths.env.is_file()
+                else None)
             if values is not None:
                 values["DATA_DIR"] = str(self.paths.state)
                 self._validate_config(values, release)

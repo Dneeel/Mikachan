@@ -254,6 +254,17 @@ def test_remove_preserves_state_by_default_and_purge_deletes_only_managed_paths(
     assert outside.read_text() == "untouched"
 
 
+def test_panel_reinstall_reuses_valid_saved_config(deployment):
+    manager, _, _ = deployment
+    install(manager)
+    database(manager)
+    manager.remove()
+    result = manager.install(reuse_existing_config=True)
+    assert "service active" in result
+    assert manager.status()["service"] == "active"
+    assert (manager.paths.state / "mikachan.sqlite").exists()
+
+
 def test_unmanaged_paths_and_bad_refs_are_rejected(deployment: tuple[FakeManager, Path, str]) -> None:
     manager, _, _ = deployment
     manager.paths.base.mkdir(parents=True)

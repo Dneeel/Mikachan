@@ -1,6 +1,6 @@
 # Community and Utilities delivery ledger — 2026-10-18
 
-This ledger separates code and offline tests from Telegram acceptance. The current v2 source passes 120 offline tests and Ruff. `mypy src` reports 39 existing errors in downloader-owned `bot.py` and `follow.py`. The previous Daytona acceptance used an earlier build. No live Telegram update has exercised this revision. Open-Meteo, Frankfurter, Open ER API, CoinGecko, CoinPaprika and NASA's official APOD page were probed from this workspace. Navasan's keyed endpoint is mock-tested but has not been verified with a real owner key. See [the current response examples](UX_RESPONSE_2026-10-18.md) for presentation.
+This ledger separates code and offline tests from Telegram acceptance. The current v2 source passes 121 offline tests and Ruff. `mypy src` reports 39 existing errors in downloader-owned `bot.py` and `follow.py`. The previous Daytona acceptance used an earlier build. No live Telegram update has exercised this revision. Open-Meteo, Frankfurter, Open ER API, CoinGecko, CoinPaprika and NASA's official APOD page were probed from this workspace. Navasan's keyed endpoint is mock-tested but has not been verified with a real owner key. See [the current response examples](UX_RESPONSE_2026-10-18.md) for presentation.
 
 | Feature IDs | Delivered behavior | Current evidence / remaining limit |
 | --- | --- | --- |

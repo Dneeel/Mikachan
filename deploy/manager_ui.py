@@ -37,7 +37,7 @@ SETTING_HELP = {
 SECTIONS = {
     "overview": [("Refresh dashboard", "status"), ("Guided setup", "setup"),
                  ("Live diagnostics", "diagnostics")],
-    "deployment": [("Install v2 release", "install"), ("Available versions", "versions"),
+    "deployment": [("Install or reinstall v2", "install"), ("Available versions", "versions"),
                    ("Update active branch", "update"),
                    ("Switch version or commit", "switch"), ("Rollback code and data", "rollback"),
                    ("Preview release cleanup", "prune-preview"), ("Prune old releases", "prune")],
@@ -391,7 +391,7 @@ class MikachanPanel(App[None]):
             if action == "versions":
                 return manager.versions(refresh=True)
             if action == "install":
-                return manager.install()
+                return manager.install(reuse_existing_config=True)
             if action == "setup":
                 return manager.setup(fields)
             if action == "update":

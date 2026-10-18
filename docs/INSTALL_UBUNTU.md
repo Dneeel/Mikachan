@@ -61,7 +61,7 @@ Run `mikachan` from a server terminal. Number keys `1`–`6` select sections, `r
 | Section | Actions |
 | --- | --- |
 | 01 Overview | Dashboard with exact branch/commit, health, host load, memory, free disk, access counts; Guided setup; live diagnostics |
-| 02 Deployment | Install `v2` code, list available `vN` versions, update the active branch (including new commits on `v4`), switch branch or exact reachable commit, rollback code/data, preview and prune old releases |
+| 02 Deployment | Install/reinstall `v2` (reusing validated saved settings after a code-only removal), list available `vN` versions, update the active branch (including new commits on `v4`), switch branch or exact reachable commit, rollback code/data, preview and prune old releases |
 | 03 Service | Start, stop, restart, inspect queue counts/recent states without user URLs, and read recent logs |
 | 04 Configuration | View configuration with secrets masked; edit token, owner, allowlists, group IDs, optional providers and runtime limits individually |
 | 05 Data & Storage | Inspect root usage; create, list and restore SQLite/config snapshots; clear interrupted media after stopping the bot |
