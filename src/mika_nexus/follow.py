@@ -35,6 +35,7 @@ FEATURES = {
     "youtube": ("videos", "shorts"),
     "tiktok": ("posts", "stories", "bio", "name", "avatar"),
 }
+SOCIAL_PLATFORMS = frozenset(FEATURES)
 LABELS = {
     "posts": "Posts", "reels": "Reels", "stories": "Stories (best effort)",
     "tweets": "Tweets", "videos": "Videos", "shorts": "Shorts", "bio": "Bio changes",
@@ -114,8 +115,12 @@ def creator_from_post(url: str, meta: dict[str, object] | None = None) -> Target
     meta = meta or {}
     platform = source(url)
     parts = [x for x in urlsplit(url).path.split("/") if x]
-    if platform in {"twitter", "tiktok"} and len(parts) >= 3:
-        return profile_target(f"https://{'x.com' if platform == 'twitter' else 'www.tiktok.com'}/{parts[0]}")
+    if platform == "twitter" and len(parts) >= 3 and parts[1] == "status":
+        return profile_target(f"https://x.com/{parts[0]}")
+    if platform == "tiktok" and len(parts) >= 2 and parts[0].startswith("@"):
+        return profile_target(f"https://www.tiktok.com/{parts[0]}")
+    if platform == "instagram" and len(parts) >= 2 and parts[0] == "stories":
+        return profile_target(f"https://www.instagram.com/{parts[1]}/")
     candidate = meta.get("uploader_url") or meta.get("channel_url") or meta.get("profile_url")
     if isinstance(candidate, str):
         found = profile_target(candidate)
@@ -129,6 +134,59 @@ def creator_from_post(url: str, meta: dict[str, object] | None = None) -> Target
     return None
 
 
+async def resolve_creator_from_post(
+    url: str, meta: dict[str, object] | None = None,
+) -> Target | None:
+    """Resolve a public post's creator without downloading its media."""
+    url = clean_url(url)
+    target = creator_from_post(url, meta)
+    if target:
+        return target
+    platform = source(url)
+    if platform not in {"instagram", "youtube"}:
+        return None
+    await asyncio.to_thread(validate_dns, url)
+    if platform == "instagram":
+        try:
+            data = await _extract(["gallery-dl", "-J", "--range", "1-1", url], 20)
+            if isinstance(data, list):
+                for message in data:
+                    if (isinstance(message, list) and len(message) >= 2
+                            and isinstance(message[-1], dict)):
+                        target = creator_from_post(url, message[-1])
+                        if target:
+                            return target
+        except (ValueError, TimeoutError, OSError, json.JSONDecodeError):
+            pass
+    try:
+        data = await _extract(["yt-dlp", "--no-playlist", "--skip-download",
+                               "--dump-single-json", "--no-warnings",
+                               "--socket-timeout", "10", url], 25)
+        if isinstance(data, dict):
+            target = creator_from_post(url, data)
+            if target:
+                return target
+            channel_id = data.get("channel_id")
+            if (platform == "youtube" and isinstance(channel_id, str)
+                    and re.fullmatch(r"UC[\w-]{22}", channel_id)):
+                return profile_target(f"https://www.youtube.com/channel/{channel_id}")
+    except (ValueError, TimeoutError, OSError, json.JSONDecodeError):
+        pass
+    if platform == "youtube":
+        try:
+            await asyncio.to_thread(validate_dns, "https://www.youtube.com/oembed")
+            async with httpx.AsyncClient(timeout=8, follow_redirects=False) as client:
+                response = await client.get("https://www.youtube.com/oembed",
+                                            params={"url": url, "format": "json"})
+                response.raise_for_status()
+            payload = response.json()
+            if isinstance(payload, dict) and isinstance(payload.get("author_url"), str):
+                return profile_target(payload["author_url"])
+        except (ValueError, TimeoutError, httpx.HTTPError):
+            pass
+    return None
+
+
 class FollowStore:
     def __init__(self, db: sqlite3.Connection):
         self.db = db
@@ -138,6 +196,10 @@ class FollowStore:
           message_id INTEGER, platform TEXT NOT NULL, handle TEXT NOT NULL,
           url TEXT NOT NULL, stage TEXT NOT NULL, features TEXT NOT NULL,
           mode TEXT NOT NULL, destination TEXT NOT NULL, expires REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS profile_panels (
+          id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, chat_id INTEGER NOT NULL,
+          message_id INTEGER, platform TEXT NOT NULL, handle TEXT NOT NULL,
+          url TEXT NOT NULL, expires REAL NOT NULL);
         CREATE TABLE IF NOT EXISTS follows (
           id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, chat_id INTEGER NOT NULL,
           platform TEXT NOT NULL, handle TEXT NOT NULL, url TEXT NOT NULL,
@@ -169,6 +231,22 @@ class FollowStore:
                         (token, user, chat, None, target.platform, target.handle,
                          target.url, "confirm", json.dumps(defaults), "notice", "dm", time.time() + 1800))
         return token
+
+    def profile_panel(self, user: int, chat: int, target: Target) -> str:
+        self.db.execute("DELETE FROM profile_panels WHERE expires<?", (time.time(),))
+        token = secrets.token_urlsafe(8)
+        self.db.execute("INSERT INTO profile_panels VALUES (?,?,?,?,?,?,?,?)",
+                        (token, user, chat, None, target.platform, target.handle,
+                         target.url, time.time() + 7 * 86400))
+        return token
+
+    def bind_profile_panel(self, token: str, message: int) -> None:
+        self.db.execute("UPDATE profile_panels SET message_id=? WHERE id=?", (message, token))
+
+    def get_profile_panel(self, token: str, user: int, chat: int, message: int):
+        return self.db.execute("SELECT * FROM profile_panels WHERE id=? AND user_id=? "
+                               "AND chat_id=? AND message_id=? AND expires>?",
+                               (token, user, chat, message, time.time())).fetchone()
 
     def bind(self, token: str, message: int) -> None:
         self.db.execute("UPDATE follow_sessions SET message_id=? WHERE id=?", (message, token))

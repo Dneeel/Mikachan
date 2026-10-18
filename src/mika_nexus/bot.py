@@ -3,6 +3,7 @@
 import asyncio
 import html
 import json
+import secrets
 import time
 from collections.abc import Mapping, Sequence
 
@@ -32,7 +33,8 @@ from .community import Community, CommunityStore
 from .utilities import Utilities
 from .personality import Mode, mode_for, response
 from .follow import (FollowService, FEATURES, Target, command_target, confirm_panel,
-                     creator_from_post, profile_target, settings_panel)
+                     creator_from_post, profile_target, public_items,
+                     resolve_creator_from_post, settings_panel, SOCIAL_PLATFORMS)
 
 
 def kb(rows: list[list[tuple[str, str]]]) -> InlineKeyboardMarkup:
@@ -42,6 +44,13 @@ def kb(rows: list[list[tuple[str, str]]]) -> InlineKeyboardMarkup:
             for row in rows
         ]
     )
+
+
+def download_prompt_markup(cid: str, url: str) -> InlineKeyboardMarkup:
+    rows = [[("✅ Yes", f"c:{cid}:y"), ("❌ No", f"c:{cid}:n")]]
+    if source(url) in SOCIAL_PLATFORMS and profile_target(url) is None:
+        rows.append([("👤 Profile", f"c:{cid}:p")])
+    return kb(rows)
 
 
 def collection_view(
@@ -252,7 +261,7 @@ class App:
                 label = source(url)
                 prompt = await m.reply(
                     f"🔗 <b>{html.escape(label.title())}</b> · Link {index + 1} of {len(urls)}\n{html.escape(url[:300])}\n\nDownload this item?",
-                    reply_markup=kb([[("✅ Yes", f"c:{cid}:y"), ("❌ No", f"c:{cid}:n")]]),
+                    reply_markup=download_prompt_markup(cid, url),
                 )
                 self.store.set_prompt(cid, prompt.message_id)
                 target = profile_target(url)
@@ -598,6 +607,74 @@ class App:
         prompt = await self.bot.send_message(chat, body, reply_markup=markup)
         self.follow.db.bind(token, prompt.message_id)
 
+    async def show_profile(self, chat: int, user: int, target: Target) -> None:
+        token = self.follow.db.profile_panel(user, chat, target)
+        rows = [
+            [("👀 Follow", f"p:{token}:follow")],
+            [("⬇️ Latest post", f"p:{token}:latest")],
+        ]
+        if target.platform == "youtube":
+            rows.append([("▶️ Latest Short", f"p:{token}:shorts")])
+        if target.platform in {"instagram", "tiktok"}:
+            rows.append([("👤 Photo & bio", f"p:{token}:card"),
+                         ("⭕ Stories", f"p:{token}:stories")])
+        markup = kb(rows)
+        markup.inline_keyboard.append([InlineKeyboardButton(text="🔗 Open profile", url=target.url)])
+        prompt = await self.bot.send_message(
+            chat, f"👤 <b>@{html.escape(target.handle)}</b> · {target.platform.title()}\n"
+                  "Public profile · Choose an action below.", reply_markup=markup)
+        self.follow.db.bind_profile_panel(token, prompt.message_id)
+
+    async def profile_callback(self, q: CallbackQuery, data: str) -> None:
+        parts = data.split(":")
+        if len(parts) != 3:
+            await acknowledge(q)
+            return
+        row = self.follow.db.get_profile_panel(parts[1], q.from_user.id,
+                                               q.message.chat.id, q.message.message_id)
+        if not row:
+            await acknowledge(q, "Profile panel expired")
+            return
+        target = Target(row["platform"], row["handle"], row["url"])
+        action = parts[2]
+        if action in {"card", "stories", "latest", "shorts"} and not self.store.rate(
+                q.from_user.id, "profile", 8):
+            await acknowledge(q, "Please wait before checking more profiles")
+            return
+        await acknowledge(q)
+        if action == "follow":
+            await self.show_follow(q.message.chat.id, q.from_user.id, target)
+        elif action == "card" and target.platform in {"instagram", "tiktok"}:
+            jid = self.store.create_job(q.from_user.id, q.message.chat.id, target.url)
+            prompt = await self.bot.send_message(q.message.chat.id, "⏳ Checking public profile…")
+            self.store.bind_progress(jid, prompt.message_id)
+        elif action == "stories" and target.platform in {"instagram", "tiktok"}:
+            url = (f"https://www.instagram.com/stories/{target.handle}/"
+                   if target.platform == "instagram" else
+                   f"https://www.tiktok.com/@{target.handle}/stories")
+            jid = self.store.create_job(q.from_user.id, q.message.chat.id, url)
+            prompt = await self.bot.send_message(q.message.chat.id, "⏳ Checking public stories…")
+            self.store.bind_progress(jid, prompt.message_id)
+        elif action in {"latest", "shorts"}:
+            try:
+                items = await public_items(target, "shorts" if action == "shorts" else "posts")
+            except (ValueError, TimeoutError, OSError):
+                items = []
+            if not items:
+                await self.bot.send_message(q.message.chat.id, "No accessible public posts found.")
+                return
+            item_url = items[0][1]
+            cid = self.store.confirm_create(q.message.chat.id, q.from_user.id,
+                                            q.message.message_id, secrets.randbits(31), item_url,
+                                            self.settings.confirmation_ttl_seconds)
+            if self.store.claim_prompt(cid):
+                prompt = await self.bot.send_message(
+                    q.message.chat.id,
+                    f"🔗 <b>Latest {html.escape(items[0][0])}</b>\n"
+                    f"{html.escape(items[0][2][:250])}\n\nDownload this item?",
+                    reply_markup=download_prompt_markup(cid, item_url))
+                self.store.set_prompt(cid, prompt.message_id)
+
     async def follow_callback(self, q: CallbackQuery, data: str) -> None:
         parts = data.split(":")
         if len(parts) < 3:
@@ -609,12 +686,18 @@ class App:
         if not row:
             await acknowledge(q, "Follow panel expired")
             return
+        if action == "open" and row["stage"] == "confirm":
+            self.follow.db.db.execute("DELETE FROM follow_sessions WHERE id=?", (token,))
+            await acknowledge(q)
+            await self.show_follow(q.message.chat.id, q.from_user.id,
+                                   Target(row["platform"], row["handle"], row["url"]))
+            return
         if action == "no":
             self.follow.db.db.execute("DELETE FROM follow_sessions WHERE id=?", (token,))
             await acknowledge(q)
             await q.message.edit_text("Follow cancelled.")
             return
-        if action in {"yes", "open"} and row["stage"] == "confirm":
+        if action == "yes" and row["stage"] == "confirm":
             self.follow.db.db.execute("UPDATE follow_sessions SET stage='settings' WHERE id=?", (token,))
         elif row["stage"] != "settings":
             await acknowledge(q)
@@ -673,6 +756,9 @@ class App:
             return
         data = q.data or ""
         if hasattr(self, "community") and await self.community.callback(q, data):
+            return
+        if data.startswith("p:"):
+            await self.profile_callback(q, data)
             return
         if data.startswith("f:"):
             await self.follow_callback(q, data)
@@ -733,8 +819,30 @@ class App:
             return
         if data.startswith("c:"):
             parts = data.split(":")
-            if len(parts) != 3 or parts[2] not in {"y", "n"}:
+            if len(parts) != 3 or parts[2] not in {"y", "n", "p"}:
                 await acknowledge(q)
+                return
+            if parts[2] == "p":
+                row = self.store.db.execute(
+                    "SELECT url FROM confirmations WHERE id=? AND user_id=? AND chat_id=? "
+                    "AND prompt_id=? AND state='PENDING' AND expires>?",
+                    (parts[1], q.from_user.id, q.message.chat.id,
+                     q.message.message_id, time.time())).fetchone()
+                await acknowledge(q, "Request expired" if not row else None)
+                if not row or not self.store.rate(q.from_user.id, "profile", 8):
+                    return
+                url = str(row["url"])
+                try:
+                    if source(url) == "tiktok":
+                        url = await self.worker._resolve_short(url)
+                    target = await resolve_creator_from_post(url)
+                except (ValueError, TimeoutError, httpx.HTTPError):
+                    target = None
+                if target:
+                    await self.show_profile(q.message.chat.id, q.from_user.id, target)
+                else:
+                    await self.bot.send_message(q.message.chat.id,
+                        "Creator profile could not be identified from this public post.")
                 return
             state, jid = self.store.decision(
                 parts[1], q.from_user.id, q.message.chat.id, q.message.message_id, parts[2] == "y"
@@ -824,10 +932,21 @@ class App:
                 if not job or job["user_id"] != q.from_user.id or job["chat_id"] != q.message.chat.id:
                     return
                 context = self.store.job_context(parts[1])
+                url = str(context.get("source_url") or job["url"])
                 target = profile_target(str(context.get("profile_url") or "")) or creator_from_post(
-                    str(context.get("source_url") or job["url"]), context)
+                    url, context)
+                if not target and self.store.rate(q.from_user.id, "profile", 8):
+                    try:
+                        if source(url) == "tiktok":
+                            url = await self.worker._resolve_short(url)
+                        target = await resolve_creator_from_post(url, context)
+                    except (ValueError, TimeoutError, httpx.HTTPError):
+                        target = None
                 if target:
-                    await self.show_follow(q.message.chat.id, q.from_user.id, target)
+                    if parts[2] == "profile":
+                        await self.show_profile(q.message.chat.id, q.from_user.id, target)
+                    else:
+                        await self.show_follow(q.message.chat.id, q.from_user.id, target)
                 else:
                     await self.bot.send_message(q.message.chat.id, "Creator profile is unavailable for this item.")
                 return
@@ -1128,7 +1247,7 @@ class App:
                 prompt = await self.bot.send_message(
                     q.message.chat.id,
                     f"Mikachan · Confirm public media request\n<code>{html.escape(url[:300])}</code>",
-                    reply_markup=kb([[("✅ Yes", f"c:{cid}:y"), ("❌ No", f"c:{cid}:n")]]),
+                    reply_markup=download_prompt_markup(cid, url),
                 )
                 self.store.set_prompt(cid, prompt.message_id)
         elif action in ("prev", "next"):

@@ -217,9 +217,9 @@ class Worker:
             extras.append(InlineKeyboardButton(text="📄 Transcript", callback_data=f"j:{jid}:transcribe"))
         if extras:
             rows.append(extras)
-        from .follow import creator_from_post
-        if creator_from_post(url, context):
-            rows.append([InlineKeyboardButton(text="👤 Profile · Follow",
+        from .follow import SOCIAL_PLATFORMS
+        if source(url) in SOCIAL_PLATFORMS:
+            rows.append([InlineKeyboardButton(text="👤 Profile",
                                             callback_data=f"j:{jid}:profile")])
         return InlineKeyboardMarkup(inline_keyboard=rows)
 
