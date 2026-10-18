@@ -1,5 +1,7 @@
 # Terminal management design review — 2026-10-18
 
+Historical first-pass review. The revised six-section panel and single-root layout are documented in [Panel Design](PANEL_DESIGN_2026-10-18.md) and [Installation](INSTALL_UBUNTU.md). Paths and test counts below describe the earlier implementation, not the current installation.
+
 ## What this bot needs
 
 The active v2 repository has one aiogram polling entrypoint, Python 3.12,

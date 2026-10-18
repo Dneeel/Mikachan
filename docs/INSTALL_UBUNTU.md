@@ -14,34 +14,36 @@ The first installation can take several minutes because Python packages and medi
 
 ## Private repository: read-only deploy key
 
-Create an SSH deploy key dedicated to this server. Add **only its public half** in GitHub repository **Settings → Deploy keys**, with write access **off**. Keep the private key on the server with mode `0600`. For example:
+Keep the key, SSH configuration and known-hosts file under the single Mikachan root. Check that `/opt/Mikachan` is absent or contains only files you intentionally prepared for Mikachan. Create a dedicated read-only deploy key:
 
 ```bash
-sudo install -d -m 0700 /root/.ssh
-sudo ssh-keygen -t ed25519 -f /root/.ssh/mikachan-deploy -N '' -C mikachan-deploy
-sudo chmod 0600 /root/.ssh/mikachan-deploy
-sudo cat /root/.ssh/mikachan-deploy.pub
+sudo install -d -m 0700 /opt/Mikachan/config/ssh /opt/Mikachan/tmp/bootstrap
+sudo ssh-keygen -t ed25519 -f /opt/Mikachan/config/ssh/deploy-key -N '' -C mikachan-deploy
+sudo chmod 0600 /opt/Mikachan/config/ssh/deploy-key
+sudo cat /opt/Mikachan/config/ssh/deploy-key.pub
 ```
 
-Copy that public line into GitHub. Configure a dedicated SSH host alias in `/root/.ssh/config` so other GitHub credentials stay separate:
+Copy that public line into GitHub. Verify GitHub's published SSH fingerprint, then place its host key in `/opt/Mikachan/config/ssh/known_hosts` with mode `0600`. Create `/opt/Mikachan/config/ssh/config` with mode `0600`:
 
 ```sshconfig
 Host github-mikachan
     HostName github.com
     User git
-    IdentityFile /root/.ssh/mikachan-deploy
+    IdentityFile /opt/Mikachan/config/ssh/deploy-key
+    UserKnownHostsFile /opt/Mikachan/config/ssh/known_hosts
     IdentitiesOnly yes
+    StrictHostKeyChecking yes
 ```
 
-Set that config to mode `0600`. Verify GitHub's SSH host fingerprint against its published fingerprint before accepting the first connection, then test the deploy key with `sudo ssh -T git@github-mikachan`. A GitHub success response may still exit nonzero because shell access is disabled.
+Test the deploy key with `sudo ssh -F /opt/Mikachan/config/ssh/config -T git@github-mikachan`. A GitHub success response may still exit nonzero because shell access is disabled.
 
 Now install from the private repository in **one shell line** (after key setup):
 
 ```bash
-sudo bash -c 'd=$(mktemp -d); trap '\''rm -rf "$d"'\'' EXIT; git clone --depth 1 --branch v2 git@github-mikachan:Dneeel/Mikachan.git "$d/repo" && bash "$d/repo/deploy/bootstrap.sh" --source "$d/repo" --repo-url git@github-mikachan:Dneeel/Mikachan.git'
+sudo bash -c 'set -e; d=$(mktemp -d /opt/Mikachan/tmp/bootstrap/source.XXXXXX); trap '\''rm -rf "$d"'\'' EXIT; export GIT_SSH_COMMAND="ssh -F /opt/Mikachan/config/ssh/config"; git clone --depth 1 --branch v2 git@github-mikachan:Dneeel/Mikachan.git "$d/repo"; bash "$d/repo/deploy/bootstrap.sh" --source "$d/repo" --repo-url git@github-mikachan:Dneeel/Mikachan.git'
 ```
 
-The panel saves the SSH Git remote for later updates. Keep the deploy key in place while this server needs to fetch updates. Never put it in `.env`, a Git remote URL, command history, or a backup shared with others. Revoking the key stops future fetches; it does not delete the installed release.
+The panel saves the SSH Git remote and reuses that SSH configuration for later updates. Keep the deploy key while the server needs new releases. Never put it in `.env`, a Git remote URL, command history, or a shared backup. Revoking the key stops future fetches; it does not delete the installed release.
 
 ## First setup
 
@@ -54,40 +56,38 @@ The manager validates the complete configuration, saves a SQLite/configuration s
 
 ## Everyday controls
 
-Run `mikachan` from a server terminal. The panel has these sections:
+Run `mikachan` from a server terminal. Number keys `1`–`6` select sections, `r` refreshes, and `q` exits.
 
 | Section | Actions |
 | --- | --- |
-| Overview | Installed branch, exact commit, service, setup, access, database, quality checks; Guided setup; live diagnostics |
-| Settings | View every supported configuration key with secrets masked; edit one key, including token, owner, allowlists, group IDs, and optional providers |
-| Versions | Refresh available `vN` branches, update current branch (including later commits on `v4` or another branch), switch branch or exact reachable commit, rollback, prune old code |
-| Backups | Save, list, and restore SQLite/configuration snapshots |
-| Service | Start, stop, restart, and inspect recent logs |
-| System | Host checks, install missing tools, recover interrupted activation, remove code, or purge managed data |
+| 01 Overview | Dashboard with exact branch/commit, health, host load, memory, free disk, access counts; Guided setup; live diagnostics |
+| 02 Deployment | Install `v2` code, list available `vN` versions, update the active branch (including new commits on `v4`), switch branch or exact reachable commit, rollback code/data, preview and prune old releases |
+| 03 Service | Start, stop, restart, inspect queue counts/recent states without user URLs, and read recent logs |
+| 04 Configuration | View configuration with secrets masked; edit token, owner, allowlists, group IDs, optional providers and runtime limits individually |
+| 05 Data & Storage | Inspect root usage; create, list and restore SQLite/config snapshots; clear interrupted media after stopping the bot |
+| 06 Maintenance | Host checks, install missing tools, live diagnostics, recover interrupted activation, remove bot code, or delete all managed data |
 
 A version switch takes a consistent SQLite snapshot after stopping the bot. A failed activation restores the previous code and data. A rollback intentionally restores the earlier snapshot and discards later database changes. Regular backups contain the SQLite database and runtime settings; large downloaded job artifacts are not duplicated. Review a target branch before switching to it, especially across major schema changes.
 
-The panel stores:
+Every Mikachan-managed file lives under **`/opt/Mikachan`**:
 
 | Path | Purpose |
 | --- | --- |
-| `/usr/local/bin/mikachan` | Terminal command |
-| `/usr/local/lib/mikachan-panel` | Stable panel code; independent of active bot release |
-| `/opt/mikachan/repository.git` | Local Git mirror |
-| `/opt/mikachan/releases/<commit>` | Locked Python environment for each release |
-| `/opt/mikachan/current` | Symlink to active release |
-| `/opt/mikachan/manifest.json` | Branch, commit, and activation history |
-| `/var/lib/mikachan` | SQLite database and job data |
-| `/var/backups/mikachan` | Manager snapshots |
-| `/etc/mikachan.env` | Bot settings and secrets, root-owned, group-readable by bot only |
-| `/etc/mikachan-manager.json` | Git remote used for updates |
-| `/etc/systemd/system/mikachan.service` | Single bot service and polling lock |
+| `/opt/Mikachan/panel`, `/opt/Mikachan/panel-venv` | Stable panel code and independent environment |
+| `/opt/Mikachan/repository.git`, `/opt/Mikachan/releases/<commit>`, `/opt/Mikachan/current` | Git mirror, locked release environments and active symlink |
+| `/opt/Mikachan/config/bot.env`, `/opt/Mikachan/config/manager.json`, `/opt/Mikachan/config/ssh` | Runtime settings, update remote and optional private deploy key |
+| `/opt/Mikachan/state/mikachan.sqlite*`, `/opt/Mikachan/state/jobs` | SQLite WAL state and transient download artifacts |
+| `/opt/Mikachan/cache`, `/opt/Mikachan/tmp`, `/opt/Mikachan/logs` | Dependency caches, isolated runtime/manager/panel/bootstrap temp and project logs |
+| `/opt/Mikachan/backups` | Operator-created SQLite/configuration snapshots |
+| `/opt/Mikachan/manifest.json`, `/opt/Mikachan/transaction.json` | Release history and interrupted-update recovery |
 
-The bot service runs as an unprivileged `mikachan` system user. The panel needs sudo because it manages that service, private settings, and backups. **Remove bot code** keeps data and backups. **Delete all managed data** removes code, configuration, SQLite state, and backups after typed confirmation. Keep external backups before purging. A full purge also removes the bootstrap-installed panel launcher, panel environment, and manager remote configuration. Install again with the one-line bootstrap if needed.
+The only paths outside the root are the small `/usr/local/bin/mikachan` launcher, `/etc/systemd/system/mikachan.service`, and operating-system-managed user, journal and packages. The bot service runs as an unprivileged `mikachan` system user. The panel needs sudo because it manages that service, private settings, and backups. **Remove bot code** keeps data and backups. **Delete managed project** removes the entire managed root after typed confirmation, including the panel, local backups and secrets. Keep an external backup before purging.
+
+QR, sticker, image and table conversions use bounded memory. Downloader files are removed after delivery or failure. A crash can leave a transient file until the next bot start; **Clear interrupted media** removes those leftovers while the service is stopped. SQLite, settings, code, caches and requested backups remain persistent.
 
 ## Noninteractive and development use
 
-`mikachan status`, `mikachan preflight`, `mikachan diagnostics --live`, and `mikachan logs` work from the shell. `mikachan update` updates the active branch; `mikachan versions --refresh` lists remote major branches. Run `mikachan --help` for the complete CLI. Configuration values are never passed as CLI arguments by the panel. Avoid placing tokens directly in shell commands; use the masked panel input or a private `0600` config file.
+`mikachan status`, `mikachan preflight`, `mikachan queue`, `mikachan storage`, `mikachan diagnostics --live`, and `mikachan logs` work from the shell. `mikachan update` updates the active branch; `mikachan versions --refresh` lists remote major branches. Run `mikachan --help` for the complete CLI. Configuration values are never passed as CLI arguments by the panel. Avoid placing tokens directly in shell commands; use the masked panel input or a private `0600` config file.
 
 For a development checkout, run `uv sync --locked --extra dev`, `uv run pytest -q`, `uv run ruff check .`, and `uv run mikachan doctor`. A local poller must not run alongside the managed service for the same bot token.
 

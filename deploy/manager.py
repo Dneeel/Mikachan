@@ -61,10 +61,10 @@ class ManagerError(RuntimeError):
 
 @dataclass(frozen=True)
 class Paths:
-    base: Path = Path("/opt/mikachan")
-    state: Path = Path("/var/lib/mikachan")
-    backups: Path = Path("/var/backups/mikachan")
-    env: Path = Path("/etc/mikachan.env")
+    base: Path = Path("/opt/Mikachan")
+    state: Path = Path("/opt/Mikachan/state")
+    backups: Path = Path("/opt/Mikachan/backups")
+    env: Path = Path("/opt/Mikachan/config/bot.env")
     unit: Path = Path("/etc/systemd/system/mikachan.service")
 
     @property
@@ -90,6 +90,26 @@ class Paths:
     @property
     def journal(self) -> Path:
         return self.base / "transaction.json"
+
+    @property
+    def temporary(self) -> Path:
+        return self.base / "tmp"
+
+    @property
+    def runtime_temp(self) -> Path:
+        return self.temporary / "runtime"
+
+    @property
+    def manager_temp(self) -> Path:
+        return self.temporary / "manager"
+
+    @property
+    def cache(self) -> Path:
+        return self.base / "cache"
+
+    @property
+    def logs(self) -> Path:
+        return self.base / "logs"
 
 
 def _atomic(path: Path, content: str, mode: int = 0o600) -> None:
@@ -162,7 +182,7 @@ class Manager:
                  on_event: Callable[[str], None] | None = None):
         self.paths = paths
         if repo_url is None:
-            options = Path("/etc/mikachan-manager.json")
+            options = paths.base / "config/manager.json"
             try:
                 repo_url = json.loads(options.read_text(encoding="utf-8")).get(
                     "repo_url", OFFICIAL_REPO) if options.is_file() else OFFICIAL_REPO
@@ -280,6 +300,26 @@ class Manager:
     def status(self) -> dict[str, Any]:
         result: dict[str, Any] = {"installed": False, "service": "active" if self._active()
                                   else "inactive", "managed": self.paths.marker.is_file()}
+        try:
+            def cpu_ticks() -> tuple[int, int]:
+                ticks = [int(value) for value in Path("/proc/stat").read_text(
+                    encoding="ascii").splitlines()[0].split()[1:]]
+                return sum(ticks), ticks[3] + ticks[4]
+            total_a, idle_a = cpu_ticks()
+            time.sleep(0.12)
+            total_b, idle_b = cpu_ticks()
+            cpu = round(100 * (1 - (idle_b - idle_a) / (total_b - total_a)), 1) \
+                if total_b > total_a else None
+            memory = Path("/proc/meminfo").read_text(encoding="ascii")
+            fields = {key: int(value.split()[0]) * 1024 for key, value in
+                      (line.split(":", 1) for line in memory.splitlines() if ":" in line)}
+            result["host"] = {"cpu_percent": cpu,
+                              "load_1m": round(os.getloadavg()[0], 2),
+                              "memory_used": fields["MemTotal"] - fields["MemAvailable"],
+                              "memory_total": fields["MemTotal"],
+                              "disk_free": shutil.disk_usage(self.paths.base.parent).free}
+        except (OSError, KeyError, ValueError):
+            result["host"] = {}
         if not self.paths.manifest.is_file():
             result["incomplete_install"] = self.paths.marker.is_file()
             result["legacy_detected"] = not result["incomplete_install"] and (
@@ -312,6 +352,13 @@ class Manager:
                     result["authorized_users"] = db.execute("SELECT COUNT(*) FROM access").fetchone()[0]
                     result["authorized_groups"] = db.execute(
                         "SELECT COUNT(*) FROM allowed_groups").fetchone()[0]
+                    counts = {state: count for state, count in db.execute(
+                        "SELECT state, COUNT(*) FROM jobs GROUP BY state")}
+                    result["queue"] = {"waiting": sum(counts.get(state, 0) for state in
+                                                   ("QUEUED", "RETRYABLE")),
+                                       "active": sum(counts.get(state, 0) for state in
+                                                  ("RESOLVING", "DOWNLOADING", "VERIFYING",
+                                                   "DELIVERING"))}
             except sqlite3.Error:
                 result["database_status"] = "unreadable"
         if self.paths.repo.exists():
@@ -319,6 +366,62 @@ class Manager:
                                f"refs/remotes/origin/{current['branch']}^{{commit}}", check=False)
             result["known_remote_commit"] = latest.stdout.strip() if latest.returncode == 0 else None
         return result
+
+    def queue(self) -> dict[str, Any]:
+        """Read queue metadata only; URLs and user identities stay out of the panel."""
+        database = self.paths.state / "mikachan.sqlite"
+        if not database.is_file():
+            return {"message": "No database yet", "states": {}, "recent": []}
+        try:
+            with sqlite3.connect(f"file:{database}?mode=ro", uri=True, timeout=2) as db:
+                states = {state: count for state, count in db.execute(
+                    "SELECT state, COUNT(*) FROM jobs GROUP BY state")}
+                recent = [{"id": jid, "state": state, "updated": int(updated)}
+                          for jid, state, updated in db.execute(
+                              "SELECT id, state, updated FROM jobs ORDER BY updated DESC LIMIT 8")]
+            return {"states": states, "recent": recent}
+        except sqlite3.Error as exc:
+            raise ManagerError("Queue database is unavailable") from exc
+
+    def storage(self) -> dict[str, Any]:
+        base = self.paths.base
+        if not self.paths.marker.is_file():
+            return {"message": "No managed installation"}
+        disk = shutil.disk_usage(base)
+        watched = ("state", "backups", "cache", "tmp", "logs", "releases")
+        result: dict[str, Any] = {"root": str(base), "disk_free": disk.free,
+                                  "paths": {}}
+        for name in watched:
+            path = base / name
+            if path.is_symlink():
+                result["paths"][name] = "symlink: inspect manually"
+            elif path.exists():
+                scan = self._run("du", "-sb", str(path), check=False, timeout=20)
+                result["paths"][name] = (int(scan.stdout.split()[0]) if scan.returncode == 0
+                                          and scan.stdout.split() else "unavailable")
+        return result
+
+    def cleanup_transient(self) -> dict[str, int]:
+        """Only discard interrupted media work, with the service fully stopped."""
+        with self._lock():
+            self._managed()
+            if self._active():
+                raise ManagerError("Stop the bot before cleaning transient media")
+            self._poller_free()
+            removed: dict[str, int] = {}
+            for root in (self.paths.state / "jobs", self.paths.runtime_temp):
+                if root.is_symlink():
+                    raise ManagerError(f"Transient path is a symlink: {root}")
+                count = 0
+                if root.is_dir():
+                    for item in root.iterdir():
+                        if item.is_dir() and not item.is_symlink():
+                            shutil.rmtree(item)
+                        else:
+                            item.unlink()
+                        count += 1
+                removed[root.name] = count
+            return removed
 
     def _init_repo(self) -> None:
         if self.paths.repo.is_symlink():
@@ -397,8 +500,13 @@ class Manager:
             raise ManagerError("Release worktree has an unexpected commit")
         if not (release / "uv.lock").is_file():
             raise ManagerError("Selected commit has no uv.lock; refusing unpinned installation")
+        self.paths.cache.mkdir(parents=True, exist_ok=True)
+        self.paths.temporary.mkdir(parents=True, exist_ok=True)
         uv_env = os.environ.copy()
-        uv_env["UV_CACHE_DIR"] = str(self.paths.base / "uv-cache")
+        uv_env["UV_CACHE_DIR"] = str(self.paths.cache / "uv")
+        uv_env["XDG_CACHE_HOME"] = str(self.paths.cache)
+        self.paths.manager_temp.mkdir(parents=True, exist_ok=True)
+        uv_env["TMPDIR"] = str(self.paths.manager_temp)
         uv_env["UV_NO_PROGRESS"] = "1"
         self.on_event("Installing locked Python dependencies…")
         self._run(self.uv, "sync", "--locked", "--extra", "dev", cwd=release,
@@ -445,7 +553,9 @@ class Manager:
         if values.get("DATA_DIR") != str(self.paths.state):
             raise ManagerError("DATA_DIR must be the managed persistent state directory")
         # Validate all runtime constraints with the exact code being activated.
-        with tempfile.TemporaryDirectory() as directory:
+        self.paths.temporary.mkdir(parents=True, exist_ok=True)
+        self.paths.manager_temp.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=self.paths.manager_temp) as directory:
             candidate = Path(directory) / "config.env"
             _atomic(candidate, _render_env(values))
             code = ("import sys; from mikachan.config import Settings; "
@@ -475,15 +585,35 @@ class Manager:
         os.chmod(path, 0o640)
 
     def _state_dirs(self) -> None:
-        if self.paths.state.is_symlink() or self.paths.backups.is_symlink():
-            raise ManagerError("State and backup paths cannot be symlinks")
+        if any(path.is_symlink() for path in (self.paths.state, self.paths.backups,
+                                              self.paths.temporary, self.paths.runtime_temp,
+                                              self.paths.manager_temp, self.paths.cache,
+                                              self.paths.logs, self.paths.env.parent)):
+            raise ManagerError("Managed paths cannot be symlinks")
         self.paths.state.mkdir(parents=True, exist_ok=True)
         self.paths.backups.mkdir(parents=True, exist_ok=True)
+        self.paths.temporary.mkdir(parents=True, exist_ok=True)
+        self.paths.runtime_temp.mkdir(parents=True, exist_ok=True)
+        self.paths.manager_temp.mkdir(parents=True, exist_ok=True)
+        self.paths.cache.mkdir(parents=True, exist_ok=True)
+        self.paths.logs.mkdir(parents=True, exist_ok=True)
+        self.paths.env.parent.mkdir(parents=True, exist_ok=True)
         os.chmod(self.paths.backups, 0o700)
         os.chmod(self.paths.state, 0o700)
+        os.chmod(self.paths.temporary, 0o750)
+        os.chmod(self.paths.runtime_temp, 0o700)
+        os.chmod(self.paths.manager_temp, 0o700)
+        os.chmod(self.paths.cache, 0o700)
+        os.chmod(self.paths.logs, 0o700)
+        os.chmod(self.paths.env.parent, 0o750)
         if self.require_root:
             user = pwd.getpwnam("mikachan")
-            os.chown(self.paths.state, user.pw_uid, grp.getgrnam("mikachan").gr_gid)
+            group = grp.getgrnam("mikachan").gr_gid
+            for path in (self.paths.state, self.paths.runtime_temp, self.paths.cache,
+                         self.paths.logs):
+                os.chown(path, user.pw_uid, group)
+            os.chown(self.paths.temporary, 0, group)
+            os.chown(self.paths.env.parent, 0, group)
 
     def _unit_text(self) -> str:
         p = self.paths
@@ -493,11 +623,15 @@ class Manager:
                 "[Service]\nType=simple\nUser=mikachan\nGroup=mikachan\n"
                 f"WorkingDirectory={p.current}\nEnvironmentFile={p.env}\n"
                 f"Environment=PATH={p.current}/.venv/bin:/usr/local/bin:/usr/bin:/bin\n"
+                f"Environment=HOME={p.state}\n"
+                f"Environment=TMPDIR={p.runtime_temp}\n"
+                f"Environment=XDG_CACHE_HOME={p.cache}\n"
                 f"ExecStart=/usr/bin/flock -n {p.state}/polling.lock "
                 f"{p.current}/.venv/bin/mikachan run\n"
                 "Restart=on-failure\nRestartSec=5\nTimeoutStopSec=60\nUMask=0077\n"
                 "NoNewPrivileges=true\nProtectSystem=strict\nProtectHome=true\n"
-                f"ReadWritePaths={p.state}\nPrivateTmp=true\n\n"
+                f"ReadWritePaths={p.state} {p.runtime_temp} {p.cache} {p.logs}\n"
+                "PrivateTmp=true\n\n"
                 "[Install]\nWantedBy=multi-user.target\n")
 
     def _switch_link(self, sha: str) -> None:
@@ -1010,6 +1144,17 @@ class Manager:
                     result["telegram"] = "unavailable or rejected; inspect network and token privately"
         return result
 
+    def _remove_code_files(self) -> None:
+        """Leave panel, configuration, database and backups available for reinstall."""
+        self.paths.current.unlink(missing_ok=True)
+        for directory in (self.paths.releases, self.paths.repo, self.paths.cache / "uv"):
+            if directory.is_symlink():
+                raise ManagerError(f"Managed path is a symlink: {directory}")
+            if directory.is_dir():
+                shutil.rmtree(directory)
+        self.paths.manifest.unlink(missing_ok=True)
+        self.paths.journal.unlink(missing_ok=True)
+
     def remove(self, *, purge: bool = False) -> str:
         with self._lock():
             manifest = self._manifest()
@@ -1027,30 +1172,15 @@ class Manager:
             self._run("systemctl", "daemon-reload")
             # Recheck immediately before recursive deletion. Only manager-owned roots are touched.
             self._managed()
-            self.paths.current.unlink()
-            shutil.rmtree(self.paths.base)
+            self._remove_code_files()
             if purge:
-                if self.paths.state.exists():
-                    shutil.rmtree(self.paths.state)
-                if self.paths.backups.exists():
-                    shutil.rmtree(self.paths.backups)
-                self.paths.env.unlink(missing_ok=True)
                 if self.paths == Paths():
-                    panel = Path("/usr/local/lib/mikachan-panel")
-                    marker = panel / ".managed-by-mikachan"
-                    if panel.is_dir() and not panel.is_symlink() and marker.is_file() and \
-                            marker.read_text(encoding="utf-8") == \
-                            "Managed by Mikachan bootstrap\n":
-                        launcher = Path("/usr/local/bin/mikachan")
-                        if launcher.is_file() and not launcher.is_symlink() and \
-                                "mikachan-panel/deploy/manage.sh" in \
-                                launcher.read_text(encoding="utf-8"):
-                            launcher.unlink()
-                        shutil.rmtree(panel)
-                        cache = Path("/var/cache/mikachan-panel")
-                        if cache.is_dir() and not cache.is_symlink():
-                            shutil.rmtree(cache)
-                        Path("/etc/mikachan-manager.json").unlink(missing_ok=True)
+                    launcher = Path("/usr/local/bin/mikachan")
+                    if launcher.is_file() and not launcher.is_symlink() and \
+                            "/opt/Mikachan/panel/deploy/manage.sh" in \
+                            launcher.read_text(encoding="utf-8"):
+                        launcher.unlink()
+                shutil.rmtree(self.paths.base)
                 return "Removed managed code, service, configuration, database and backups"
             return "Removed managed code and service; configuration, database and backups retained"
 
@@ -1069,7 +1199,7 @@ class Manager:
                 self._systemctl("disable", check=False)
                 self.paths.unit.unlink()
                 self._run("systemctl", "daemon-reload", check=False)
-            shutil.rmtree(self.paths.base)
+            self._remove_code_files()
             return "Cleared incomplete managed install; state, config and backups retained"
 
 
@@ -1097,6 +1227,9 @@ def _cli() -> None:
     sub.add_parser("recover")
     sub.add_parser("backup")
     sub.add_parser("backups")
+    sub.add_parser("queue")
+    sub.add_parser("storage")
+    sub.add_parser("cleanup")
     prune = sub.add_parser("prune")
     prune.add_argument("--keep", type=int, default=3)
     prune.add_argument("--apply", action="store_true")
@@ -1156,6 +1289,12 @@ def _cli() -> None:
             result = manager.backup()
         elif args.command == "backups":
             result = manager.backups()
+        elif args.command == "queue":
+            result = manager.queue()
+        elif args.command == "storage":
+            result = manager.storage()
+        elif args.command == "cleanup":
+            result = manager.cleanup_transient()
         elif args.command == "prune":
             result = manager.prune_releases(keep=args.keep, apply=args.apply)
         elif args.command == "restore":

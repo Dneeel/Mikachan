@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS content_items (
 CREATE TABLE IF NOT EXISTS community_sessions (
  id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, chat_id INTEGER NOT NULL,
  message_id INTEGER, kind TEXT NOT NULL, expires REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS cultural_seed (name TEXT PRIMARY KEY);
 """
 
 
@@ -131,6 +132,36 @@ class CommunityStore:
             raise
         return len(rows)
 
+    def seed_hafez(self, path: Path) -> int:
+        """Install reviewed bundled Wikisource texts once, preserving owner imports."""
+        if self.db.execute("SELECT 1 FROM cultural_seed WHERE name='hafez-wikisource-1'").fetchone():
+            return 0
+        entries = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(entries, list) or not 0 < len(entries) <= 50:
+            raise ValueError("Invalid bundled Hafez catalog")
+        added = 0
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            for entry in entries:
+                if not isinstance(entry, dict) or entry.get("kind") != "poem" or \
+                        entry.get("author") != "Hafez" or \
+                        not str(entry.get("source", "")).startswith("https://fa.wikisource.org/wiki/") or \
+                        not entry.get("rights") or not entry.get("body"):
+                    raise ValueError("Invalid bundled Hafez entry")
+                if self.db.execute("SELECT 1 FROM content_items WHERE source=? LIMIT 1",
+                                   (entry["source"],)).fetchone():
+                    continue
+                self.db.execute("INSERT INTO content_items(kind,language,body,author,source,rights,approved) "
+                    "VALUES (?,?,?,?,?,?,1)", ("poem", "fa", entry["body"], "Hafez",
+                                            entry["source"], entry["rights"]))
+                added += 1
+            self.db.execute("INSERT INTO cultural_seed VALUES ('hafez-wikisource-1')")
+            self.db.execute("COMMIT")
+        except BaseException:
+            self.db.execute("ROLLBACK")
+            raise
+        return added
+
     def content(self, kind: str, author: str | None = None, query: str | None = None) -> sqlite3.Row | None:
         sql = "SELECT * FROM content_items WHERE approved=1 AND kind=?"
         args: list[str] = [kind]
@@ -198,19 +229,23 @@ class Community:
         if cmd in {"/fal", "/poem", "/joke", "/quote"}:
             self.store.use(chat, user, cmd[1:])
             if cmd == "/poem":
+                if not self.store.poets():
+                    await m.reply("📜 No reviewed poetry is installed. The owner can import a licensed catalog.")
+                    return True
                 sid = self.store.new_session(user, chat, "poem")
                 markup = InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="Random poem", callback_data=f"u:{sid}:random")],
                     [InlineKeyboardButton(text="Choose poet", callback_data=f"u:{sid}:poets")],
                     [InlineKeyboardButton(text="Search poetry", callback_data=f"u:{sid}:search")],
                 ])
-                sent = await m.reply("Poetry: choose an option.", reply_markup=markup)
+                sent = await m.reply("📜 <b>Poetry</b>\nChoose how to browse the reviewed collection.",
+                                     reply_markup=markup)
                 self.store.db.execute("UPDATE community_sessions SET message_id=? WHERE id=?",
                                       (sent.message_id, sid))
             else:
                 row = self.store.hafez() if cmd == "/fal" else self.store.content(cmd[1:])
                 await m.reply(self.render_content(row) if row else
-                              "No reviewed content is available for this feature yet.")
+                              "No reviewed content is installed for this feature yet.")
             return True
         if cmd == "/dice":
             self.store.use(chat, user, "dice")
@@ -338,8 +373,13 @@ class Community:
 
     @staticmethod
     def render_content(row: sqlite3.Row) -> str:
-        return (html.escape(str(row["body"])[:3400]) + "\n\n— " +
-                html.escape(str(row["author"])) + " · " + html.escape(str(row["source"])))
+        source = str(row["source"])
+        name = "Wikisource" if source.startswith("https://fa.wikisource.org/wiki/") else source[:120]
+        attribution = (f'<a href="{html.escape(source, quote=True)}">{name}</a>'
+                       if source.startswith("https://") else html.escape(name))
+        return ("📜 <b>" + html.escape(str(row["author"])) + "</b>\n\n" +
+                html.escape(str(row["body"])[:3400]) + "\n\nSource · " + attribution +
+                " · " + html.escape(str(row["rights"])[:80]))
 
     async def callback(self, q: CallbackQuery, data: str) -> bool:
         if not data.startswith("u:") or not q.message or not q.from_user:

@@ -8,10 +8,13 @@ Wants=network-online.target
 Type=simple
 User=mikachan
 Group=mikachan
-WorkingDirectory=/opt/mikachan/current
-EnvironmentFile=/etc/mikachan.env
-Environment=PATH=/opt/mikachan/current/.venv/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=/usr/bin/flock -n /var/lib/mikachan/polling.lock /opt/mikachan/current/.venv/bin/mikachan run
+WorkingDirectory=/opt/Mikachan/current
+EnvironmentFile=/opt/Mikachan/config/bot.env
+Environment=PATH=/opt/Mikachan/current/.venv/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HOME=/opt/Mikachan/state
+Environment=TMPDIR=/opt/Mikachan/tmp/runtime
+Environment=XDG_CACHE_HOME=/opt/Mikachan/cache
+ExecStart=/usr/bin/flock -n /opt/Mikachan/state/polling.lock /opt/Mikachan/current/.venv/bin/mikachan run
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=60
@@ -19,7 +22,7 @@ UMask=0077
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/mikachan
+ReadWritePaths=/opt/Mikachan/state /opt/Mikachan/tmp/runtime /opt/Mikachan/cache /opt/Mikachan/logs
 PrivateTmp=true
 
 [Install]

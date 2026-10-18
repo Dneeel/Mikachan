@@ -9,6 +9,9 @@ import re
 import sqlite3
 import subprocess
 import sys
+import time
+import unicodedata
+from decimal import Decimal, InvalidOperation
 from typing import Any
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -17,9 +20,11 @@ import httpx
 import jdatetime  # type: ignore[import-untyped]
 import qrcode  # type: ignore[import-untyped]
 import zxingcpp  # type: ignore[import-not-found]
+from bs4 import BeautifulSoup
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
-from aiogram.types import BufferedInputFile, InputSticker, Message
+from aiogram.types import (BufferedInputFile, InlineKeyboardButton,
+                           InlineKeyboardMarkup, InputSticker, Message)
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 from .config import Settings
@@ -39,6 +44,79 @@ def weather_label(code: int) -> str:
     }
     return next((label for label, values in groups.items() if code in values),
                 f"WMO weather code {code}")
+
+
+def _place_key(value: str) -> str:
+    return "".join(char for char in unicodedata.normalize("NFKD", value.casefold())
+                   if not unicodedata.combining(char)).replace("ي", "ی").replace("ك", "ک")
+
+
+def select_place(places: list[dict[str, Any]], city: str) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    """Prefer an exact populated city; show only distinct, relevant alternatives."""
+    unique: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for place in places:
+        if not isinstance(place, dict) or not {"name", "latitude", "longitude"} <= place.keys():
+            continue
+        key = (_place_key(str(place["name"])), str(place.get("country_code", "")),
+               _place_key(str(place.get("admin1", ""))))
+        if key not in unique or int(place.get("population") or 0) > int(unique[key].get("population") or 0):
+            unique[key] = place
+    ranked = sorted(unique.values(), key=lambda p: (
+        _place_key(str(p["name"])) != _place_key(city),
+        -int(p.get("population") or 0)))
+    exact = [p for p in ranked if _place_key(str(p["name"])) == _place_key(city)]
+    if len(exact) == 1 or (len(exact) > 1 and
+                           int(exact[0].get("population") or 0) >=
+                           5 * max(1, int(exact[1].get("population") or 0))):
+        return exact[0], ranked[:3]
+    if len(ranked) == 1:
+        return ranked[0], ranked
+    return None, ranked[:3]
+
+
+def _valid_rate(value: Any) -> Decimal:
+    try:
+        result = Decimal(str(value))
+    except (InvalidOperation, TypeError) as exc:
+        raise ValueError("Provider returned an invalid rate") from exc
+    if not result.is_finite() or not Decimal("1e-18") <= result < Decimal("1e12"):
+        raise ValueError("Provider returned an invalid rate")
+    return result
+
+
+def _rate_text(base: str, quote: str, value: Any, provider: str, updated: str) -> str:
+    number = _valid_rate(value)
+    display = format(number, ",f")
+    if "." in display:
+        display = display.rstrip("0").rstrip(".")
+    return (f"💱 <b>{html.escape(base)} → {html.escape(quote)}</b>\n"
+            f"1 {html.escape(base)} = <b>{display}</b> {html.escape(quote)}\n"
+            f"Source · {html.escape(provider)}\n"
+            f"As of · {html.escape(updated)}")
+
+
+def _market_card(report: str) -> str:
+    """Present existing validated quote calculations without the provider debug dump."""
+    lines = report.splitlines()
+    if not lines or not lines[0].startswith("Iran market ·"):
+        return html.escape(report)
+    summary = [line for line in lines[1:] if line and not line.startswith("  ") and
+               ": " in line and not line.startswith(("Relayed", "Cash FX"))]
+    relayed = sorted({line.strip().split(" via Gheymat:", 1)[0]
+                      for line in lines if line.startswith("  ") and " via Gheymat:" in line})
+    direct = sorted({line.strip().split(":", 1)[0]
+                     for line in lines if line.startswith(("  Wallex direct:", "  Navasan direct:"))})
+    fetched = next((line.strip().removeprefix("Relay fetched ").split(";", 1)[0]
+                    for line in lines if line.startswith("  Relay fetched ")), "not supplied")
+    body = ["💱 <b>Iran market</b> · Toman per unit"]
+    body += [html.escape(line) for line in summary]
+    if relayed:
+        body.append("Relay · Gheymat (" + html.escape(", ".join(relayed[:6])) + ")")
+    if direct:
+        body.append("Direct · " + html.escape(", ".join(direct)))
+    body.append("Snapshot · " + html.escape(fetched))
+    body.append("Indicative only · source trade times may be unknown")
+    return "\n".join(body)
 
 
 def qr_png(value: str) -> bytes:
@@ -145,6 +223,7 @@ class Utilities:
         self.media_slots = asyncio.Semaphore(2)
         self.market_prices = MarketPrices(db, settings.navasan_api_key,
                                          settings.navasan_refresh_seconds)
+        self._apod_cache: tuple[dict[str, Any], float] | None = None
         db.execute("CREATE TABLE IF NOT EXISTS utility_packs (name TEXT PRIMARY KEY, owner_id INTEGER NOT NULL)")
         db.execute("CREATE TABLE IF NOT EXISTS favorite_zones (user_id INTEGER NOT NULL, "
                    "zone TEXT NOT NULL, PRIMARY KEY(user_id,zone))")
@@ -200,10 +279,102 @@ class Utilities:
         async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
             result = await client.get(url, params=params)
             result.raise_for_status()
+            if len(result.content) > 1_000_000:
+                raise ValueError("Provider response is too large")
             data = result.json()
             if not isinstance(data, dict):
                 raise ValueError("Unexpected provider response")
             return data
+
+    async def reference_rate(self, base: str, quote: str) -> str:
+        """Try the chosen free reference source, then the independent alternative."""
+        kind = "crypto" if base in {"BTC", "ETH"} and quote in {"USD", "EUR"} else "fiat"
+        options = ([self.provider(kind)] + (["coinpaprika", "coingecko"] if kind == "crypto"
+                    else ["open_er_api", "frankfurter"]))
+        errors = 0
+        for provider in dict.fromkeys(options):
+            try:
+                if provider == "coinpaprika":
+                    asset = "btc-bitcoin" if base == "BTC" else "eth-ethereum"
+                    data = await self.api(f"https://api.coinpaprika.com/v1/tickers/{asset}",
+                                          {"quotes": quote})
+                    value, updated = data["quotes"][quote]["price"], data["last_updated"]
+                elif provider == "coingecko":
+                    asset = "bitcoin" if base == "BTC" else "ethereum"
+                    data = await self.api("https://api.coingecko.com/api/v3/simple/price", {
+                        "ids": asset, "vs_currencies": quote.lower(),
+                        "include_last_updated_at": "true"})
+                    info = data[asset]
+                    value = info[quote.lower()]
+                    updated = datetime.fromtimestamp(info["last_updated_at"], timezone.utc).strftime(
+                        "%Y-%m-%d %H:%M UTC")
+                elif provider == "open_er_api":
+                    data = await self.api(f"https://open.er-api.com/v6/latest/{base}", {})
+                    value = data["rates"][quote]
+                    updated = datetime.fromtimestamp(data["time_last_update_unix"], timezone.utc).strftime(
+                        "%Y-%m-%d %H:%M UTC")
+                else:
+                    data = await self.api("https://api.frankfurter.dev/v1/latest",
+                                          {"base": base, "symbols": quote})
+                    value, updated = data["rates"][quote], data["date"]
+                return _rate_text(base, quote, value, provider, str(updated))
+            except (httpx.HTTPError, ValueError, KeyError, TypeError, OverflowError, OSError):
+                errors += 1
+        raise ValueError(f"Rate unavailable from {errors} reference sources. Try again later.")
+
+    async def apod_image(self, url: str) -> bytes:
+        if not url.startswith("https://"):
+            raise ValueError("NASA returned a non-HTTPS image URL")
+        if "nasa-logo" in url.casefold():
+            raise ValueError("NASA returned its site logo instead of the APOD image")
+        data = bytearray()
+        async with httpx.AsyncClient(timeout=12, follow_redirects=False) as client:
+            async with client.stream("GET", url) as response:
+                response.raise_for_status()
+                async for chunk in response.aiter_bytes():
+                    data.extend(chunk)
+                    if len(data) > MAX_INPUT:
+                        raise ValueError("APOD image exceeds the 8 MiB bot limit")
+        await asyncio.to_thread(open_image, bytes(data))
+        if Image.open(io.BytesIO(data)).format not in {"JPEG", "PNG", "WEBP"}:
+            raise ValueError("APOD image format cannot be sent as a photo")
+        return bytes(data)
+
+    async def apod_page(self) -> dict[str, Any]:
+        """Read the latest official NASA page; its JSON endpoint can return a logo placeholder."""
+        if self._apod_cache and time.monotonic() < self._apod_cache[1]:
+            return self._apod_cache[0]
+        async with httpx.AsyncClient(timeout=12, follow_redirects=False) as client:
+            response = await client.get("https://science.nasa.gov/apod/")
+            response.raise_for_status()
+            if len(response.content) > 2_000_000:
+                raise ValueError("NASA APOD page is too large")
+        soup = BeautifulSoup(response.text, "html.parser")
+        metadata = soup.select_one('meta[property="og:image"]')
+        media = str(metadata.get("content", "")) if metadata else ""
+        heading = soup.select_one("h2.display-48")
+        description = soup.select_one(".media-detail-hero__description")
+        date_header = next((cell for cell in soup.select(".media-detail-hero__meta-row th")
+                            if cell.get_text(" ", strip=True).casefold().startswith("date")), None)
+        credit_header = next((cell for cell in soup.select(".media-detail-hero__meta-row th")
+                              if cell.get_text(" ", strip=True).casefold().startswith("credit")), None)
+        date_cell = date_header.find_next_sibling("td") if date_header else None
+        credit_cell = credit_header.find_next_sibling("td") if credit_header else None
+        if not heading or not description or not date_cell:
+            raise ValueError("NASA APOD page structure is unavailable")
+        date = datetime.strptime(date_cell.get_text(" ", strip=True), "%B %d, %Y").date().isoformat()
+        explanation = description.get_text(" ", strip=True).removeprefix("Explanation:").strip()
+        explanation = explanation.split("Tomorrow's picture:", 1)[0].strip()
+        if not explanation or not media.startswith("https://") or "nasa-logo" in media.casefold():
+            raise ValueError("NASA APOD page has no valid media preview")
+        video = soup.select_one('.media-detail-hero__media iframe') is not None
+        data: dict[str, Any] = {"title": heading.get_text(" ", strip=True), "date": date,
+                                "explanation": explanation, "url": media,
+                                "media_type": "video" if video else "image",
+                                "preview": video, "copyright": credit_cell.get_text(" ", strip=True)
+                                if credit_cell else "NASA APOD"}
+        self._apod_cache = data, time.monotonic() + 3600
+        return data
 
     async def command(self, m: Message, cmd: str, arg: str) -> bool:
         if cmd not in {"/qr", "/scan", "/ocr", "/image", "/sticker", "/stickerimage",
@@ -339,34 +510,42 @@ class Utilities:
             country = segments[1] if len(segments) > 1 else ""
             region = segments[2] if len(segments) > 2 else ""
             geo = await self.api("https://geocoding-api.open-meteo.com/v1/search",
-                                 {"name": city.strip(), "count": 10, "language": "en"})
+                                 {"name": city.strip(), "count": 20,
+                                  "language": "fa" if re.search(r"[\u0600-\u06ff]", city) else "en"})
             places = geo.get("results") or []
             if country.strip():
-                places = [p for p in places if p.get("country", "").casefold() == country.strip().casefold()]
+                places = [p for p in places if _place_key(str(p.get("country", ""))) ==
+                          _place_key(country.strip()) or str(p.get("country_code", "")).casefold() ==
+                          country.strip().casefold()]
             if region:
-                places = [p for p in places if p.get("admin1", "").casefold() == region.casefold()]
+                places = [p for p in places if _place_key(str(p.get("admin1", ""))) == _place_key(region)]
             if not places:
-                raise ValueError("Location not found")
-            if len(places) > 1:
-                await m.reply("Multiple places found. Refine with city, country, region: " +
-                              html.escape("; ".join(f"{p['name']}, {p.get('country', '')}, "
-                                                     f"{p.get('admin1', '')}" for p in places)))
+                raise ValueError("Location not found. Try CITY, COUNTRY (for example Tehran, IR).")
+            place, suggestions = select_place(places, city)
+            if place is None:
+                await m.reply("📍 <b>Choose a location</b>\n" +
+                              "\n".join(html.escape(f"• {p['name']}, {p.get('country', '')}, "
+                                                   f"{p.get('admin1', '')}") for p in suggestions) +
+                              "\nTry /weather CITY, COUNTRY, REGION")
                 return
-            place = places[0]
             data = await self.api("https://api.open-meteo.com/v1/forecast", {
                 "latitude": str(place["latitude"]), "longitude": str(place["longitude"]),
                 "current": "temperature_2m,precipitation,wind_speed_10m,weather_code",
                 "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum",
                 "forecast_days": 3, "timezone": str(place.get("timezone") or "UTC")})
             now, daily = data["current"], data["daily"]
-            lines = [f"{place['name']}, {place.get('country', '')} · Open-Meteo model",
-                     f"{now['time']} · {weather_label(int(now['weather_code']))} · "
-                     f"{now['temperature_2m']} °C · "
-                     f"precipitation {now['precipitation']} mm · wind {now['wind_speed_10m']} km/h"]
-            lines += [f"{d}: {lo}–{hi} °C · precipitation {rain} mm" for d, lo, hi, rain in
+            def safe(value: Any) -> str:
+                return html.escape(str(value))
+            lines = [f"🌤 <b>{html.escape(str(place['name']))}, "
+                     f"{html.escape(str(place.get('country', '')))}</b>",
+                     f"Now · {safe(now['temperature_2m'])} °C · {weather_label(int(now['weather_code']))}",
+                     f"Rain {safe(now['precipitation'])} mm  ·  Wind {safe(now['wind_speed_10m'])} km/h",
+                     "", "<b>Next 3 days</b>"]
+            lines += [f"{safe(d)}: {safe(lo)}–{safe(hi)} °C · rain {safe(rain)} mm" for d, lo, hi, rain in
                       zip(daily["time"], daily["temperature_2m_min"], daily["temperature_2m_max"],
                           daily["precipitation_sum"])]
-            await m.reply(html.escape("\n".join(lines)))
+            lines.append(f"Open-Meteo · {safe(now['time'])} local")
+            await m.reply("\n".join(lines))
         elif cmd == "/rate":
             parts = arg.upper().split()
             if len(parts) != 2:
@@ -375,7 +554,7 @@ class Utilities:
             if quote == "IRT":
                 if base not in ASSETS:
                     raise ValueError("Supported Iranian Toman assets: " + ", ".join(ASSETS))
-                await m.reply(html.escape(await self.market_prices.report((base,))))
+                await m.reply(_market_card(await self.market_prices.report((base,))))
             elif base == "IRT":
                 raise ValueError("Use ASSET IRT for an Iranian Toman quote")
             elif "IRR" in {base, quote}:
@@ -383,28 +562,8 @@ class Utilities:
                                  "Use /rate USD IRT for a Toman market estimate.")
             elif not all(p.isalpha() and len(p) <= 5 for p in parts):
                 raise ValueError("Use /rate USD EUR, /rate BTC USD, or /rate USD IRT")
-            elif base in {"BTC", "ETH"} and quote in {"USD", "EUR"}:
-                if self.provider("crypto") == "coinpaprika":
-                    asset = "btc-bitcoin" if base == "BTC" else "eth-ethereum"
-                    data = await self.api(f"https://api.coinpaprika.com/v1/tickers/{asset}",
-                                          {"quotes": quote})
-                    await m.reply(html.escape(f"{base}/{quote}: {data['quotes'][quote]['price']} · "
-                        f"CoinPaprika spot reference · updated {data['last_updated']}"))
-                else:
-                    data = await self.api("https://api.coingecko.com/api/v3/simple/price", {
-                        "ids": "bitcoin" if base == "BTC" else "ethereum", "vs_currencies": quote.lower(),
-                        "include_last_updated_at": "true"})
-                    info = data["bitcoin" if base == "BTC" else "ethereum"]
-                    await m.reply(f"{base}/{quote}: {info[quote.lower()]} · CoinGecko spot reference · "
-                                  f"updated {datetime.fromtimestamp(info['last_updated_at'], timezone.utc):%Y-%m-%d %H:%M UTC}")
             else:
-                if self.provider("fiat") == "open_er_api":
-                    data = await self.api(f"https://open.er-api.com/v6/latest/{base}", {})
-                    await m.reply(f"{base}/{quote}: {data['rates'][quote]} · Open ER API reference rate · "
-                                  f"updated {datetime.fromtimestamp(data['time_last_update_unix'], timezone.utc):%Y-%m-%d %H:%M UTC}")
-                else:
-                    data = await self.api("https://api.frankfurter.dev/v1/latest", {"base": base, "symbols": quote})
-                    await m.reply(f"{base}/{quote}: {data['rates'][quote]} · Frankfurter reference rate · {data['date']}")
+                await m.reply(await self.reference_rate(base, quote))
         elif cmd == "/time":
             if not m.from_user:
                 raise ValueError("User identity unavailable")
@@ -440,21 +599,49 @@ class Utilities:
                                       f"Jalali: {jalali:%Y-%m-%d}"))
         elif cmd == "/apod":
             try:
-                data = await self.api("https://api.nasa.gov/planetary/apod",
-                                      {"api_key": self.settings.nasa_api_key})
-            except httpx.HTTPStatusError as exc:
-                if exc.response.status_code != 500:
-                    raise
-                yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).date().isoformat()
-                data = await self.api("https://api.nasa.gov/planetary/apod",
-                                      {"api_key": self.settings.nasa_api_key, "date": yesterday})
+                data = await self.apod_page()
+            except (httpx.HTTPError, ValueError, OSError):
+                try:
+                    data = await self.api("https://api.nasa.gov/planetary/apod",
+                                          {"api_key": self.settings.nasa_api_key})
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code != 500:
+                        raise
+                    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).date().isoformat()
+                    data = await self.api("https://api.nasa.gov/planetary/apod",
+                                          {"api_key": self.settings.nasa_api_key, "date": yesterday})
             title = str(data["title"])
-            date = str(data["date"])
+            date = datetime.strptime(str(data["date"]), "%Y-%m-%d").date().isoformat()
             media = str(data.get("url", ""))
-            caption = str(data.get("explanation", ""))[:2800]
-            credit = str(data.get("copyright", "NASA APOD"))
-            await m.reply(html.escape(f"NASA APOD · {date} · {data.get('media_type', 'unknown')}\n"
-                                      f"{title}\n{caption}\nCredit: {credit}\n{media}"))
+            explanation = str(data.get("explanation", "")).strip()
+            excerpt = explanation[:420].rsplit(" ", 1)[0] if len(explanation) > 420 else explanation
+            if len(explanation) > 420:
+                excerpt += "…"
+            credit = str(data.get("copyright") or "NASA APOD")
+            preview_video = bool(data.get("preview"))
+            if "nasa-logo" in media.casefold():
+                media = ""
+            caption = (f"🌌 <b>NASA · {'APOD video preview' if preview_video else 'Picture of the Day'}</b>\n"
+                       f"<b>{html.escape(title[:120])}</b> · {html.escape(date)}\n\n"
+                       f"{html.escape(excerpt)}\n\nCredit · {html.escape(credit[:100])}")
+            page = "https://science.nasa.gov/apod/" if data.get("preview") is not None else \
+                f"https://apod.nasa.gov/apod/ap{date[2:4]}{date[5:7]}{date[8:10]}.html"
+            button = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="NASA story ↗", url=page)]])
+            if media and (data.get("media_type") == "image" or preview_video):
+                try:
+                    image = await self.apod_image(media)
+                except (ValueError, httpx.HTTPError, OSError):
+                    await m.reply(caption + "\n\nImage unavailable here; open the NASA page.",
+                                  reply_markup=button)
+                else:
+                    picture_format = Image.open(io.BytesIO(image)).format
+                    extension = "jpg" if picture_format == "JPEG" else "png" if picture_format == "PNG" else "webp"
+                    await m.reply_photo(BufferedInputFile(image, f"nasa-apod.{extension}"),
+                                        caption=caption[:1000], reply_markup=button)
+            else:
+                await m.reply(caption + "\n\nOpen the NASA page to view the media.",
+                              reply_markup=button)
         elif cmd == "/translate":
             target, _, value = arg.partition(" ")
             target = target.lower()

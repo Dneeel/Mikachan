@@ -35,19 +35,27 @@ SETTING_HELP = {
 }
 
 SECTIONS = {
-    "overview": [("Refresh status", "status"), ("Guided setup", "setup"),
+    "overview": [("Refresh dashboard", "status"), ("Guided setup", "setup"),
                  ("Live diagnostics", "diagnostics")],
-    "settings": [("Refresh settings", "config")],
-    "releases": [("Refresh versions", "versions"), ("Update current branch", "update"),
-                 ("Switch branch or commit", "switch"), ("Rollback code and data", "rollback"),
-                 ("Preview old releases", "prune-preview"), ("Remove old releases", "prune")],
-    "data": [("Create backup", "backup"), ("List backups", "backups"),
-             ("Restore backup", "restore")],
-    "service": [("Start bot", "start"), ("Stop bot", "stop"),
-                ("Restart bot", "restart"), ("Recent logs", "logs")],
-    "system": [("Host preflight", "preflight"), ("Install host tools", "deps"),
-               ("Recover interrupted update", "recover"),
-               ("Remove bot code", "remove"), ("Delete all managed data", "purge")],
+    "deployment": [("Install v2 release", "install"), ("Available versions", "versions"),
+                   ("Update active branch", "update"),
+                   ("Switch version or commit", "switch"), ("Rollback code and data", "rollback"),
+                   ("Preview release cleanup", "prune-preview"), ("Prune old releases", "prune")],
+    "service": [("Start", "start"), ("Stop", "stop"), ("Restart", "restart"),
+                ("Queue activity", "queue"), ("Recent logs", "logs")],
+    "configuration": [("Refresh configuration", "config")],
+    "data": [("Storage overview", "storage"), ("Create backup", "backup"),
+             ("List backups", "backups"), ("Restore backup", "restore"),
+             ("Clear interrupted media", "cleanup")],
+    "maintenance": [("Host preflight", "preflight"), ("Install host tools", "deps"),
+                    ("Live diagnostics", "diagnostics"), ("Recover interrupted update", "recover"),
+                    ("Remove bot code", "remove"), ("Delete managed project", "purge")],
+}
+
+SECTION_LABELS = {
+    "overview": "01  Overview", "deployment": "02  Deployment",
+    "service": "03  Service", "configuration": "04  Configuration",
+    "data": "05  Data & Storage", "maintenance": "06  Maintenance",
 }
 
 SETTING_GROUPS = {
@@ -120,31 +128,45 @@ class Fields(ModalScreen[dict[str, str] | None]):
 
 
 class MikachanPanel(App[None]):
-    TITLE = "MIKACHAN  ·  SERVER PANEL"
-    SUB_TITLE = "Private Telegram bot control"
-    BINDINGS = [("q", "quit", "Quit"), ("r", "refresh", "Refresh")]
+    TITLE = "MIKACHAN  /  CONTROL"
+    SUB_TITLE = "One installation · one bot"
+    BINDINGS = [("q", "quit", "Quit"), ("r", "refresh", "Refresh"),
+                ("1", "section('overview')", "Overview"),
+                ("2", "section('deployment')", "Deploy"),
+                ("3", "section('service')", "Service"),
+                ("4", "section('configuration')", "Config"),
+                ("5", "section('data')", "Data"),
+                ("6", "section('maintenance')", "Maintain")]
     CSS = """
-    Screen { background: #0e1725; color: #e6eef7; }
-    Header { background: #17263b; color: #f3f8fd; }
+    Screen { background: #0b111c; color: #e7edf5; }
+    Header { background: #152334; color: #edf4fa; }
     #body { height: 1fr; }
-    #nav { width: 22; min-width: 19; background: #142236; padding: 1;
-           border-right: solid #31506c; }
-    #brand { text-style: bold; color: #55d6c2; margin-bottom: 2; }
-    #nav Button { width: 100%; margin-bottom: 1; background: #233951; border: none; }
-    #nav Button:hover { background: #35637a; }
+    #nav { width: 27; min-width: 23; background: #111e2d; padding: 1;
+           border-right: solid #28445a; }
+    #brand { text-style: bold; color: #67dec5; margin-bottom: 1; }
+    #nav-hint { color: #819db1; margin-bottom: 2; }
+    #nav Button { width: 100%; margin-bottom: 1; background: #1a3044;
+                  color: #d4e6ee; border: none; text-align: left; }
+    #nav Button.-active { background: #225564; color: #f5fffc; text-style: bold; }
+    #nav Button:hover { background: #2b6571; }
     #main { padding: 1 2; }
-    #section-title { height: 1; text-style: bold; color: #55d6c2; }
-    #status { height: 8; border: round #395c77; padding: 0 2;
-              background: #17283d; color: #edf4fb; }
+    #section-title { height: 2; text-style: bold; color: #67dec5; }
+    #status { height: 10; border: round #345b6e; padding: 0 2;
+              background: #15283b; color: #edf4fb; }
     #actions { height: 1fr; margin-top: 1; }
+    #actions .action-row { height: 4; }
+    #actions .action-row Button { width: 1fr; margin-right: 1; margin-bottom: 1;
+                                  background: #203d52; color: #e7f1f7; border: none;
+                                  content-align: left middle; }
     #actions Button { width: 100%; margin-bottom: 1;
-                      background: #29455f; border: none; }
-    #actions Button:hover { background: #367e88; }
-    #actions .field-label { color: #55d6c2; text-style: bold; margin-top: 1; }
-    #activity { height: 1; color: #b3d3e3; }
-    #log { height: 5; border: round #2a465d; padding: 0 1;
-           background: #0d1d2d; color: #d4e2ee; }
-    Footer { background: #17263b; }
+                      background: #203d52; color: #e7f1f7; border: none;
+                      content-align: left middle; }
+    #actions Button:hover { background: #2e6570; }
+    #actions .field-label { color: #67dec5; text-style: bold; margin-top: 1; }
+    #activity { height: 1; color: #a5c8d6; }
+    #log { height: 6; border: round #2c4d5e; padding: 0 1;
+           background: #0e1b2a; color: #d4e2ee; }
+    Footer { background: #152334; }
     """
 
     def __init__(self) -> None:
@@ -161,9 +183,8 @@ class MikachanPanel(App[None]):
         with Horizontal(id="body"):
             with Vertical(id="nav"):
                 yield Static("◈  MIKACHAN", id="brand")
-                for key, label in (("overview", "Overview"), ("settings", "Settings"),
-                                   ("releases", "Versions"), ("data", "Backups"),
-                                   ("service", "Service"), ("system", "System")):
+                yield Static("SERVER CONTROL  ·  v2+", id="nav-hint")
+                for key, label in SECTION_LABELS.items():
                     yield Button(label, id=f"nav-{key}")
             with Vertical(id="main"):
                 yield Static("OVERVIEW", id="section-title")
@@ -180,14 +201,23 @@ class MikachanPanel(App[None]):
     def action_refresh(self) -> None:
         self._launch("status")
 
+    def action_section(self, section: str) -> None:
+        if section in SECTIONS and not self.busy:
+            self.show_section(section)
+
     def show_section(self, section: str, *, refresh: bool = True) -> None:
         self.section = section
-        self.query_one("#section-title", Static).update(section.upper())
+        self.query_one("#section-title", Static).update(SECTION_LABELS[section].upper())
+        for key in SECTIONS:
+            self.query_one(f"#nav-{key}", Button).set_class(key == section, "-active")
         actions = self.query_one("#actions", VerticalScroll)
         actions.remove_children()
-        for label, action in SECTIONS[section]:
-            actions.mount(Button(label, id=f"action-{action}"))
-        if section == "settings":
+        section_actions = SECTIONS[section]
+        for index in range(0, len(section_actions), 2):
+            actions.mount(Horizontal(*(
+                Button(label, id=f"action-{action}")
+                for label, action in section_actions[index:index + 2]), classes="action-row"))
+        if section == "configuration":
             for group, keys in SETTING_GROUPS.items():
                 actions.mount(Static(group.upper(), classes="field-label"))
                 for key in keys:
@@ -247,7 +277,11 @@ class MikachanPanel(App[None]):
     def begin_setup(self) -> None:
         manager = Manager()
         try:
-            self.setup_existing = manager.status().get("config", False)
+            state = manager.status()
+            if not state.get("installed"):
+                self.query_one("#log", RichLog).write("Install a v2 release in Deployment first.")
+                return
+            self.setup_existing = state.get("config", False)
         except ManagerError as exc:
             self.query_one("#log", RichLog).write(f"Error: {exc}")
             return
@@ -356,6 +390,8 @@ class MikachanPanel(App[None]):
                 return manager.install_os_dependencies()
             if action == "versions":
                 return manager.versions(refresh=True)
+            if action == "install":
+                return manager.install()
             if action == "setup":
                 return manager.setup(fields)
             if action == "update":
@@ -375,6 +411,12 @@ class MikachanPanel(App[None]):
                 return manager.backup()
             if action == "backups":
                 return manager.backups()
+            if action == "queue":
+                return manager.queue()
+            if action == "storage":
+                return manager.storage()
+            if action == "cleanup":
+                return manager.cleanup_transient()
             if action == "restore":
                 return manager.restore(fields.get("snapshot", ""))
             if action == "config":
@@ -398,8 +440,8 @@ class MikachanPanel(App[None]):
             else:
                 if action == "config" and isinstance(result, dict):
                     self.current_config = result
-                    if self.section == "settings":
-                        self.show_section("settings", refresh=False)
+                    if self.section == "configuration":
+                        self.show_section("configuration", refresh=False)
                 log.write(json.dumps(result, indent=2, ensure_ascii=False) if
                           isinstance(result, (dict, list)) else str(result))
                 if action != "logs":
@@ -412,27 +454,38 @@ class MikachanPanel(App[None]):
             self.busy = False
             for button in self.query("Button").results(Button):
                 button.disabled = False
-            if action == "set" and self.section == "settings":
+            if action == "set" and self.section == "configuration":
                 self._launch("config")
 
     def _show_status(self, data: dict[str, Any]) -> None:
+        host = data.get("host") or {}
+        def size(value: Any) -> str:
+            return f"{value / 1024 ** 3:.1f} GiB" if isinstance(value, int) else "—"
         if data.get("installed"):
             quality = data.get("quality") or {}
+            queue = data.get("queue") or {}
             setup = data.get("setup_required", False)
-            summary = ("◈  MIKACHAN  /  " + ("SETUP NEEDED" if setup else "INSTALLED") + "\n"
-                       f"Version  {data['branch']}  ·  {data['commit'][:12]}\n"
-                       f"Bot      {data['service']}  ·  Setup "
-                       f"{'required' if setup else 'complete'}\n"
-                       f"Access   {data.get('authorized_users', 0)} users  ·  "
+            summary = ("●  MIKACHAN   " + ("SETUP NEEDED" if setup else data['service'].upper()) + "\n"
+                       f"Release       {data['branch']}  ·  {data['commit'][:12]}  ·  "
+                       f"{'healthy' if data['consistent'] else 'inspect'}\n"
+                       f"Access        {data.get('authorized_users', 0)} users  /  "
                        f"{data.get('authorized_groups', 0)} groups\n"
-                       f"Data     {'present' if data['database'] else 'not created yet'}  ·  "
-                       f"Release {'OK' if data['consistent'] else 'inspect'}\n"
-                       f"Checks   pytest {quality.get('pytest', '?')}  ·  "
-                       f"Ruff {quality.get('ruff', '?')}  ·  mypy {quality.get('mypy', '?')}")
+                       f"Database      {'ready' if data['database'] else 'not created'}\n"
+                       f"CPU           {host.get('cpu_percent', '—')}%  ·  "
+                       f"load {host.get('load_1m', '—')}\n"
+                       f"Memory        {size(host.get('memory_used'))} / "
+                       f"{size(host.get('memory_total'))}\n"
+                       f"Free disk     {size(host.get('disk_free'))}\n"
+                       f"Activity      {queue.get('waiting', 0)} waiting  ·  "
+                       f"{queue.get('active', 0)} active  ·  tests {quality.get('pytest', '?')}")
         else:
-            summary = ("◈  MIKACHAN  /  NOT INSTALLED\n"
-                       "Run the one-line bootstrap on a Debian/Ubuntu systemd server.\n"
-                       "Installation will open this panel and guide first-time setup.")
+            summary = ("○  MIKACHAN   NOT INSTALLED\n"
+                       "Run the one-line installer on a Debian/Ubuntu systemd server.\n"
+                       f"CPU           {host.get('cpu_percent', '—')}%  ·  "
+                       f"load {host.get('load_1m', '—')}\n"
+                       f"Memory        {size(host.get('memory_used'))} / "
+                       f"{size(host.get('memory_total'))}\n"
+                       f"Free disk     {size(host.get('disk_free'))}")
         self.query_one("#status", Static).update(summary)
 
 

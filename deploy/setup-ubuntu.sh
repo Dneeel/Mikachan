@@ -7,7 +7,7 @@ case "${1:---dry-run}" in
     ;;
   --install)
     command -v uv >/dev/null
-    UV_CACHE_DIR="${UV_CACHE_DIR:-/tmp/mikachan-uv-cache}" uv sync --extra dev
+    UV_CACHE_DIR="${UV_CACHE_DIR:-$PWD/.cache/uv}" uv sync --extra dev
     uv run mikachan doctor
     uv run pytest -q
     ;;

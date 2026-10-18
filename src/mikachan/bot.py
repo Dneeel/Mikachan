@@ -3,9 +3,12 @@
 import asyncio
 import html
 import json
+import os
 import secrets
+import shutil
 import time
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 
 import httpx
 from aiogram import Bot, Dispatcher, Router
@@ -30,7 +33,7 @@ from .music_ui import listening_links, verified_lyrics
 from .security import allowed, clean_url, links, source
 from .store import Store
 from .community import Community, CommunityStore
-from .utilities import Utilities
+from .utilities import Utilities, _market_card
 from .personality import Mode, mode_for, response
 from .follow import (FollowService, FEATURES, Target, command_target, confirm_panel,
                      creator_from_post, profile_target, public_items,
@@ -117,20 +120,19 @@ def public_media_result(hit: dict[str, object]) -> bool:
 
 
 HELP_TEXT = (
-    "<b>Mikachan · Help</b>\n"
-    "<b>Downloader:</b> /search, /music, /podcast; send eligible links for Yes/No consent. "
-    "/twitter remains available. /follow PLATFORM HANDLE and /following monitor public profiles. "
-    "/queue, /cancel, /status show jobs.\n"
-    "<b>Community:</b> /fal, /poem, /joke, /quote, /dice. In groups: /rules, /note NAME, "
-    "/groupstats, /groupsettings. Admins: /setrules, /setnote, /setcmd, /welcome, "
-    "/nickname, /del, /mute, /modlog.\n"
-    "<b>Utilities:</b> /qr TEXT, /scan, /ocr, /image png|jpeg|webp, /sticker, "
-    "/stickerimage, /gif, /pack, /convert csv|json, /weather CITY, /rate BASE QUOTE, "
-    "exact دلار, سکه, ارز, طلا, تتر, بیت‌کوین for Toman market quotes; "
-    "/time IANA_ZONE, /apod, "
-    "/translate en|fa TEXT. File tools use a reply; "
-    "translation sends selected text to the configured external provider.\n"
-    "<b>Owner:</b> /admin. Cultural content requires reviewed imports."
+    "◈ <b>Mikachan</b>\nChoose a command. Eligible links always ask before downloading.\n\n"
+    "⬇️ <b>Media</b>\n"
+    "/search · /music · /podcast · /twitter\n"
+    "/follow · /following · /queue · /cancel\n\n"
+    "👥 <b>Community</b>\n"
+    "/fal · /poem · /joke · /quote · /dice\n"
+    "Groups: /rules · /note · /groupstats · /groupsettings\n\n"
+    "🛠 <b>Utilities</b>\n"
+    "/qr · /scan · /ocr · /image · /sticker · /gif · /convert\n"
+    "/weather CITY · /rate BASE QUOTE · /time ZONE\n"
+    "/apod · /translate en|fa TEXT\n\n"
+    "💱 Toman quotes: send exactly دلار, سکه, طلا, تتر or ارز.\n"
+    "For file tools, reply to the file with a command."
 )
 
 
@@ -139,6 +141,7 @@ class App:
         self.settings = settings
         self.store = Store(settings.data_dir / "mikachan.sqlite")
         self.store.recover()
+        self._clear_interrupted_media()
         self.store.seed_access(settings.allowlist)
         self.store.seed_groups(settings.groups)
         self.searcher = Searcher()
@@ -153,13 +156,32 @@ class App:
         )
         self.worker = Worker(settings, self.store, self.bot)
         self.follow = FollowService(self.store, self.bot, settings.private_chats_only)
-        self.community = Community(self.bot, CommunityStore(self.store.db), settings.owner_telegram_id)
+        community_store = CommunityStore(self.store.db)
+        community_store.seed_hafez(Path(__file__).parent / "content/hafez.json")
+        self.community = Community(self.bot, community_store, settings.owner_telegram_id)
         self.utilities = Utilities(self.bot, settings, self.store.db)
         self.router = Router()
         self.router.message.register(self.message)
         self.router.callback_query.register(self.callback)
         self.dp = Dispatcher()
         self.dp.include_router(self.router)
+
+    def _clear_interrupted_media(self) -> None:
+        """A newly started worker has no active jobs; discard crash leftovers."""
+        roots = [self.settings.data_dir / "jobs"]
+        runtime_temp = self.settings.data_dir.parent / "tmp/runtime"
+        if os.environ.get("TMPDIR") == str(runtime_temp):
+            roots.append(runtime_temp)
+        for root in roots:
+            if root.is_symlink():
+                raise RuntimeError("Transient media directory cannot be a symlink")
+            if not root.is_dir():
+                continue
+            for item in root.iterdir():
+                if item.is_symlink() or item.is_file():
+                    item.unlink()
+                elif item.is_dir():
+                    shutil.rmtree(item)
 
     def authorized(self, user_id: int, chat_id: int, chat_type: str) -> bool:
         return allowed(
@@ -207,7 +229,7 @@ class App:
             return
         if text == "ارز":
             try:
-                await m.reply(html.escape(await self.utilities.market_prices.report(
+                await m.reply(_market_card(await self.utilities.market_prices.report(
                     ("USD", "EUR", "AED"))))
             except (ValueError, httpx.HTTPError) as exc:
                 await m.reply(html.escape(str(exc)[:300]))
@@ -302,7 +324,12 @@ class App:
         if cmd == "/help":
             personality_mode = (mode_for(m.from_user.id, self.store.allowlist(), self.settings.mommy_ids)
                     if m.chat.type == "private" else Mode.NORMAL)
-            await m.reply(HELP_TEXT + "\n" + response("ready", personality_mode))
+            extra_help = ("\n\n🛡 Group admins: /welcome · /setrules · /setnote · "
+                          "/setcmd · /nickname · /del · /mute · /modlog"
+                          if m.chat.type in {"group", "supergroup"} else "")
+            if m.from_user.id == self.settings.owner_telegram_id:
+                extra_help += "\n🔐 Owner: /admin"
+            await m.reply(HELP_TEXT + extra_help + "\n\n" + response("ready", personality_mode))
         elif cmd == "/follow":
             target = command_target(arg)
             if target is None:
@@ -377,10 +404,13 @@ class App:
             )
         elif cmd == "/settings":
             pref = self.store.preferences(m.from_user.id)
-            body = "Search filters are editable in each result view. Public audio is sent as MP3."
+            body = ("⚙️ <b>Your settings</b>\n"
+                    "Search filters · change them in a result view\n"
+                    "Public audio · MP3")
             if pref:
-                body += "\nTypes: " + ", ".join(sorted(pref[0]))
-                body += "\nSources: " + ", ".join(sorted(pref[1]))
+                body += "\nTypes · " + html.escape(", ".join(sorted(pref[0])))
+                body += "\nSources · " + html.escape(", ".join(sorted(pref[1])))
+            body += "\nTime zones · /time list\nQueue · /queue"
             await m.reply(body)
         elif cmd == "/admin" and m.from_user.id == self.settings.owner_telegram_id:
             parts = arg.split()

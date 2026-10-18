@@ -15,8 +15,9 @@ from mikachan.config import Settings
 from mikachan.personality import Mode, mode_for
 from mikachan.security import allowed
 from mikachan.store import Store
-from mikachan.utilities import convert_image, convert_table, decode_codes, qr_png, weather_label
-from mikachan.utilities import Utilities
+from mikachan.utilities import (convert_image, convert_table, decode_codes, qr_png,
+                                select_place, weather_label)
+from mikachan.utilities import Utilities, _rate_text
 
 
 def test_numeric_access_and_mode():
@@ -56,6 +57,19 @@ def test_group_isolation_audit_and_content_import(tmp_path):
     path.write_text(json.dumps([{**data[0], "rights": ""}]))
     with pytest.raises(ValueError):
         community.import_content(path)
+
+
+def test_bundled_hafez_catalog_has_real_sources_and_seeds_once(tmp_path):
+    catalog = Path(__file__).resolve().parents[1] / "src/mikachan/content/hafez.json"
+    entries = json.loads(catalog.read_text(encoding="utf-8"))
+    assert len(entries) >= 8
+    assert all(entry["source"].startswith("https://fa.wikisource.org/wiki/") and
+               "CC BY-SA" in entry["rights"] for entry in entries)
+    store = CommunityStore(Store(tmp_path / "state.sqlite").db)
+    assert store.seed_hafez(catalog) == len(entries)
+    assert store.seed_hafez(catalog) == 0
+    assert store.hafez() is not None
+    assert store.poets() == ["Hafez"]
 
 
 def test_owner_group_approval_transaction(tmp_path):
@@ -141,6 +155,120 @@ def test_real_table_conversion():
     assert b"Bob,3" in restored
     with pytest.raises(ValueError):
         convert_table(b"bad", "pdf", "csv")
+
+
+def test_weather_city_selection_handles_persian_and_deduplicates():
+    places = [
+        {"name": "Tehran", "country_code": "IR", "country": "Iran",
+         "admin1": "Tehran", "latitude": 35.7, "longitude": 51.4, "population": 8700000},
+        {"name": "Tehran", "country_code": "IR", "country": "Iran",
+         "admin1": "Tehran", "latitude": 35.8, "longitude": 51.5, "population": 500},
+        {"name": "Tehrani", "country_code": "PK", "country": "Pakistan",
+         "latitude": 25, "longitude": 66, "population": 1000},
+    ]
+    chosen, suggestions = select_place(places, "tehran")
+    assert chosen is places[0] and len(suggestions) == 2
+    esfahan = [{"name": "اصفهان", "country_code": "IR", "latitude": 32.65,
+                "longitude": 51.67, "population": 1547164}]
+    assert select_place(esfahan, "اصفهان")[0] is esfahan[0]
+
+
+def test_rate_card_never_displays_invalid_or_rounded_zero():
+    assert "0.000000001" in _rate_text("USD", "XYZ", "0.000000001", "test", "now")
+    for value in ("0", "NaN", "Infinity", "1e100000"):
+        with pytest.raises(ValueError):
+            _rate_text("USD", "EUR", value, "test", "now")
+
+
+@pytest.mark.asyncio
+async def test_reference_rate_uses_second_provider_on_connection_error(tmp_path):
+    import httpx
+    db = Store(tmp_path / "state.sqlite").db
+    utility = Utilities(SimpleNamespace(), Settings(bot_token="123:fake", owner_telegram_id=1,
+        allowed_telegram_ids="1"), db)
+    async def api(url, params):
+        if "frankfurter" in url or "coingecko" in url:
+            raise httpx.ConnectError("offline")
+        if "open.er-api" in url:
+            return {"rates": {"EUR": 0.86}, "time_last_update_unix": 1_760_000_000}
+        return {"quotes": {"USD": {"price": 92000}}, "last_updated": "2026-10-18"}
+    utility.api = api
+    assert "open_er_api" in await utility.reference_rate("USD", "EUR")
+    assert "coinpaprika" in await utility.reference_rate("BTC", "USD")
+
+
+@pytest.mark.asyncio
+async def test_apod_sends_bounded_image_and_short_caption(tmp_path):
+    db = Store(tmp_path / "state.sqlite").db
+    utility = Utilities(SimpleNamespace(), Settings(bot_token="123:fake", owner_telegram_id=1,
+        allowed_telegram_ids="1"), db)
+    image = Image.new("RGB", (16, 16), "navy")
+    output = io.BytesIO()
+    image.save(output, "PNG")
+    utility.api = AsyncMock(return_value={"title": "A comet", "date": "2026-10-18",
+        "url": "https://apod.nasa.gov/test.png", "media_type": "image",
+        "explanation": "A long story. " * 200, "copyright": "NASA"})
+    utility.apod_page = AsyncMock(side_effect=ValueError("test fallback"))
+    utility.apod_image = AsyncMock(return_value=output.getvalue())
+    message = SimpleNamespace(reply=AsyncMock(), reply_photo=AsyncMock())
+    await utility._command(message, "/apod", "")
+    message.reply_photo.assert_awaited_once()
+    assert len(message.reply_photo.await_args.kwargs["caption"]) < 1024
+    message.reply.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_apod_uses_official_page_video_preview(tmp_path):
+    utility = Utilities(SimpleNamespace(), Settings(bot_token="123:fake", owner_telegram_id=1,
+        allowed_telegram_ids="1"), Store(tmp_path / "state.sqlite").db)
+    utility.api = AsyncMock()
+    utility.apod_page = AsyncMock(return_value={"title": "Real APOD video", "date": "2026-10-18",
+        "url": "https://assets.science.nasa.gov/preview.jpeg", "media_type": "video",
+        "explanation": "Real feature explanation", "copyright": "NASA", "preview": True})
+    utility.apod_image = AsyncMock(return_value=qr_png("valid-image"))
+    message = SimpleNamespace(reply=AsyncMock(), reply_photo=AsyncMock())
+    await utility._command(message, "/apod", "")
+    caption = message.reply_photo.await_args.kwargs["caption"]
+    assert "Real APOD video" in caption and "video preview" in caption
+    assert "NASA Science" not in caption
+    utility.api.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_apod_page_parses_official_article(tmp_path, monkeypatch):
+    import httpx
+    utility = Utilities(SimpleNamespace(), Settings(bot_token="123:fake", owner_telegram_id=1,
+        allowed_telegram_ids="1"), Store(tmp_path / "state.sqlite").db)
+    html_page = '''<html><head><meta property="og:image"
+      content="https://assets.science.nasa.gov/apod.jpeg"></head><body>
+      <div class="media-detail-hero__media"><iframe src="https://www.youtube.com/embed/x"></iframe></div>
+      <h2 class="display-48">A real sky feature</h2>
+      <p class="media-detail-hero__description">Explanation: Real observation.</p>
+      <table><tr class="media-detail-hero__meta-row"><th>Date:</th><td>October 18, 2026</td></tr>
+      <tr class="media-detail-hero__meta-row"><th>Credit:</th><td>NASA team</td></tr></table>
+      </body></html>'''
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: real_client(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, text=html_page)), **kwargs))
+    data = await utility.apod_page()
+    assert data["date"] == "2026-10-18" and data["media_type"] == "video"
+    assert data["copyright"] == "NASA team" and data["url"].endswith("apod.jpeg")
+    assert await utility.apod_page() is data  # One-hour in-memory metadata cache.
+
+
+def test_interrupted_media_cleanup_only_removes_job_artifacts(tmp_path):
+    state = tmp_path / "state"
+    jobs = state / "jobs"
+    jobs.mkdir(parents=True)
+    (jobs / "orphan").mkdir()
+    (jobs / "orphan" / "media.mp4").write_bytes(b"data")
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"keep")
+    (jobs / "link").symlink_to(outside)
+    app = object.__new__(App)
+    app.settings = SimpleNamespace(data_dir=state)
+    app._clear_interrupted_media()
+    assert not list(jobs.iterdir()) and outside.read_bytes() == b"keep"
 
 
 def test_qr_decoder_does_not_visit_encoded_url(monkeypatch):

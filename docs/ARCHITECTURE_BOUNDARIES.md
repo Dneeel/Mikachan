@@ -36,8 +36,8 @@ The integration owner should first agree on command/callback ownership, numeric 
 ## Current identity and release manager
 
 The active package, CLI, SQLite filename and systemd unit use the Mikachan name.
-The standalone terminal manager installs one bot release under `/opt/mikachan`,
-with state and backups in separate persistent directories. It never starts a
+The standalone terminal manager installs one bot release under `/opt/Mikachan`,
+with state, configuration, caches, temporary work and backups beneath that same root. It never starts a
 second Telegram update consumer. Community and Utilities are integrated in the
 same `v2` dispatcher, and downloader internals remain owned by the downloader
 maintainer. The retired `v1` branch received only identity cleanup.

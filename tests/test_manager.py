@@ -11,7 +11,34 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from deploy.manager import Manager, ManagerError, Paths, _parse_env, _render_env
+from deploy.manager import MANAGED, Manager, ManagerError, Paths, _parse_env, _render_env
+
+
+def test_default_paths_keep_managed_files_beneath_one_root():
+    paths = Paths()
+    for path in (paths.state, paths.backups, paths.env, paths.repo, paths.releases,
+                 paths.current, paths.manifest, paths.temporary, paths.runtime_temp,
+                 paths.manager_temp, paths.cache, paths.logs):
+        assert path.is_relative_to(paths.base)
+    assert paths.unit == Path("/etc/systemd/system/mikachan.service")
+
+
+def test_cleanup_transient_media_requires_stopped_service(deployment):
+    manager, _, _ = deployment
+    install(manager)
+    jobs = manager.paths.state / "jobs"
+    jobs.mkdir()
+    (jobs / "orphan").mkdir()
+    (jobs / "orphan" / "download.mp4").write_bytes(b"media")
+    manager.paths.runtime_temp.mkdir(parents=True, exist_ok=True)
+    (manager.paths.runtime_temp / "render.tmp").write_bytes(b"temporary")
+    database(manager)
+    with pytest.raises(ManagerError, match="Stop the bot"):
+        manager.cleanup_transient()
+    manager.service("stop")
+    assert manager.cleanup_transient() == {"jobs": 1, "runtime": 1}
+    assert not list(jobs.iterdir())
+    assert (manager.paths.state / "mikachan.sqlite").exists()
 
 
 def git(*args: str, cwd: Path) -> str:
@@ -80,10 +107,11 @@ def deployment(tmp_path: Path) -> tuple[FakeManager, Path, str]:
     (source / "uv.lock").write_text("fixture", encoding="utf-8")
     first = commit(source, "first")
     git("branch", "v1", cwd=source)
-    paths = Paths(base=tmp_path / "opt" / "mikachan",
-                  state=tmp_path / "var" / "lib" / "mikachan",
-                  backups=tmp_path / "var" / "backups" / "mikachan",
-                  env=tmp_path / "etc" / "mikachan.env",
+    root = tmp_path / "opt" / "Mikachan"
+    paths = Paths(base=root,
+                  state=root / "state",
+                  backups=root / "backups",
+                  env=root / "config" / "bot.env",
                   unit=tmp_path / "etc" / "systemd" / "mikachan.service")
     return FakeManager(paths, source), source, first
 
@@ -214,7 +242,8 @@ def test_remove_preserves_state_by_default_and_purge_deletes_only_managed_paths(
     outside = manager.paths.base.parent / "another-project"
     outside.write_text("untouched")
     assert "retained" in manager.remove()
-    assert not manager.paths.base.exists()
+    assert manager.paths.base.exists()
+    assert not manager.paths.manifest.exists()
     assert manager.paths.state.exists()
     assert manager.paths.env.exists()
     assert outside.read_text() == "untouched"
@@ -316,13 +345,15 @@ def test_failed_initial_install_can_be_cleared_without_deleting_state(
     manager, _, _ = deployment
     manager.paths.state.mkdir(parents=True)
     (manager.paths.state / "keep.txt").write_text("preserve")
+    manager.paths.marker.write_text(MANAGED)
     with pytest.raises(ManagerError, match="unavailable"):
         manager.install({"BOT_TOKEN": "12345:" + "x" * 30,
                          "OWNER_TELEGRAM_ID": "42", "ALLOWED_TELEGRAM_IDS": "42"},
                         branch="v9")
     assert manager.status()["incomplete_install"] is True
     assert "Cleared incomplete" in manager.abort_incomplete_install()
-    assert not manager.paths.base.exists()
+    assert manager.paths.base.exists()
+    assert not manager.paths.manifest.exists()
     assert (manager.paths.state / "keep.txt").read_text() == "preserve"
 
 
@@ -358,7 +389,7 @@ def test_active_foreign_poller_blocks_release_switch(
 
 
 def test_manager_validates_against_real_runtime_settings(tmp_path: Path) -> None:
-    paths = Paths(state=tmp_path / "persistent")
+    paths = Paths(base=tmp_path / "managed", state=tmp_path / "managed" / "state")
     manager = Manager(paths, require_root=False)
     release = Path(__file__).resolve().parents[1]
     values = {"BOT_TOKEN": "12345:" + "x" * 30, "OWNER_TELEGRAM_ID": "42",

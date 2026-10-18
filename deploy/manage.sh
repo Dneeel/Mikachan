@@ -3,7 +3,8 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 project_dir="$(dirname "$script_dir")"
-panel_venv="${MIKACHAN_PANEL_VENV:-/var/cache/mikachan-panel/venv}"
+install_root="$(dirname "$project_dir")"
+panel_venv="$install_root/panel-venv"
 requirements="$script_dir/manager-requirements.txt"
 
 if (( EUID != 0 )); then
@@ -13,7 +14,7 @@ fi
 
 # Read-only commands work even when Textual, uv, or the bot environment is broken.
 case "${1:-}" in
-  status|preflight|diagnostics|logs|config|backups)
+  status|preflight|diagnostics|logs|config|backups|queue|storage)
     exec python3 "$script_dir/manager.py" "$@"
     ;;
 esac
@@ -23,6 +24,13 @@ if ! command -v python3 >/dev/null; then
   exit 1
 fi
 umask 077
+mkdir -p "$install_root/tmp/panel" "$install_root/cache/pip"
+export TMPDIR="$install_root/tmp/panel"
+export PIP_CACHE_DIR="$install_root/cache/pip"
+export XDG_CACHE_HOME="$install_root/cache"
+if [[ -f "$install_root/config/ssh/config" ]]; then
+  export GIT_SSH_COMMAND="ssh -F $install_root/config/ssh/config"
+fi
 if [[ ! -x "$panel_venv/bin/python" ]]; then
   if ! python3 -m venv "$panel_venv"; then
     echo 'Could not create manager venv. Install python3-venv and retry.' >&2
