@@ -1,6 +1,6 @@
 # Community and Utilities delivery ledger — 2026-10-17
 
-This ledger separates code and offline tests from Telegram acceptance. The current workspace source passes 77 offline tests, Ruff and mypy. The previous Daytona acceptance used an earlier 63-test build. No live Telegram update has exercised the new market inputs; direct Gheymat and Wallex requests succeeded from this workspace. Navasan's keyed endpoint is implemented and mock-tested but has not been verified with a real owner key. See [the Telegram response audit](UX_RESPONSE_AUDIT_2026-10-17.md) for actual wording and visual gaps.
+This ledger separates code and offline tests from Telegram acceptance. The current v2 source passes 110 offline tests and Ruff. The terminal manager passes mypy; `mypy src` reports 39 existing errors in downloader-owned `bot.py` and `follow.py`. The previous Daytona acceptance used an earlier 63-test build. No live Telegram update has exercised the new market inputs; direct Gheymat and Wallex requests succeeded from this workspace. Navasan's keyed endpoint is implemented and mock-tested but has not been verified with a real owner key. See [the Telegram response audit](UX_RESPONSE_AUDIT_2026-10-17.md) for actual wording and visual gaps.
 
 | Feature IDs | Delivered behavior | Current evidence / remaining limit |
 | --- | --- | --- |
@@ -23,4 +23,4 @@ This ledger separates code and offline tests from Telegram acceptance. The curre
 
 A reviewed content import is a JSON array of objects with nonempty `kind` (`poem`, `joke`, `quote`), `language`, `body`, `author`, `source`, and `rights`. The owner/operator must verify permission and attribution before import; the tool validates required fields and size, not intellectual property rights. For Hafez fortune, set `author` to `Hafez`, `Hafez Shirazi`, `حافظ`, or `حافظ شیرازی`. Content and settings survive normal restarts in the existing SQLite database. Back up the database including its WAL/checkpoint state through an ordinary SQLite backup before deployment changes.
 
-Next milestone: a terminal management interface for allowlists, settings, backups, diagnostics, and release/service control. It is not implemented here.
+The terminal manager is now implemented on v2 with Guided setup, individual settings, versioned releases, backups, diagnostics, and removal. Its installer and staging path were tested locally; a real systemd host and live Telegram setup remain to be accepted.
