@@ -433,6 +433,15 @@ def test_code_install_then_setup_and_owner_change(
     assert len(manager.backups()) >= 2
 
 
+def test_diagnostics_reports_pending_setup_without_configuration(
+        deployment: tuple[FakeManager, Path, str]) -> None:
+    manager, _, _ = deployment
+    manager.install()
+    result = manager.diagnostics(live=True)
+    assert result["setup"] == "required"
+    assert result["installation"]["setup_required"] is True
+
+
 def test_setup_again_retains_database_and_updates_allowlist(
         deployment: tuple[FakeManager, Path, str]) -> None:
     manager, _, _ = deployment

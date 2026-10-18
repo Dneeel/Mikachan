@@ -1114,6 +1114,9 @@ class Manager:
         result: dict[str, Any] = {"installation": status, "host": self.preflight()}
         if not status["installed"] or not status.get("consistent"):
             return result
+        if not status.get("config"):
+            result["setup"] = "required"
+            return result
         values = _parse_env(self.paths.env)
         environment = os.environ.copy()
         environment.update(values)
