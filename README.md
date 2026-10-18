@@ -6,7 +6,7 @@ The downloader asks for **✅ Yes / ❌ No** before processing each submitted UR
 
 ## Current build status
 
-The current workspace build passes **77 tests**, Ruff, and mypy. The earlier Daytona deployment passed 63 tests; Telegram accepted its identity and command list, and an outbound owner message succeeded. Daytona's tier restricts access to external content providers, so live weather, rates, APOD, and downloader source delivery are not verified there. The sandbox is stopped when tests are complete. Direct Gheymat and Wallex market requests succeeded from this workspace, but Telegram delivery of the new quotes and keyed Navasan access remain unverified. See the [Daytona deployment check](docs/DAYTONA_DEPLOYMENT_2026-10-17.md), [new feature ledger](docs/COMMUNITY_UTILITIES_STATUS.md), [market data research](docs/MARKET_DATA_RESEARCH_2026-10-17.md), [Telegram response audit](docs/UX_RESPONSE_AUDIT_2026-10-17.md), [downloader test report](docs/TEST_REPORT.md), and [owner status](docs/OWNER_ACCEPTANCE.md).
+The current workspace build passes **107 tests** and Ruff. The standalone release manager also passes mypy. New downloader-owned changes on v2 currently produce 39 mypy errors in `bot.py` and `follow.py`; the panel records that result for each release. The earlier Daytona deployment passed 63 tests; Telegram accepted its identity and command list, and an outbound owner message succeeded. Daytona's tier restricts access to external content providers, so live weather, rates, APOD, and downloader source delivery are not verified there. The sandbox is stopped when tests are complete. Direct Gheymat and Wallex market requests succeeded from this workspace, but Telegram delivery of the new quotes and keyed Navasan access remain unverified. See the [Daytona deployment check](docs/DAYTONA_DEPLOYMENT_2026-10-17.md), [new feature ledger](docs/COMMUNITY_UTILITIES_STATUS.md), [market data research](docs/MARKET_DATA_RESEARCH_2026-10-17.md), [Telegram response audit](docs/UX_RESPONSE_AUDIT_2026-10-17.md), [downloader test report](docs/TEST_REPORT.md), and [owner status](docs/OWNER_ACCEPTANCE.md).
 
 ## Commands
 
@@ -17,6 +17,14 @@ Community: `/fal` or exact `فال`, `/poem` or exact `شعر`, `/joke`, `/quote
 Utilities: `/qr TEXT` (or reply to text), `/scan`, `/ocr`, `/image png|jpeg|webp`, `/sticker`, `/stickerimage`, `/gif`, `/pack create SHORTNAME|TITLE|EMOJI`, `/pack add SHORTNAME|EMOJI`, `/pack remove`, `/convert json|csv`, `/weather CITY[, COUNTRY]`, `/rate USD EUR`, `/rate BTC USD`, `/rate ASSET IRT` for `USD|EUR|AED|SEKE|GOLD18|USDT|BTC`, exact `دلار`, `سکه`, `ارز`, `طلا`, `تتر`, or `بیت‌کوین`, `/time Asia/Tehran`, `/time add|remove|list`, `/apod`, `/translate en|fa TEXT`. Iranian market reports compare named Toman source quotes. Direct Wallex crypto quotes include the actual last-trade time; relayed cash-market source trade times are unknown unless the optional direct Navasan feed is configured. File tools require a reply to selected media. `/admin provider fiat|crypto NAME` sets a fixed global reference-rate provider. `/groupsettings`, commands, callbacks and exact triggers still require both user and group authorization.
 
 ## Setup in isolated Ubuntu workspace
+
+For a managed Debian/Ubuntu systemd server, use the [terminal installation and
+release manager](docs/INSTALL_UBUNTU.md). It provides a Textual interface plus
+CLI commands for status, diagnostics, vN branch and same-branch updates,
+specific-commit switching, SQLite-aware rollback, backup, guarded settings,
+and removal. The [design and source review](docs/MANAGER_RESEARCH_2026-10-18.md)
+records its choices and limitations. The workspace steps below remain useful
+for development and offline tests.
 
 1. Install Python 3.12+, `uv`, `ffmpeg`, `ffprobe`, and Tesseract in the intended deployment environment. Install `fas` Tesseract language data to enable Persian OCR. yt-dlp, Deno and yt-dlp-ejs are installed through the locked project environment.
 2. Copy `.env.example` to `.env`; set `BOT_TOKEN`, `OWNER_TELEGRAM_ID`, `ALLOWED_TELEGRAM_IDS` (owner plus at most three others). To enable groups, set `PRIVATE_CHATS_ONLY=false` and seed `ALLOWED_GROUP_IDS` with negative numeric group IDs; every user still needs individual allowlisting. Optional Spotify credentials, NASA key, `NAVASAN_API_KEY`, Mommy IDs and translation provider are described in the [feature ledger](docs/COMMUNITY_UTILITIES_STATUS.md). The optional `NAVASAN_REFRESH_SECONDS` defaults to 28,800 seconds to fit the published free monthly quota under continuous operation. Keep `.env` mode `0600`.
