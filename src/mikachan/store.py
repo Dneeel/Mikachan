@@ -207,8 +207,11 @@ class Store:
         )
 
     def decision(
-        self, cid: str, user: int, chat: int, prompt: int, yes: bool
+        self, cid: str, user: int, chat: int, prompt: int, yes: bool,
+        mode: str = "auto",
     ) -> tuple[str, str | None]:
+        if mode not in {"auto", "audio", "480", "720", "1080"}:
+            raise ValueError("invalid download mode")
         self.db.execute("BEGIN IMMEDIATE")
         try:
             result: tuple[str, str | None]
@@ -240,6 +243,8 @@ class Store:
                     self.db.execute(
                         "INSERT INTO job_progress VALUES (?,?)", (jid, row["prompt_id"])
                     )
+                    if mode != "auto":
+                        self.db.execute("INSERT INTO job_modes VALUES (?,?)", (jid, mode))
                 result = (state, jid)
             self.db.execute("COMMIT")
             return result

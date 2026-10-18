@@ -1,12 +1,24 @@
 """Authorization and conservative URL validation before and after consent."""
 
 import ipaddress
+import os
 import re
 import socket
+import sys
 import time
+from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 URL_RE = re.compile(r"https?://[^\s<>\"']+", re.I)
+
+
+def extractor_env() -> dict[str, str]:
+    """Pass only network routing and trust settings to untrusted extractors."""
+    keys = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+            "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE")
+    result = {key: value for key in keys if (value := os.environ.get(key))}
+    result["PATH"] = str(Path(sys.executable).parent) + os.pathsep + os.environ.get("PATH", "")
+    return result
 
 
 def allowed(user_id: int, chat_id: int, chat_type: str, ids: set[int], private_only: bool,

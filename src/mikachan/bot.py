@@ -9,6 +9,7 @@ import shutil
 import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 from aiogram import Bot, Dispatcher, Router
@@ -18,6 +19,7 @@ from aiogram.client.telegram import TelegramAPIServer
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import (
     BotCommand,
+    BufferedInputFile,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -27,17 +29,18 @@ from aiogram.types import (
 
 from .config import Settings
 from .jobs import Worker
+from .catalog import _Meta
 from .search import KINDS, SOURCES, Searcher
 from .matching import match_score
 from .music_ui import listening_links, verified_lyrics
-from .security import allowed, clean_url, links, source
+from .security import allowed, clean_url, collection, links, source, validate_dns
 from .store import Store
 from .community import Community, CommunityStore
 from .utilities import Utilities, _market_card
 from .personality import Mode, mode_for, response
 from .follow import (FollowService, FEATURES, Target, command_target, confirm_panel,
                      creator_from_post, profile_target, public_items,
-                     resolve_creator_from_post, settings_panel, SOCIAL_PLATFORMS)
+                     resolve_creator_from_post, public_profile, settings_panel, SOCIAL_PLATFORMS)
 
 
 def kb(rows: list[list[tuple[str, str]]]) -> InlineKeyboardMarkup:
@@ -49,8 +52,50 @@ def kb(rows: list[list[tuple[str, str]]]) -> InlineKeyboardMarkup:
     )
 
 
+def youtube_video_url(url: str) -> bool:
+    parts = urlsplit(url)
+    path = parts.path.lower()
+    return (source(url) == "youtube" and not collection(url)
+            and parts.hostname != "music.youtube.com"
+            and (parts.hostname == "youtu.be" or
+                 path == "/watch" or path.startswith(("/shorts/", "/live/"))))
+
+
+async def profile_photo(url: str) -> BufferedInputFile:
+    """Fetch a bounded public avatar so Telegram need not access a signed CDN URL."""
+    current = clean_url(url)
+    async with httpx.AsyncClient(timeout=9, follow_redirects=False) as client:
+        for _ in range(4):
+            await asyncio.wait_for(asyncio.to_thread(validate_dns, current), 3)
+            async with client.stream("GET", current) as response:
+                if response.status_code in {301, 302, 303, 307, 308}:
+                    location = response.headers.get("location")
+                    if not location:
+                        raise ValueError("avatar redirect has no destination")
+                    current = clean_url(urljoin(current, location))
+                    continue
+                response.raise_for_status()
+                mime = response.headers.get("content-type", "").split(";", 1)[0].lower()
+                if mime not in {"image/jpeg", "image/png"}:
+                    raise ValueError("avatar is not a supported photo")
+                content = bytearray()
+                async for chunk in response.aiter_bytes(65536):
+                    content.extend(chunk)
+                    if len(content) > 8 * 1024 * 1024:
+                        raise ValueError("avatar exceeds photo limit")
+                data = bytes(content)
+                if not (data.startswith(b"\xff\xd8\xff") if mime == "image/jpeg"
+                        else data.startswith(b"\x89PNG\r\n\x1a\n")):
+                    raise ValueError("avatar content does not match image type")
+                return BufferedInputFile(data, filename="profile.jpg" if mime == "image/jpeg"
+                                         else "profile.png")
+    raise ValueError("too many avatar redirects")
+
+
 def download_prompt_markup(cid: str, url: str) -> InlineKeyboardMarkup:
-    rows = [[("✅ Yes", f"c:{cid}:y"), ("❌ No", f"c:{cid}:n")]]
+    youtube_video = youtube_video_url(url)
+    rows = [[("✅ Yes", f"c:{cid}:{'q' if youtube_video else 'y'}"),
+             ("❌ No", f"c:{cid}:n")]]
     if source(url) in SOCIAL_PLATFORMS and profile_target(url) is None:
         rows.append([("👤 Profile", f"c:{cid}:p")])
     return kb(rows)
@@ -76,6 +121,9 @@ def collection_view(
     if nav:
         rows.append(nav)
     rows.append([("⬇️ Download all", f"v:{cid}:q:all")])
+    if context.get("search_sid"):
+        rows.append([("◀ Back to result", f"v:{cid}:back:0")])
+    rows.append([("✖ Close", f"v:{cid}:close:0")])
     markup = kb(rows)
     owner_url = str(context.get("owner_url") or "")
     source_url = str(context.get("source_url") or "")
@@ -270,6 +318,10 @@ class App:
             if not self.store.rate(m.from_user.id, "links", 12):
                 return
             for index, url in enumerate(urls):
+                target = profile_target(url)
+                if target:
+                    await self.show_profile(m.chat.id, m.from_user.id, target)
+                    continue
                 cid = self.store.confirm_create(
                     m.chat.id,
                     m.from_user.id,
@@ -286,14 +338,6 @@ class App:
                     reply_markup=download_prompt_markup(cid, url),
                 )
                 self.store.set_prompt(cid, prompt.message_id)
-                target = profile_target(url)
-                if target:
-                    token = self.follow.db.session(m.from_user.id, m.chat.id, target)
-                    self.follow.db.bind(token, prompt.message_id)
-                    await prompt.edit_reply_markup(reply_markup=kb([
-                        [("✅ Download", f"c:{cid}:y"), ("❌ No", f"c:{cid}:n")],
-                        [("👀 Follow", f"f:{token}:open")],
-                    ]))
             if extra:
                 await m.reply(
                     f"Only the first {self.settings.max_links_per_message} links were offered. Send the rest separately."
@@ -337,23 +381,7 @@ class App:
             else:
                 await self.show_follow(m.chat.id, m.from_user.id, target)
         elif cmd == "/following":
-            rows = self.follow.db.db.execute(
-                "SELECT id,platform,handle,chat_id FROM follows WHERE user_id=? "
-                + ("" if m.chat.type == "private" else "AND chat_id=? ")
-                + "ORDER BY platform,handle",
-                (m.from_user.id,) if m.chat.type == "private" else (m.from_user.id, m.chat.id)
-            ).fetchall()
-            if not rows:
-                await m.reply("You are not following any profiles. Use /follow to begin.")
-            else:
-                lines = ["👀 <b>Following</b>"]
-                buttons = []
-                for row in rows:
-                    lines.append(f"{html.escape(row['platform'].title())} · @{html.escape(row['handle'])} "
-                                 f"→ {'private' if row['chat_id'] == m.from_user.id else 'group'}")
-                    buttons.append([InlineKeyboardButton(text=f"✕ Unfollow @{row['handle'][:25]}",
-                                                      callback_data=f"fu:{row['id']}")])
-                await m.reply("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+            await self.show_following(m.chat.id, m.from_user.id, m.chat.type)
         elif cmd in ("/search", "/music", "/podcast", "/pod"):
             mode = "podcast" if cmd == "/pod" else cmd[1:]
             if arg:
@@ -368,7 +396,7 @@ class App:
             target = profile_target(arg) if arg.startswith(("http://", "https://")) else command_target(
                 f"{cmd[1:]} {arg}") if arg else None
             if target and target.platform == cmd[1:]:
-                await self.show_follow(m.chat.id, m.from_user.id, target)
+                await self.show_profile(m.chat.id, m.from_user.id, target)
             else:
                 await m.reply(
                     f"Send a public {cmd[1:].title()} link or use {cmd} @handle to open Follow."
@@ -637,6 +665,26 @@ class App:
         prompt = await self.bot.send_message(chat, body, reply_markup=markup)
         self.follow.db.bind(token, prompt.message_id)
 
+    async def show_following(self, chat: int, user: int, chat_type: str,
+                             message_id: int | None = None) -> None:
+        rows = self.follow.db.db.execute(
+            "SELECT id,platform,handle,chat_id FROM follows WHERE user_id=? "
+            + ("" if chat_type == "private" else "AND chat_id=? ")
+            + "ORDER BY platform,handle",
+            (user,) if chat_type == "private" else (user, chat),
+        ).fetchall()
+        body = "👀 <b>Following</b>\nChoose a profile to manage."
+        if not rows:
+            body += "\nNo profiles yet. Use /follow to begin."
+        buttons = [[(f"👤 {row['platform'].title()} · @{row['handle'][:28]}",
+                     f"fm:{row['id']}:open")] for row in rows]
+        buttons.append([("✖ Close", "fm:close:close")])
+        if message_id is None:
+            await self.bot.send_message(chat, body, reply_markup=kb(buttons))
+        else:
+            await self.bot.edit_message_text(body, chat_id=chat, message_id=message_id,
+                                             reply_markup=kb(buttons))
+
     async def show_profile(self, chat: int, user: int, target: Target) -> None:
         token = self.follow.db.profile_panel(user, chat, target)
         rows = [
@@ -650,10 +698,60 @@ class App:
                          ("⭕ Stories", f"p:{token}:stories")])
         markup = kb(rows)
         markup.inline_keyboard.append([InlineKeyboardButton(text="🔗 Open profile", url=target.url)])
-        prompt = await self.bot.send_message(
-            chat, f"👤 <b>@{html.escape(target.handle)}</b> · {target.platform.title()}\n"
-                  "Public profile · Choose an action below.", reply_markup=markup)
+        body = (f"👤 <b>@{html.escape(target.handle)}</b> · {target.platform.title()}\n"
+                "Public profile · Choose an action below.")
+        prompt = None
+        if hasattr(self.bot, "send_photo"):
+            details = {"name": "", "bio": "", "avatar": ""}
+            try:
+                await asyncio.wait_for(asyncio.to_thread(validate_dns, target.url), 3)
+                async with httpx.AsyncClient(timeout=6, follow_redirects=False) as client:
+                    response = await client.get(target.url,
+                                                headers={"User-Agent": "facebookexternalhit/1.1"})
+                    response.raise_for_status()
+                parser = _Meta()
+                parser.feed(response.text[:500_000])
+                details = {"name": parser.data.get("og:title", ""),
+                           "bio": parser.data.get("og:description", ""),
+                           "avatar": parser.data.get("og:image", "")}
+            except (ValueError, TimeoutError, OSError, httpx.HTTPError):
+                pass
+            if not details.get("avatar") and target.platform != "youtube":
+                try:
+                    details = await asyncio.wait_for(
+                        public_profile(target, display_avatar=True), 7)
+                except (ValueError, TimeoutError, OSError, httpx.HTTPError):
+                    pass
+            try:
+                body = (f"👤 <b>{html.escape(details.get('name') or target.handle)}</b>\n"
+                        f"@{html.escape(target.handle)} · {target.platform.title()}\n\n"
+                        f"{html.escape(details.get('bio', '')[:700])}")
+                if details.get("avatar"):
+                    avatar = await profile_photo(details["avatar"])
+                    prompt = await self.bot.send_photo(chat, avatar,
+                                                       caption=body[:1024], reply_markup=markup)
+            except (ValueError, TimeoutError, OSError, TelegramBadRequest, httpx.HTTPError):
+                pass
+        if prompt is None:
+            prompt = await self.bot.send_message(chat, body, reply_markup=markup)
         self.follow.db.bind_profile_panel(token, prompt.message_id)
+
+    async def show_stories(self, chat: int, user: int, target: Target) -> None:
+        try:
+            stories = await public_items(target, "stories")
+        except (ValueError, TimeoutError, OSError):
+            stories = []
+        if not stories:
+            await self.bot.send_message(chat, "No accessible public stories found.")
+            return
+        items = [{"title": description or f"Story {index + 1}", "url": url,
+                  "kind": "story"} for index, (_, url, description) in enumerate(stories)]
+        cid = self.store.create_collection(user, chat, f"@{target.handle} · Stories", items,
+                                           {"source_url": target.url, "kind": target.platform})
+        prompt = await self.bot.send_message(chat, "Loading stories…")
+        self.store.db.execute("UPDATE collections SET message_id=? WHERE id=?",
+                              (prompt.message_id, cid))
+        await self.render_collection(cid, user, chat, 0)
 
     async def profile_callback(self, q: CallbackQuery, data: str) -> None:
         parts = data.split(":")
@@ -679,12 +777,7 @@ class App:
             prompt = await self.bot.send_message(q.message.chat.id, "⏳ Checking public profile…")
             self.store.bind_progress(jid, prompt.message_id)
         elif action == "stories" and target.platform in {"instagram", "tiktok"}:
-            url = (f"https://www.instagram.com/stories/{target.handle}/"
-                   if target.platform == "instagram" else
-                   f"https://www.tiktok.com/@{target.handle}/stories")
-            jid = self.store.create_job(q.from_user.id, q.message.chat.id, url)
-            prompt = await self.bot.send_message(q.message.chat.id, "⏳ Checking public stories…")
-            self.store.bind_progress(jid, prompt.message_id)
+            await self.show_stories(q.message.chat.id, q.from_user.id, target)
         elif action in {"latest", "shorts"}:
             try:
                 items = await public_items(target, "shorts" if action == "shorts" else "posts")
@@ -725,11 +818,12 @@ class App:
         if action == "no":
             self.follow.db.db.execute("DELETE FROM follow_sessions WHERE id=?", (token,))
             await acknowledge(q)
-            await q.message.edit_text("Follow cancelled.")
+            await q.message.edit_text("Settings closed. Follow unchanged."
+                                      if row["stage"].startswith("edit:") else "Follow cancelled.")
             return
         if action == "yes" and row["stage"] == "confirm":
             self.follow.db.db.execute("UPDATE follow_sessions SET stage='settings' WHERE id=?", (token,))
-        elif row["stage"] != "settings":
+        elif row["stage"] != "settings" and not row["stage"].startswith("edit:"):
             await acknowledge(q)
             return
         elif action == "t" and len(parts) == 4 and parts[3] in FEATURES[row["platform"]]:
@@ -759,8 +853,10 @@ class App:
                 return
             await acknowledge(q)
             await q.message.edit_text(
-                f"✅ Following @{html.escape(row['handle'])}. Public updates will be checked "
-                "about every 15 minutes. Use /following to stop.")
+                (f"✅ Settings saved for @{html.escape(row['handle'])}."
+                 if row["stage"].startswith("edit:") else
+                 f"✅ Following @{html.escape(row['handle'])}. Public updates will be checked "
+                 "about every 15 minutes. Use /following to manage."))
             return
         else:
             await acknowledge(q)
@@ -792,6 +888,66 @@ class App:
             return
         if data.startswith("f:"):
             await self.follow_callback(q, data)
+            return
+        if data.startswith("fm:"):
+            parts = data.split(":")
+            if len(parts) != 3:
+                await acknowledge(q)
+                return
+            follow_id, action = parts[1:]
+            if action == "close":
+                await acknowledge(q)
+                await q.message.edit_text("Following menu closed.")
+                return
+            if action == "back":
+                await acknowledge(q)
+                await self.show_following(q.message.chat.id, q.from_user.id,
+                                          q.message.chat.type, q.message.message_id)
+                return
+            row = self.follow.db.db.execute(
+                "SELECT * FROM follows WHERE id=? AND user_id=?", (follow_id, q.from_user.id)
+            ).fetchone()
+            if not row or (q.message.chat.type != "private" and row["chat_id"] != q.message.chat.id):
+                await acknowledge(q, "Follow unavailable")
+                return
+            if action == "open":
+                selected = ", ".join(json.loads(row["features"])) or "none"
+                body = (f"👀 <b>@{html.escape(row['handle'])}</b> · {row['platform'].title()}\n"
+                        f"Watching: {html.escape(selected)}\n"
+                        f"Delivery: {html.escape(row['mode'])}")
+                markup = kb([[("⚙️ Settings", f"fm:{follow_id}:edit"),
+                              ("🔄 Check now", f"fm:{follow_id}:check")],
+                             [("✕ Unfollow", f"fm:{follow_id}:remove")],
+                             [("◀ Back", f"fm:{follow_id}:back"),
+                              ("✖ Close", "fm:close:close")]])
+                await acknowledge(q)
+                await q.message.edit_text(body, reply_markup=markup)
+                return
+            if action == "edit":
+                token = self.follow.db.edit_session(q.from_user.id, q.message.chat.id, follow_id)
+                await acknowledge(q)
+                if token:
+                    session = self.follow.db.db.execute(
+                        "SELECT * FROM follow_sessions WHERE id=?", (token,)).fetchone()
+                    body, markup = settings_panel(session)
+                    panel = await self.bot.send_message(q.message.chat.id, body, reply_markup=markup)
+                    self.follow.db.bind(token, panel.message_id)
+                return
+            if action == "check":
+                if not self.store.rate(q.from_user.id, "follow_check", 2):
+                    await acknowledge(q, "Check limit reached")
+                    return
+                self.follow.db.db.execute("UPDATE follows SET next_check=? WHERE id=? AND user_id=?",
+                                          (0, follow_id, q.from_user.id))
+                await acknowledge(q, "Queued for the next monitor check")
+                return
+            if action == "remove":
+                self.follow.db.remove(follow_id, q.from_user.id)
+                await acknowledge(q)
+                await self.show_following(q.message.chat.id, q.from_user.id,
+                                          q.message.chat.type, q.message.message_id)
+                return
+            await acknowledge(q)
             return
         if data.startswith("fu:"):
             await acknowledge(q)
@@ -849,8 +1005,23 @@ class App:
             return
         if data.startswith("c:"):
             parts = data.split(":")
-            if len(parts) != 3 or parts[2] not in {"y", "n", "p"}:
+            if len(parts) != 3 or parts[2] not in {"y", "n", "p", "q", "480", "1080", "audio"}:
                 await acknowledge(q)
+                return
+            if parts[2] == "q":
+                row = self.store.db.execute(
+                    "SELECT url FROM confirmations WHERE id=? AND user_id=? AND chat_id=? "
+                    "AND prompt_id=? AND state='PENDING' AND expires>?",
+                    (parts[1], q.from_user.id, q.message.chat.id,
+                     q.message.message_id, time.time())).fetchone()
+                await acknowledge(q, "Request expired" if not row else None)
+                if row and youtube_video_url(row["url"]):
+                    await q.message.edit_text(
+                        "🎛 <b>YouTube quality</b>\nChoose video quality or MP3.",
+                        reply_markup=kb([[("🎬 Best available · up to 1080p", f"c:{parts[1]}:1080")],
+                                         [("🎬 480p", f"c:{parts[1]}:480"),
+                                          ("🎵 MP3", f"c:{parts[1]}:audio")],
+                                         [("✖ Cancel", f"c:{parts[1]}:n")]]))
                 return
             if parts[2] == "p":
                 row = self.store.db.execute(
@@ -874,8 +1045,10 @@ class App:
                     await self.bot.send_message(q.message.chat.id,
                         "Creator profile could not be identified from this public post.")
                 return
+            mode = parts[2] if parts[2] in {"480", "1080", "audio"} else "auto"
             state, jid = self.store.decision(
-                parts[1], q.from_user.id, q.message.chat.id, q.message.message_id, parts[2] == "y"
+                parts[1], q.from_user.id, q.message.chat.id, q.message.message_id,
+                parts[2] != "n", mode,
             )
             await acknowledge(q, "Expired" if state == "EXPIRED" else None)
             if state == "REJECTED":
@@ -904,6 +1077,28 @@ class App:
             if not row or row["message_id"] != q.message.message_id:
                 return
             items = json.loads(row["items"])
+            if action == "close":
+                await q.message.edit_text("Collection closed.")
+                return
+            if action == "back":
+                context = self.store.collection_context(cid)
+                sid = str(context.get("search_sid") or "")
+                search_row = self.store.search(sid, q.from_user.id, q.message.chat.id)
+                if search_row and search_row["generation"] == context.get("search_generation"):
+                    old_message = search_row["message_id"]
+                    self.store.set_search_message(sid, q.message.message_id)
+                    if old_message and old_message != q.message.message_id:
+                        try:
+                            await self.bot.edit_message_reply_markup(
+                                chat_id=q.message.chat.id, message_id=old_message,
+                                reply_markup=None)
+                        except TelegramBadRequest:
+                            pass
+                    await self.render_search(sid, q.from_user.id, q.message.chat.id,
+                                             detail=int(context["search_index"]))
+                else:
+                    await q.message.edit_text("Search expired. Send /podcast to search again.")
+                return
             if action == "follow":
                 target = profile_target(str(self.store.collection_context(cid).get("source_url") or ""))
                 if target:
@@ -917,14 +1112,16 @@ class App:
                 target = items[int(arg)] if arg.isdigit() else items[0]
                 is_video = provider == "youtube" or target.get("kind") == "video"
                 quality_choices = (
-                    [("🎬 480p", "480"), ("🎬 720p", "720"), ("🎵 MP3", "audio")]
+                    [("🎬 Best · up to 1080p", "1080"),
+                     ("🎬 480p", "480"), ("🎵 MP3", "audio")]
                     if is_video else
                     [("🎵 MP3", "audio")] if target.get("kind") in {"track", "episode"}
                     else [("⬇️ Download", "auto")]
                 )
                 markup = kb([
                     [(label, f"v:{cid}:s:{arg}:{mode}") for label, mode in quality_choices],
-                    [("◀ Back", f"v:{cid}:p:{int(arg) // 10 if arg.isdigit() else 0}")],
+                    [("◀ Back", f"v:{cid}:p:{int(arg) // 10 if arg.isdigit() else 0}"),
+                     ("✖ Close", f"v:{cid}:close:0")],
                 ])
                 label = "All items" if arg == "all" else html.escape(str(target.get("title") or ""))
                 await q.message.edit_text(
@@ -932,7 +1129,7 @@ class App:
                 )
             elif action == "s" and len(parts) == 5:
                 mode = parts[4]
-                if mode not in {"auto", "audio", "480", "720"}:
+                if mode not in {"auto", "audio", "480", "720", "1080"}:
                     return
                 indexes = range(len(items)) if arg == "all" else ([int(arg)] if arg.isdigit() else [])
                 created_jobs = []
@@ -1012,12 +1209,11 @@ class App:
                     item_context = {"source_url": target, "kind": "post"}
                 else:
                     username = str(context.get("artist") or "")
-                    if source(profile_url) == "instagram":
-                        target = f"https://www.instagram.com/stories/{username}/"
-                    else:
-                        target = f"https://www.tiktok.com/@{username}/stories"
-                    mode = "auto"
-                    item_context = {"source_url": target, "kind": "story"}
+                    story_target = profile_target(profile_url)
+                    if not story_target or story_target.handle != username:
+                        return
+                    await self.show_stories(q.message.chat.id, q.from_user.id, story_target)
+                    return
                 jid = self.store.create_job(
                     q.from_user.id, q.message.chat.id, target, mode, item_context
                 )
@@ -1194,7 +1390,9 @@ class App:
             cid = self.store.create_collection(
                 q.from_user.id, q.message.chat.id, title, items,
                 {"source_url": str(hit["url"]), "kind": str(hit["source"]),
-                 "owner_url": str(items[0].get("owner_url") or "")},
+                 "owner_url": str(items[0].get("owner_url") or ""),
+                 "search_sid": sid, "search_index": int(parts[3]),
+                 "search_generation": row["generation"]},
             )
             prompt = await self.bot.send_message(q.message.chat.id, "Loading collection…")
             self.store.db.execute(
@@ -1307,7 +1505,6 @@ class App:
                     ("search", "Search music and podcasts"),
                     ("music", "Search music"),
                     ("podcast", "Search podcasts"),
-                    ("pod", "Search podcasts"),
                     ("twitter", "Twitter link help"),
                     ("instagram", "Instagram link help"),
                     ("tiktok", "TikTok link help"),

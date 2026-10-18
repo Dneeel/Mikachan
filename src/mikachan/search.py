@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import os
 import re
 import sys
 import time
@@ -13,6 +12,7 @@ from typing import Any
 import httpx
 
 from .config import ProviderSettings
+from .security import extractor_env
 
 KINDS = ("track", "album", "playlist", "artist", "podcast", "episode")
 SOURCES = ("apple", "deezer", "soundcloud", "ytmusic", "youtube", "spotify", "apple_podcasts")
@@ -242,6 +242,7 @@ class Searcher:
         proc = await asyncio.create_subprocess_exec(
             sys.executable,
             "-m", "yt_dlp",
+            "--ignore-config",
             "--flat-playlist",
             "--dump-single-json",
             "--no-warnings",
@@ -249,7 +250,7 @@ class Searcher:
             f"scsearch15:{query}",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
-            env={"PATH": os.environ.get("PATH", "")},
+            env=extractor_env(),
         )
         try:
             stdout, _ = await asyncio.wait_for(proc.communicate(), 10)
@@ -280,10 +281,10 @@ class Searcher:
         if "track" not in kinds:
             return []
         proc = await asyncio.create_subprocess_exec(
-            sys.executable, "-m", "yt_dlp", "--flat-playlist", "--dump-single-json",
+            sys.executable, "-m", "yt_dlp", "--ignore-config", "--flat-playlist", "--dump-single-json",
             "--no-warnings", "--skip-download", f"ytsearch12:{query}",
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-            env={"PATH": os.environ.get("PATH", "")},
+            env=extractor_env(),
         )
         try:
             stdout, _ = await asyncio.wait_for(proc.communicate(), 10)

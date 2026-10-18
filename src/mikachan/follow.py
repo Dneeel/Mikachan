@@ -232,6 +232,18 @@ class FollowStore:
                          target.url, "confirm", json.dumps(defaults), "notice", "dm", time.time() + 1800))
         return token
 
+    def edit_session(self, user: int, chat: int, follow_id: str) -> str | None:
+        row = self.db.execute("SELECT * FROM follows WHERE id=? AND user_id=?",
+                              (follow_id, user)).fetchone()
+        if row is None:
+            return None
+        token = secrets.token_urlsafe(8)
+        self.db.execute("INSERT INTO follow_sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (token, user, chat, None, row["platform"], row["handle"],
+                         row["url"], f"edit:{follow_id}", row["features"],
+                         row["mode"], "keep", time.time() + 1800))
+        return token
+
     def profile_panel(self, user: int, chat: int, target: Target) -> str:
         self.db.execute("DELETE FROM profile_panels WHERE expires<?", (time.time(),))
         token = secrets.token_urlsafe(8)
@@ -258,6 +270,17 @@ class FollowStore:
 
     def save(self, session) -> str:
         target = session["url"]
+        if session["stage"].startswith("edit:"):
+            follow_id = session["stage"].split(":", 1)[1]
+            updated = self.db.execute(
+                "UPDATE follows SET features=?,mode=? WHERE id=? AND user_id=? AND url=? "
+                "RETURNING id",
+                (session["features"], session["mode"], follow_id,
+                 session["user_id"], target)).fetchone()
+            if not updated:
+                raise ValueError("Follow no longer exists")
+            self.db.execute("DELETE FROM follow_sessions WHERE id=?", (session["id"],))
+            return follow_id
         existing = self.db.execute("SELECT id FROM follows WHERE user_id=? AND url=?",
                                    (session["user_id"], target)).fetchone()
         if not existing and self.db.execute("SELECT count(*) FROM follows WHERE user_id=?",
@@ -311,18 +334,21 @@ def settings_panel(session) -> tuple[str, InlineKeyboardMarkup]:
                                     callback_data=f"f:{token}:m:media"),
                  InlineKeyboardButton(text=f"{'✅' if session['mode'] == 'notice' else '⬜'} Notify + link",
                                     callback_data=f"f:{token}:m:notice")])
-    if session["chat_id"] != session["user_id"]:
+    editing = session["stage"].startswith("edit:")
+    if not editing and session["chat_id"] != session["user_id"]:
         rows.append([InlineKeyboardButton(text=f"{'✅' if session['destination'] == 'dm' else '⬜'} Private chat",
                                         callback_data=f"f:{token}:d:dm"),
                      InlineKeyboardButton(text=f"{'✅' if session['destination'] == 'here' else '⬜'} This group",
                                         callback_data=f"f:{token}:d:here")])
-    rows.append([InlineKeyboardButton(text="💾 Save Follow", callback_data=f"f:{token}:save")])
+    rows.append([InlineKeyboardButton(text="💾 Save changes" if editing else "💾 Save Follow",
+                                    callback_data=f"f:{token}:save")])
     rows.append([InlineKeyboardButton(text="Cancel", callback_data=f"f:{token}:no")])
     body = (f"👀 <b>Follow @{html.escape(session['handle'])}</b>\n"
             "Choose what to watch and how to receive it. Tap a category to toggle it.\n\n"
             "Stories depend on public extractor access. Username changes and live starts "
             "cannot be monitored reliably without account access.\n"
-            "Media mode queues public posts for download; profile changes always arrive as text.")
+            "Media mode queues public posts for download; profile changes always arrive as text."
+            + ("\nYour existing notification destination stays the same." if editing else ""))
     return body, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -333,6 +359,8 @@ async def _extract(command: list[str], timeout: int) -> object:
     command = [executable, *command[1:]]
     if Path(executable).name == "gallery-dl":
         command = [command[0], "--config-ignore", "--cache-file", ":memory:", *command[1:]]
+    elif Path(executable).name == "yt-dlp":
+        command = [command[0], "--ignore-config", *command[1:]]
     network_env = {key: value for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
                     "NO_PROXY", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE")
                    if (value := os.environ.get(key))}
@@ -374,8 +402,9 @@ def _gallery_items(data: object, target: Target, kind: str) -> list[tuple[str, s
         else:
             item_id = meta.get("id")
             event_kind = "stories" if kind == "stories" else "posts"
-            url = (f"https://www.tiktok.com/@{target.handle}/story/{item_id}" if kind == "stories"
-                   else f"https://www.tiktok.com/@{target.handle}/video/{item_id}")
+            # The public story listing yields post IDs; the individual extractor
+            # accepts /video/ID, not the unsupported /story/ID path.
+            url = f"https://www.tiktok.com/@{target.handle}/video/{item_id}"
         if not item_id or meta.get("type") == "avatar":
             continue
         try:
@@ -414,7 +443,7 @@ async def public_items(target: Target, kind: str = "posts") -> list[tuple[str, s
     return _gallery_items(data, target, kind)
 
 
-async def public_profile(target: Target) -> dict[str, str]:
+async def public_profile(target: Target, *, display_avatar: bool = False) -> dict[str, str]:
     """Use structured public fields; OG summaries are not reliable change signals."""
     await asyncio.to_thread(validate_dns, target.url)
     if target.platform in {"instagram", "twitter", "tiktok"}:
@@ -451,16 +480,16 @@ async def public_profile(target: Target) -> dict[str, str]:
                         if "signature" not in user:
                             result.pop("bio")
                     if any(result.values()):
-                        return _stable_profile(result)
+                        return _stable_profile(result, display_avatar=display_avatar)
         except (ValueError, TimeoutError, OSError, json.JSONDecodeError):
             pass
     raise ValueError("structured public profile data unavailable")
 
 
-def _stable_profile(data: dict[str, object]) -> dict[str, str]:
+def _stable_profile(data: dict[str, object], *, display_avatar: bool = False) -> dict[str, str]:
     result = {key: str(data.get(key) or "")[:500] for key in ("name", "bio", "avatar")
               if key in data and (data.get(key) or key == "bio")}
-    if result.get("avatar"):
+    if result.get("avatar") and not display_avatar:
         parts = urlsplit(result["avatar"])
         result["avatar"] = urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
     return result

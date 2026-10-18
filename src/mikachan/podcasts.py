@@ -165,7 +165,27 @@ async def resolve_episode_link(url: str) -> dict[str, str | int] | None:
         raise ValueError("Castbox episode identity could not be verified in public sources")
     if not matches:
         raise ValueError("No matching public version of this episode was found")
-    match = matches[0]
+    match = None
+    for candidate in matches[:5]:
+        audio_url = clean_url(str(candidate["episodeUrl"]))
+        validate_dns(audio_url)
+        try:
+            async with httpx.AsyncClient(timeout=10, follow_redirects=False) as probe:
+                check = await probe.head(audio_url)
+                if check.status_code in {404, 410}:
+                    # Some CDNs disable HEAD even when a ranged GET works.
+                    async with probe.stream("GET", audio_url,
+                                            headers={"Range": "bytes=0-0"}) as sample:
+                        if sample.status_code in {404, 410}:
+                            continue
+        except httpx.HTTPError:
+            # Some hosts reject probes while allowing the actual media GET.
+            match = candidate
+            break
+        match = candidate
+        break
+    if match is None:
+        raise ValueError("The episode's public audio link is no longer available")
     return {
         "url": clean_url(str(match["episodeUrl"])),
         "title": str(match.get("trackName") or title),

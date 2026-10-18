@@ -27,7 +27,7 @@ from aiogram.types import (
 )
 
 from .config import Settings
-from .security import source, validate_dns, collection, clean_url
+from .security import source, validate_dns, collection, clean_url, extractor_env
 from .store import Store
 from .media import gallery_budget, groups, media_kind, verify
 from .catalog import _Meta, recording_search_alias, resolve_collection, resolve_track
@@ -378,7 +378,10 @@ class Worker:
                 except ValueError as exc:
                     if "web page" not in str(exc):
                         raise
-                    paths = await self._ytdlp(url, job_dir, max_bytes, mode)
+                    paths = await self._ytdlp(
+                        url, job_dir,
+                        min(300 * 1024 * 1024, max_bytes * 6) if mode == "audio" else max_bytes,
+                        mode)
                 if mode == "audio":
                     if paths[0].suffix.lower() != ".mp3":
                         paths = [
@@ -391,7 +394,10 @@ class Worker:
                     elif paths[0].stat().st_size > max_bytes:
                         paths = [await self._compress_mp3(paths[0], max_bytes)]
             else:
-                prefer_gallery = (source(url) == "instagram" and "/p/" in urlsplit(url).path) or (
+                instagram_gallery = source(url) == "instagram" and any(
+                    marker in urlsplit(url).path for marker in ("/p/", "/stories/")
+                )
+                prefer_gallery = instagram_gallery or (
                     source(url) == "twitter" and "/status/" in urlsplit(url).path
                 )
                 paths = None
@@ -406,7 +412,10 @@ class Worker:
                                 artifact.unlink()
                 try:
                     if paths is None:
-                        paths = await self._ytdlp(url, job_dir, max_bytes, mode)
+                        paths = await self._ytdlp(
+                            url, job_dir,
+                            min(300 * 1024 * 1024, max_bytes * 6) if mode == "audio" else max_bytes,
+                            mode)
                 except ValueError as extraction_error:
                     for artifact in job_dir.iterdir():
                         if artifact.is_file():
@@ -444,6 +453,10 @@ class Worker:
                 return
             self.store.transition(jid, "DOWNLOADING", "VERIFYING", artifact=str(job_dir))
             await self._progress(jid, chat, "Processing")
+            if mode == "audio" and len(paths) == 1 and paths[0].stat().st_size > max_bytes:
+                paths = [await self._compress_mp3(paths[0], max_bytes)]
+            if source(original_url) == "youtube" and len(paths) == 1 and paths[0].stat().st_size > max_bytes:
+                raise ValueError("Video exceeds the Telegram upload limit; try 480p or MP3")
             if sum(p.stat().st_size for p in paths) > gallery_budget(max_bytes):
                 raise ValueError("gallery exceeds Bot API mode limit")
             if mode != "document":
@@ -620,6 +633,7 @@ class Worker:
         validate_dns(url)
         proc = await asyncio.create_subprocess_exec(
             "yt-dlp",
+            "--ignore-config",
             *([] if source(url) == "soundcloud" else ["--flat-playlist"]),
             "--playlist-end",
             "300",
@@ -630,7 +644,7 @@ class Worker:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
             start_new_session=True,
-            env={"PATH": os.environ.get("PATH", "")},
+            env=extractor_env(),
         )
         try:
             out, _ = await asyncio.wait_for(
@@ -717,6 +731,7 @@ class Worker:
             raise ValueError("public profile browser unavailable")
         proc = await asyncio.create_subprocess_exec(
             "gallery-dl",
+            "--config-ignore", "--cache-file", ":memory:",
             "-J",
             "--range",
             "1-30",
@@ -724,7 +739,7 @@ class Worker:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
             start_new_session=True,
-            env={"PATH": os.environ.get("PATH", "")},
+            env=extractor_env(),
         )
         try:
             stdout, _ = await asyncio.wait_for(proc.communicate(), 45)
@@ -801,9 +816,10 @@ class Worker:
             proc: asyncio.subprocess.Process | None = None
             try:
                 proc = await asyncio.create_subprocess_exec(
-                    "gallery-dl", "-j", "--range", "1-1", avatar_target,
+                    "gallery-dl", "--config-ignore", "--cache-file", ":memory:",
+                    "-j", "--range", "1-1", avatar_target,
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-                    start_new_session=True, env={"PATH": os.environ.get("PATH", "")},
+                    start_new_session=True, env=extractor_env(),
                 )
                 stdout, _ = await asyncio.wait_for(proc.communicate(), 25)
                 messages = json.loads(stdout)
@@ -884,8 +900,12 @@ class Worker:
              {"soundcloud", "ytmusic", "youtube"}),
         ]
         tried: set[str] = set()
+        available_hits = False
+        unavailable_sources: set[str] = set()
         for text_query, providers in queries:
-            hits, _ = await searcher.search(text_query, {"track"}, providers)
+            hits, failures = await searcher.search(text_query, {"track"}, providers)
+            available_hits |= bool(hits)
+            unavailable_sources.update(failures)
             def score_hit(hit: object) -> float:
                 from .search import Hit
                 assert isinstance(hit, Hit)
@@ -908,7 +928,8 @@ class Worker:
                 tried.add(hit.url)
                 try:
                     paths = await asyncio.wait_for(
-                        self._ytdlp(clean_url(hit.url), directory, max_bytes, "audio"), 100
+                        self._ytdlp(clean_url(hit.url), directory,
+                                    min(300 * 1024 * 1024, max_bytes * 6), "audio"), 100
                     )
                     if len(paths) != 1:
                         raise ValueError("recording has unexpected files")
@@ -923,11 +944,15 @@ class Worker:
                         seconds = float(stdout.strip() or 0)
                         if abs(track.duration - seconds) > 10:
                             raise ValueError("public recording is not the full track")
+                    if paths[0].stat().st_size > max_bytes:
+                        paths = [await self._compress_mp3(paths[0], max_bytes)]
                     return paths
                 except (ValueError, TimeoutError, OSError):
                     for file in directory.iterdir():
                         if file.is_file():
                             file.unlink()
+        if not available_hits and {"soundcloud", "ytmusic", "youtube"} <= unavailable_sources:
+            raise ValueError("Public audio sources are unreachable from this server")
         raise ValueError("No complete public recording matched this track")
 
     async def _direct(
@@ -1161,12 +1186,13 @@ class Worker:
             return None
         proc = await asyncio.create_subprocess_exec(
             "gallery-dl",
+            "--config-ignore", "--cache-file", ":memory:",
             "-g",
             target,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
             start_new_session=True,
-            env={"PATH": os.environ.get("PATH", "")},
+            env=extractor_env(),
         )
         try:
             stdout, _ = await asyncio.wait_for(proc.communicate(), 45)
@@ -1267,6 +1293,7 @@ class Worker:
             return None
         proc = await asyncio.create_subprocess_exec(
             "gallery-dl",
+            "--config-ignore", "--cache-file", ":memory:",
             "-j",
             "--range",
             "1-31",
@@ -1274,7 +1301,7 @@ class Worker:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
             start_new_session=True,
-            env={"PATH": os.environ.get("PATH", "")},
+            env=extractor_env(),
         )
         try:
             stdout, _ = await asyncio.wait_for(proc.communicate(), 45)
@@ -1324,17 +1351,21 @@ class Worker:
             else []
         )
         quality_args: list[str] = []
-        if source(url) == "youtube" and mode in {"480", "720"}:
+        if source(url) == "youtube" and mode in {"480", "720", "1080"}:
             quality_args = [
                 "-f",
-                f"bv*[height<={mode}][ext=mp4]+ba[ext=m4a]/b[height<={mode}][ext=mp4]/best[height<={mode}]",
+                (f"bv*[height<={mode}][ext=mp4]+ba[ext=m4a]/"
+                 f"b[height<={mode}][ext=mp4]/"
+                 f"bv*[height<={mode}]+ba/best[height<={mode}]"),
                 "--merge-output-format", "mp4",
             ]
         proc = await asyncio.create_subprocess_exec(
             sys.executable,
             "-m", "yt_dlp",
+            "--ignore-config",
             "--playlist-end",
             "10",
+            *(["--no-playlist"] if not collection(url) else []),
             "--no-warnings",
             "--restrict-filenames",
             "--max-filesize",
@@ -1348,7 +1379,7 @@ class Worker:
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
-            env={"PATH": os.environ.get("PATH", "")},
+            env=extractor_env(),
         )
         try:
             _, stderr = await asyncio.wait_for(proc.communicate(), 600)
