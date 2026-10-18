@@ -636,14 +636,38 @@ class Manager:
 
     def _switch_link(self, sha: str) -> None:
         target = self.paths.releases / sha
-        if not target.is_dir():
+        if target.is_symlink() or not target.is_dir():
             raise ManagerError("Target release is missing")
+        self._grant_release_access(target)
         temporary = self.paths.base / (".current-" + secrets.token_hex(4))
         temporary.symlink_to(target, target_is_directory=True)
         try:
             os.replace(temporary, self.paths.current)
         finally:
             temporary.unlink(missing_ok=True)
+
+    def _grant_release_access(self, release: Path) -> None:
+        """Let the unprivileged service read its release under a private panel umask."""
+        group = grp.getgrnam("mikachan").gr_gid if self.require_root else None
+        for entry in (self.paths.base, self.paths.releases):
+            if entry.is_symlink():
+                raise ManagerError(f"Managed path is a symlink: {entry}")
+            if group is not None:
+                os.chown(entry, -1, group)
+            os.chmod(entry, stat.S_IMODE(entry.stat().st_mode) | stat.S_IRGRP | stat.S_IXGRP)
+        for root, directories, files in os.walk(release, followlinks=False):
+            for entry in (Path(root), *(Path(root) / name for name in directories + files)):
+                if entry.is_symlink():
+                    continue
+                info = entry.lstat()
+                if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
+                    raise ManagerError(f"Unexpected release entry: {entry}")
+                if group is not None:
+                    os.chown(entry, -1, group)
+                permissions = stat.S_IMODE(info.st_mode) | stat.S_IRGRP
+                if stat.S_ISDIR(info.st_mode) or info.st_mode & 0o111:
+                    permissions |= stat.S_IXGRP
+                os.chmod(entry, permissions)
 
     def _snapshot(self, *, reason: str) -> str:
         if self.paths.state.is_symlink() or self.paths.backups.is_symlink():

@@ -61,7 +61,12 @@ apt-get install -y git ca-certificates python3 python3-venv ffmpeg tesseract-ocr
 panel_root="$install_root/panel"
 mkdir -p "$panel_root/deploy" "$install_root/tmp/bootstrap" "$install_root/cache/pip" \
          "$install_root/config"
-chmod 0700 "$install_root/tmp" "$install_root/config"
+if getent group mikachan >/dev/null; then
+  chgrp mikachan "$install_root/tmp" "$install_root/config"
+  chmod 0750 "$install_root/tmp" "$install_root/config"
+else
+  chmod 0700 "$install_root/tmp" "$install_root/config"
+fi
 printf 'Mikachan manager schema 1\n' > "$install_root/.managed-by-mikachan"
 if [[ -z "$source_dir" ]]; then
   temp_dir="$(mktemp -d "$install_root/tmp/bootstrap/source.XXXXXX")"

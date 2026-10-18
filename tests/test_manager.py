@@ -4,6 +4,7 @@ import json
 import fcntl
 import os
 import sqlite3
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -21,6 +22,29 @@ def test_default_paths_keep_managed_files_beneath_one_root():
                  paths.manager_temp, paths.cache, paths.logs):
         assert path.is_relative_to(paths.base)
     assert paths.unit == Path("/etc/systemd/system/mikachan.service")
+
+
+def test_install_grants_service_read_access_to_restrictive_release(
+        deployment: tuple["FakeManager", Path, str]) -> None:
+    manager, _, sha = deployment
+    original_umask = os.umask(0o077)
+    try:
+        manager.install()
+    finally:
+        os.umask(original_umask)
+    release = manager.paths.releases / sha
+    nested = release / "private" / "bin"
+    nested.mkdir(parents=True)
+    nested.chmod(0o700)
+    command = nested / "tool"
+    command.write_text("#!/bin/sh\n")
+    command.chmod(0o700)
+    manager._grant_release_access(release)
+    for directory in (manager.paths.base, manager.paths.releases, release):
+        assert stat.S_IMODE(directory.stat().st_mode) & 0o050 == 0o050
+    assert stat.S_IMODE(nested.stat().st_mode) & 0o050 == 0o050
+    assert stat.S_IMODE((release / "payload.txt").stat().st_mode) & 0o040
+    assert stat.S_IMODE(command.stat().st_mode) & 0o050 == 0o050
 
 
 def test_cleanup_transient_media_requires_stopped_service(deployment):
