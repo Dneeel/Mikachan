@@ -396,6 +396,7 @@ def test_setup_again_retains_database_and_updates_allowlist(
     manager, _, _ = deployment
     install(manager)
     path = database(manager)
+    manager.set_config("MOMMY_TELEGRAM_IDS", "42")
     manager.setup({"BOT_TOKEN": "99999:" + "y" * 30,
                    "OWNER_TELEGRAM_ID": "88", "ALLOWED_TELEGRAM_IDS": "88",
                    "ALLOWED_GROUP_IDS": ""})
@@ -404,6 +405,7 @@ def test_setup_again_retains_database_and_updates_allowlist(
         assert {row[0] for row in db.execute("SELECT user_id FROM access")} == {88}
     assert manager.config()["OWNER_TELEGRAM_ID"] == "88"
     assert manager.config()["BOT_TOKEN"] == "(set)"
+    assert manager.config()["MOMMY_TELEGRAM_IDS"] == ""
 
 
 def test_failed_repeat_setup_restores_config_database_and_service(

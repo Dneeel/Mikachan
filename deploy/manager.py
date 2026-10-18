@@ -705,6 +705,10 @@ class Manager:
             values["ALLOWED_TELEGRAM_IDS"] = config.get("ALLOWED_TELEGRAM_IDS") or \
                 config["OWNER_TELEGRAM_ID"]
             values["ALLOWED_GROUP_IDS"] = config.get("ALLOWED_GROUP_IDS", "")
+            if values.get("MOMMY_TELEGRAM_IDS"):
+                retained = _ids(values["MOMMY_TELEGRAM_IDS"]) & \
+                    _ids(values["ALLOWED_TELEGRAM_IDS"])
+                values["MOMMY_TELEGRAM_IDS"] = ",".join(map(str, sorted(retained)))
             values["PRIVATE_CHATS_ONLY"] = "false" if values["ALLOWED_GROUP_IDS"] else "true"
             values["DATA_DIR"] = str(self.paths.state)
             self._validate_config(values, self.paths.current)
