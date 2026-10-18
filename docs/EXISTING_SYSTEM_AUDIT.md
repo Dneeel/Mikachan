@@ -8,7 +8,7 @@ Audited active `v2` at `36435d5` before edits, including the first-party Python 
 
 | Path / interface | Actual behavior and extension point |
 | --- | --- |
-| `src/mika_nexus/cli.py`, `__main__.py`, `config.py` | `mika-nexus run` constructs `App(Settings())`; doctor inspects dependencies. Pydantic settings read `.env`. One bot token and one process. Legacy package, SQLite filename and service name remain for compatibility. |
+| `src/mikachan/cli.py`, `__main__.py`, `config.py` | `mikachan run` constructs `App(Settings())`; doctor inspects dependencies. Pydantic settings read `.env`. One bot token and one process. Legacy package, SQLite filename and service name remain for compatibility. |
 | `bot.py:App` | One aiogram `Dispatcher`/`Router`, one message handler, one callback handler, and one `start_polling` call. `App.run` also starts one downloader `Worker.loop`. Community and Utilities now dispatch inside these handlers; there is no competing update consumer. |
 | `security.py` | Numeric sender allowlist and chat-type checks; URL syntax/host classification and fetch-time public-DNS checks. Group authorization now requires the numeric user allowlist **and** a separately approved numeric group ID, with `PRIVATE_CHATS_ONLY=false`. URLs still reach a consent prompt before work. |
 | `store.py` | One SQLite database in WAL mode. `Store.decision` checks initiating user, chat, prompt ID, pending state and expiry inside an immediate transaction, then creates a durable job. Search sessions bind user/chat/generation; cache keys hold Telegram file IDs per owner. Recovery distinguishes retryable work from uncertain delivery. New Community and Utilities tables are additive `CREATE TABLE IF NOT EXISTS` changes. |
@@ -31,4 +31,8 @@ Eligible public HTTP(S) links in authorized text still produce separate **Yes/No
 
 ## Product decision reconciliation
 
-The attached 3.0 blueprint's old **Mika**, Persian-first interface and blanket access for members of an approved group are superseded by **Mikachan**, English bot interface and strict per-user numeric authorization. Exact Persian triggers (`فال`, `شعر`, `ارز`, `ترجمه …`) and authentic Persian source content remain. `v1` stays retired; this work targets `v2`. Future terminal management is the next milestone, not an independent bot or application in this release.
+The attached blueprint's earlier Persian-first interface and blanket group-member
+access are superseded by Mikachan's English interface and strict per-user numeric
+authorization. Exact Persian triggers (`فال`, `شعر`, `ارز`, `ترجمه …`) and authentic
+Persian content remain. `v1` is retired; Community, Utilities, and the terminal
+manager are integrated on `v2`.

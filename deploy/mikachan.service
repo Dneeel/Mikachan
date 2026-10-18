@@ -1,0 +1,26 @@
+# Managed by Mikachan panel
+[Unit]
+Description=Mikachan private Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mikachan
+Group=mikachan
+WorkingDirectory=/opt/mikachan/current
+EnvironmentFile=/etc/mikachan.env
+Environment=PATH=/opt/mikachan/current/.venv/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/flock -n /var/lib/mikachan/polling.lock /opt/mikachan/current/.venv/bin/mikachan run
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=60
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/mikachan
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

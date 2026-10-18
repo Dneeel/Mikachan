@@ -137,7 +137,7 @@ HELP_TEXT = (
 class App:
     def __init__(self, settings: Settings):
         self.settings = settings
-        self.store = Store(settings.data_dir / "nexus.sqlite")
+        self.store = Store(settings.data_dir / "mikachan.sqlite")
         self.store.recover()
         self.store.seed_access(settings.allowlist)
         self.store.seed_groups(settings.groups)

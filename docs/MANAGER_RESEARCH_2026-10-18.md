@@ -6,8 +6,8 @@ The active v2 repository has one aiogram polling entrypoint, Python 3.12,
 locked dependencies, SQLite in WAL mode, a service template, and a separate
 Daytona foreground launcher. Its old Ubuntu helper creates `.venv` and runs
 tests but does not own releases, rollback or uninstall. The existing systemd
-template assumed a fixed checkout under `/opt/mika-nexus`; runtime state belongs
-in `/var/lib/mika-nexus`. Downloader engines and Telegram event routing need no
+template assumed a fixed checkout under `/opt/mikachan`; runtime state belongs
+in `/var/lib/mikachan`. Downloader engines and Telegram event routing need no
 changes for server management.
 
 Required operations: install v2 from the actual v2 branch; report exact
@@ -38,7 +38,7 @@ restore a prior release, and report errors. A small CLI exposes the same
 operations for SSH sessions too narrow for the full-screen UI and for scripted
 checks. Textual and uv are pinned in a separate manager environment.
 
-On the latest v2 checkout, 92 existing tests and Ruff pass. Mypy reports 39
+On the latest v2 checkout, 110 local tests and Ruff pass. Mypy reports 39
 errors in downloader-owned `bot.py` and `follow.py`. The manager runs mypy and
 records the failure in each release's quality record; pytest and Ruff are
 activation gates. This keeps downloader ownership intact and does not label

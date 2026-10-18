@@ -9,4 +9,4 @@ chmod 700 data
 export PATH="$project_dir/.venv/bin:$PATH"
 
 # One polling consumer per bot identity on this workspace.
-exec flock -n data/polling.lock "$project_dir/.venv/bin/mika-nexus" run
+exec flock -n data/polling.lock "$project_dir/.venv/bin/mikachan" run

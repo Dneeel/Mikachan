@@ -2,10 +2,10 @@ import json
 
 import pytest
 
-from mika_nexus.follow import (FollowService, FollowStore, command_target,
+from mikachan.follow import (FollowService, FollowStore, command_target,
                                creator_from_post, profile_target, public_profile,
                                _gallery_items)
-from mika_nexus.store import Store
+from mikachan.store import Store
 
 
 def test_target_parser_rejects_posts_and_untrusted_hosts():
@@ -69,7 +69,7 @@ async def test_first_poll_baselines_each_category_and_new_post_notifies(monkeypa
     current = [("posts", "https://www.instagram.com/p/old/", "old")]
     async def items(_target, kind="posts"):
         return list(current)
-    monkeypatch.setattr("mika_nexus.follow.public_items", items)
+    monkeypatch.setattr("mikachan.follow.public_items", items)
     row = service.db.db.execute("SELECT * FROM follows WHERE id=?", (fid,)).fetchone()
     await service.check(row)
     assert bot.messages == []
@@ -99,7 +99,7 @@ async def test_media_mode_queues_public_post(monkeypatch, tmp_path):
     current = [("tweets", "https://x.com/alice/status/1", "hello")]
     async def items(_target, kind="posts"):
         return list(current)
-    monkeypatch.setattr("mika_nexus.follow.public_items", items)
+    monkeypatch.setattr("mikachan.follow.public_items", items)
     row = service.db.db.execute("SELECT * FROM follows WHERE id=?", (fid,)).fetchone()
     await service.check(row)
     current.insert(0, ("tweets", "https://x.com/alice/status/2", "next"))
@@ -126,8 +126,8 @@ async def test_profile_checks_survive_timeline_failure(monkeypatch, tmp_path):
         raise ValueError("public timeline unavailable")
     async def profile(_target):
         return {"bio": "public bio"}
-    monkeypatch.setattr("mika_nexus.follow.public_items", broken_timeline)
-    monkeypatch.setattr("mika_nexus.follow.public_profile", profile)
+    monkeypatch.setattr("mikachan.follow.public_items", broken_timeline)
+    monkeypatch.setattr("mikachan.follow.public_profile", profile)
     row = service.db.db.execute("SELECT * FROM follows WHERE id=?", (fid,)).fetchone()
     await service.check(row)
     assert {r[0] for r in service.db.db.execute(
@@ -136,14 +136,14 @@ async def test_profile_checks_survive_timeline_failure(monkeypatch, tmp_path):
 
 @pytest.mark.asyncio
 async def test_structured_bio_and_stable_avatar(monkeypatch):
-    monkeypatch.setattr("mika_nexus.follow.validate_dns", lambda _url: None)
+    monkeypatch.setattr("mikachan.follow.validate_dns", lambda _url: None)
     async def local_thread(fn, *args):
         return fn(*args)
-    monkeypatch.setattr("mika_nexus.follow.asyncio.to_thread", local_thread)
+    monkeypatch.setattr("mikachan.follow.asyncio.to_thread", local_thread)
     async def extract(_command, _timeout):
         return [[2, {"full_name": "Alice", "biography": "My actual bio",
                           "profile_pic_url": "https://cdn.example/a.jpg?expires=1"}]]
-    monkeypatch.setattr("mika_nexus.follow._extract", extract)
+    monkeypatch.setattr("mikachan.follow._extract", extract)
     value = await public_profile(command_target("instagram alice"))
     assert value == {"name": "Alice", "bio": "My actual bio",
                      "avatar": "https://cdn.example/a.jpg"}

@@ -1,6 +1,6 @@
 # Source research, 2026-10-16
 
-Six public projects were cloned into `/tmp/mika-research` and their relevant implementations inspected. The bot uses its own integration code and pinned dependencies; no implementation was copied into this repository.
+Six public projects were cloned into `/tmp/mikachan-research` and their relevant implementations inspected. The bot uses its own integration code and pinned dependencies; no implementation was copied into this repository.
 
 | Project | Inspected revision | Relevant implementation | Finding used here |
 | --- | --- | --- | --- |

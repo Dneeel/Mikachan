@@ -9,14 +9,14 @@ import pytest
 import zxingcpp
 from PIL import Image
 
-from mika_nexus.bot import App
-from mika_nexus.community import CommunityStore
-from mika_nexus.config import Settings
-from mika_nexus.personality import Mode, mode_for
-from mika_nexus.security import allowed
-from mika_nexus.store import Store
-from mika_nexus.utilities import convert_image, convert_table, decode_codes, qr_png, weather_label
-from mika_nexus.utilities import Utilities
+from mikachan.bot import App
+from mikachan.community import CommunityStore
+from mikachan.config import Settings
+from mikachan.personality import Mode, mode_for
+from mikachan.security import allowed
+from mikachan.store import Store
+from mikachan.utilities import convert_image, convert_table, decode_codes, qr_png, weather_label
+from mikachan.utilities import Utilities
 
 
 def test_numeric_access_and_mode():
@@ -151,7 +151,7 @@ def test_qr_decoder_does_not_visit_encoded_url(monkeypatch):
 
 def test_tgs_renderer_preserves_motion_and_loop(tmp_path):
     import gzip
-    from mika_nexus.render_tgs import render
+    from mikachan.render_tgs import render
 
     # Test-only synthetic moving rectangle, never imported as production content.
     shape = {"v": "5.5.2", "fr": 10, "ip": 0, "op": 3, "w": 100, "h": 100,
@@ -191,7 +191,7 @@ def test_session_ownership_and_prompt_binding(tmp_path):
 
 @pytest.mark.asyncio
 async def test_poetry_callback_rejects_other_actor(tmp_path):
-    from mika_nexus.community import Community
+    from mikachan.community import Community
 
     database = CommunityStore(Store(tmp_path / "state.sqlite").db)
     sid = database.new_session(1, -100, "poem")
@@ -215,7 +215,7 @@ def test_real_english_ocr_when_host_has_tesseract():
     fontpath = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
     if not Path(fontpath).exists():
         pytest.skip("Test font absent")
-    from mika_nexus.utilities import Utilities
+    from mikachan.utilities import Utilities
 
     image = Image.new("RGB", (500, 100), "white")
     ImageDraw.Draw(image).text((15, 15), "HELLO 123", fill="black",

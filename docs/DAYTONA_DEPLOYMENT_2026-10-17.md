@@ -8,7 +8,7 @@ owner allowlist; it is mode `0600` and is not tracked by Git. Groups remain
 disabled until specific group IDs are approved.
 
 On the sandbox, `pytest -q` passed 63 tests, `ruff check .` passed, and
-`mypy src` passed. `mika-nexus doctor` found all required media and OCR tools.
+`mypy src` passed. `mikachan doctor` found all required media and OCR tools.
 Telegram `getMe` matched the intended bot, `getMyCommands` returned the 25
 registered commands, `getWebhookInfo` showed no competing webhook, and an
 outbound message to the owner succeeded. A single polling process established

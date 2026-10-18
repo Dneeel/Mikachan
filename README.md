@@ -1,40 +1,58 @@
 # Mikachan
 
-Mikachan is a private, Telegram-first bot in development. Downloader, Community and Utilities share one aiogram dispatcher, one SQLite database and one bot identity. The existing downloader keeps its `mika_nexus` package and runtime names for compatibility.
+**A private Telegram bot with three integrated domains:** Downloader, Community, and Utilities. One aiogram dispatcher, one SQLite database, one bot identity. Access is denied by default: the owner explicitly allows numeric user IDs, and groups also need their own authorization.
 
-The downloader asks for **✅ Yes / ❌ No** before processing each submitted URL. `/music`, `/search`, and `/podcast` search public catalogs; provider failures are shown without invented results. See the [existing system audit](docs/EXISTING_SYSTEM_AUDIT.md) and [new feature ledger](docs/COMMUNITY_UTILITIES_STATUS.md).
+The active development generation is **`v2`**. The `v1` branch preserves the earlier downloader generation. This repository does not run a general chatbot or respond to ordinary conversation.
 
-## Current build status
+## Install on a server
 
-The current workspace build passes **107 tests** and Ruff. The standalone release manager also passes mypy. New downloader-owned changes on v2 currently produce 39 mypy errors in `bot.py` and `follow.py`; the panel records that result for each release. The earlier Daytona deployment passed 63 tests; Telegram accepted its identity and command list, and an outbound owner message succeeded. Daytona's tier restricts access to external content providers, so live weather, rates, APOD, and downloader source delivery are not verified there. The sandbox is stopped when tests are complete. Direct Gheymat and Wallex market requests succeeded from this workspace, but Telegram delivery of the new quotes and keyed Navasan access remain unverified. See the [Daytona deployment check](docs/DAYTONA_DEPLOYMENT_2026-10-17.md), [new feature ledger](docs/COMMUNITY_UTILITIES_STATUS.md), [market data research](docs/MARKET_DATA_RESEARCH_2026-10-17.md), [Telegram response audit](docs/UX_RESPONSE_AUDIT_2026-10-17.md), [downloader test report](docs/TEST_REPORT.md), and [owner status](docs/OWNER_ACCEPTANCE.md).
+Use a Debian or Ubuntu server with systemd, `sudo`, internet access, and at least 2 GB free disk. The installer installs host media/OCR tools, retrieves the locked `v2` release, runs offline tests, installs one systemd service, and opens the terminal panel. It **does not start the Telegram bot** until Guided setup is complete.
 
-## Commands
+For a public repository, run this single line in an interactive SSH terminal:
 
-Downloader: `/help`, `/search [query]`, `/music [query]`, `/podcast [query]`, `/twitter`, `/instagram`, `/tiktok`, `/youtube`, `/settings`, `/queue`, `/status`, `/cancel [JOB_ID]`, `/admin` (owner only). There is no `/x` command or general `/start` dashboard.
+```bash
+curl -fsSL https://raw.githubusercontent.com/Dneeel/Mikachan/v2/deploy/bootstrap.sh | sudo bash
+```
 
-Community: `/fal` or exact `فال`, `/poem` or exact `شعر`, `/joke`, `/quote`, `/dice`; in groups `/rules`, `/note NAME`, `/groupstats`, `/groupsettings`. Group admins/owner can use `/setrules TEXT`, `/setnote NAME TEXT`, `/delnote NAME`, `/setcmd NAME TEXT`, `/delcmd NAME`, `/welcome on|off|TEXT`, `/nickname NAME` (reply to the member, or omit to remove), `/del`, `/mute` (reply to the target message), `/modlog`, and `/groupsettings culture|notes|utilities on|off`. The cultural catalog starts empty until reviewed content is imported.
+For a private repository, configure a read-only GitHub deploy key first, then use the private-repository command in the [installation guide](docs/INSTALL_UBUNTU.md). Never place a bot token or private key in the command line or Git remote URL.
 
-Utilities: `/qr TEXT` (or reply to text), `/scan`, `/ocr`, `/image png|jpeg|webp`, `/sticker`, `/stickerimage`, `/gif`, `/pack create SHORTNAME|TITLE|EMOJI`, `/pack add SHORTNAME|EMOJI`, `/pack remove`, `/convert json|csv`, `/weather CITY[, COUNTRY]`, `/rate USD EUR`, `/rate BTC USD`, `/rate ASSET IRT` for `USD|EUR|AED|SEKE|GOLD18|USDT|BTC`, exact `دلار`, `سکه`, `ارز`, `طلا`, `تتر`, or `بیت‌کوین`, `/time Asia/Tehran`, `/time add|remove|list`, `/apod`, `/translate en|fa TEXT`. Iranian market reports compare named Toman source quotes. Direct Wallex crypto quotes include the actual last-trade time; relayed cash-market source trade times are unknown unless the optional direct Navasan feed is configured. File tools require a reply to selected media. `/admin provider fiat|crypto NAME` sets a fixed global reference-rate provider. `/groupsettings`, commands, callbacks and exact triggers still require both user and group authorization.
+When installation finishes, choose **Guided setup**. The panel asks for the BotFather token and your **numeric** Telegram owner ID. Additional user IDs and group IDs are optional; press Enter to skip them. Telegram API ID and API hash are **not required** with the default public Bot API. Setup stores secrets in a root-owned configuration file and starts the bot. Reopening Setup shows a warning and saves a snapshot before applying changes.
 
-## Setup in isolated Ubuntu workspace
+Afterward, open the panel at any time with:
 
-For a managed Debian/Ubuntu systemd server, use the [terminal installation and
-release manager](docs/INSTALL_UBUNTU.md). It provides a Textual interface plus
-CLI commands for status, diagnostics, vN branch and same-branch updates,
-specific-commit switching, SQLite-aware rollback, backup, guarded settings,
-and removal. The [design and source review](docs/MANAGER_RESEARCH_2026-10-18.md)
-records its choices and limitations. The workspace steps below remain useful
-for development and offline tests.
+```bash
+mikachan
+```
 
-1. Install Python 3.12+, `uv`, `ffmpeg`, `ffprobe`, and Tesseract in the intended deployment environment. Install `fas` Tesseract language data to enable Persian OCR. yt-dlp, Deno and yt-dlp-ejs are installed through the locked project environment.
-2. Copy `.env.example` to `.env`; set `BOT_TOKEN`, `OWNER_TELEGRAM_ID`, `ALLOWED_TELEGRAM_IDS` (owner plus at most three others). To enable groups, set `PRIVATE_CHATS_ONLY=false` and seed `ALLOWED_GROUP_IDS` with negative numeric group IDs; every user still needs individual allowlisting. Optional Spotify credentials, NASA key, `NAVASAN_API_KEY`, Mommy IDs and translation provider are described in the [feature ledger](docs/COMMUNITY_UTILITIES_STATUS.md). The optional `NAVASAN_REFRESH_SECONDS` defaults to 28,800 seconds to fit the published free monthly quota under continuous operation. Keep `.env` mode `0600`.
-3. Run `UV_CACHE_DIR=/tmp/mika-uv-cache uv sync --locked --extra dev`, then `uv run mika-nexus doctor`, `uv run pytest -q`, and `uv run mika-nexus run`. Import owner-reviewed content with `uv run mika-nexus import-content PATH` only after verifying its source and rights.
-4. Start in `BOT_API_MODE=public`; uploads above 48 MiB are refused. Local Bot API requires deliberate migration and separate server setup (see [installation](docs/INSTALL_UBUNTU.md)).
+The panel has Overview, Settings, Versions, Backups, Service, and System sections. It shows the installed branch and exact commit, service and database health, settings with secrets masked, and available release actions. You can edit the bot token, owner ID, access lists, providers, and other supported settings individually. Same-branch updates work on any `vN` branch; you can also switch to another version branch or a reviewed commit, roll back with a database snapshot, back up, restore, inspect logs, or remove the managed installation. See the [full operations guide](docs/INSTALL_UBUNTU.md).
 
-All public link submissions receive one separate consent prompt per URL, up to five. A No deletes only the bot prompt. A Yes creates a durable job. Ordinary text and Telegram media are ignored outside an exact approved trigger or user-bound interaction.
+## What the bot does
 
-## Design and limitations
+| Domain | Implemented interface |
+| --- | --- |
+| Downloader | Eligible links ask **Yes / No** before creating a durable job. `/search`, `/music`, `/podcast`, `/twitter`, `/instagram`, `/tiktok`, `/youtube`, `/queue`, `/status`, `/cancel`, and settings provide discovery and delivery. There is no `/x` command. |
+| Community | `/fal`, `/poem`, `/joke`, `/quote`, `/dice`; approved groups also have rules, notes, custom commands, welcomes, group statistics, moderation, and nicknames isolated per group. Exact Persian triggers such as `فال` and `شعر` are supported. Cultural catalog entries require reviewed, permissioned content; an empty catalog reports unavailable content. |
+| Utilities | QR creation/scanning, OCR, sticker and image tools, supported file conversion, weather, dates, APOD, deliberate translation, and market rates. `/rate` and exact triggers including `دلار`, `سکه`, and `ارز` cover Iranian market quotes. Provider failures are reported instead of inventing prices. |
 
-SQLite WAL holds consent, jobs, result snapshots, collection browsing, and Telegram file ID cache. The worker allows two concurrent jobs globally and one per user. Direct files are streamed to private job directories. yt-dlp runs only on demand. Search metadata does not cause downloads. Catalog hits can be selected in search or submitted as a link; they are matched to separate public recordings with strict title, artist, and duration checks. They are never represented as Spotify/Apple/Deezer audio bytes.
+Commands, eligible links, exact triggers, valid interaction replies, and authorized callbacks are the only ordinary entry points. In groups, a user must be personally allowed **and** the group must be allowed. Bot-generated interface text is English; authentic Persian cultural content and exact Persian triggers remain Persian.
 
-Current limitations include no automated local Bot API migration, no global RSS discovery/search index, no robust disk reservation or HTTP Range resume, and no reliable anonymous access to every Instagram story, photo, or profile. Some source formats require login or are no longer public. See [security](docs/SECURITY.md) and [dependency notices](docs/DEPENDENCIES.md).
+## Development and verification
+
+```bash
+git clone --branch v2 https://github.com/Dneeel/Mikachan.git
+cd Mikachan
+uv sync --locked --extra dev
+uv run pytest -q
+uv run ruff check .
+uv run mikachan doctor
+```
+
+For a local run, copy `.env.example` to `.env`, set `BOT_TOKEN`, `OWNER_TELEGRAM_ID`, and `ALLOWED_TELEGRAM_IDS` (including the owner), then run `uv run mikachan run`. Set `.env` permissions to `0600`. Do not run a local poller while the systemd service is running for the same bot token.
+
+Current offline checks and known limits are recorded in the [feature ledger](docs/COMMUNITY_UTILITIES_STATUS.md), [system audit](docs/EXISTING_SYSTEM_AUDIT.md), [market research](docs/MARKET_DATA_RESEARCH_2026-10-17.md), and [Telegram response audit](docs/UX_RESPONSE_AUDIT_2026-10-17.md). Offline tests and a successful service start do not establish that every external provider or Telegram media flow works live. Several providers require credentials or source access, and anonymous source downloads can fail when a provider changes. `mypy src` currently reports pre-existing typing errors in downloader-owned files; release records expose this advisory result.
+
+## Design
+
+Mikachan keeps downloader, community, and utility handlers inside one Telegram update consumer. SQLite WAL stores authorization, job state, group settings, and caches. Media tools run on demand with bounded work and temporary files. Release management uses a separate, stable panel installation so it can inspect or repair a broken bot environment. A managed installation keeps code, state, backups, and secrets in separate directories; the [operations guide](docs/INSTALL_UBUNTU.md) lists them.
+
+[Security](docs/SECURITY.md) · [Dependencies and notices](docs/DEPENDENCIES.md) · [Architecture boundaries](docs/ARCHITECTURE_BOUNDARIES.md)

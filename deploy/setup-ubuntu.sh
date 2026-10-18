@@ -7,8 +7,8 @@ case "${1:---dry-run}" in
     ;;
   --install)
     command -v uv >/dev/null
-    UV_CACHE_DIR="${UV_CACHE_DIR:-/tmp/mika-uv-cache}" uv sync --extra dev
-    uv run mika-nexus doctor
+    UV_CACHE_DIR="${UV_CACHE_DIR:-/tmp/mikachan-uv-cache}" uv sync --extra dev
+    uv run mikachan doctor
     uv run pytest -q
     ;;
   *) echo 'Usage: setup-ubuntu.sh [--dry-run|--install]' >&2; exit 2;;

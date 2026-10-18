@@ -325,7 +325,7 @@ class Community:
                     "FROM community_audit WHERE chat_id=? ORDER BY id DESC LIMIT 10", (chat,))
                 lines = [f"{time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(r[4]))} · "
                          f"{r[0]} · {r[1]} · {r[2] or '-'} · {r[3]}" for r in rows]
-                await m.reply(html.escape("\n".join(lines) or "No Mika actions recorded."))
+                await m.reply(html.escape("\n".join(lines) or "No Mikachan actions recorded."))
             return True
         name = cmd.lstrip("/")
         if NAME.fullmatch(name):

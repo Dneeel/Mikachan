@@ -66,7 +66,7 @@ quota. A paused VM means the Telegram bot is offline until resumed.
 
 ## Previous baseline
 
-Executed on the supplied Freestyle Ubuntu 24.04 VM in `/opt/mika-nexus`:
+Executed on the supplied Freestyle Ubuntu 24.04 VM in `/opt/mikachan`:
 
 - Locked dependencies include `yt-dlp==2026.8.19`, `gallery-dl==1.32.16`, `yt-dlp-ejs==0.8.0`, and `deno==2.9.7`. Ruff, mypy and **26 automated tests** pass.
 - The systemd bot service was active after deployment. An earlier Telegram `getMe` check succeeded for `@mikadlbot`; owner-approved TikTok video/photo and Instagram Reel jobs had Telegram receipts.

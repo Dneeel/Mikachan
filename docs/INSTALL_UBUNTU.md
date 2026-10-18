@@ -1,139 +1,96 @@
-# Mikachan v2 on a Debian/Ubuntu systemd server
+# Install and manage Mikachan on Ubuntu or Debian
 
-The terminal manager is the supported path for **new panel-managed installations**.
-It uses one systemd service and one Telegram polling consumer. The bot remains a
-single process; the panel runs only when an operator opens it.
+This guide covers a **systemd** host. Use an interactive SSH session with sudo. Have at least 2 GB of free space, internet access to GitHub/PyPI, and the BotFather token and numeric owner Telegram ID ready. The default public Telegram Bot API needs **neither** Telegram API ID nor API hash.
 
-## Start the panel
+## Public repository: one command
 
 ```bash
-git clone --branch v2 --single-branch https://github.com/Dneeel/Mikachan.git Mikachan
-cd Mikachan
-sudo bash deploy/manage.sh
+curl -fsSL https://raw.githubusercontent.com/Dneeel/Mikachan/v2/deploy/bootstrap.sh | sudo bash
 ```
 
-The launcher needs `python3` and `python3-venv` and creates a private manager
-environment at `/var/cache/mikachan-panel/venv`. It installs pinned `textual` and
-`uv` there. `sudo bash deploy/manage.sh preflight` is dependency-free and works
-before that bootstrap. The bot's Python environment is separate from the panel.
+Read the [bootstrap script](../deploy/bootstrap.sh) before running it if you prefer. It installs Git, Python venv support, FFmpeg, Tesseract with Persian language data, and Cairo; copies the panel to a stable location; retrieves the locked `v2` release; runs pytest and Ruff; creates a disabled service; and opens the panel. Setup then collects the two required Telegram values and starts the service. Installation stops if systemd is unavailable, an unmanaged service is present, or an existing service has the new managed unit name.
 
-Choose **Preflight** and, on Debian/Ubuntu, **Install OS tools** if media/OCR
-dependencies are missing. The panel checks for systemd, Git, uv, flock, ffmpeg,
-ffprobe, Tesseract with Persian data, Cairo, and at least 2 GB free disk. It
-cannot install a systemd service in a container or sandbox without systemd as
-PID 1. The host must also reach Telegram and approved providers; the panel
-cannot change a cloud account's network policy.
+The first installation can take several minutes because Python packages and media tools must be fetched. The panel reports progress and errors. Run `mikachan` to reopen it.
 
-Choose **Install v2** and enter the bot token, numeric owner ID, authorized
-numeric user IDs (including the owner), and optional negative group IDs.
-The token input is masked. Group IDs do not authorize their members; the bot's
-individual allowlist remains required. Advanced or noninteractive setup can use
-a private file:
+## Private repository: read-only deploy key
+
+Create an SSH deploy key dedicated to this server. Add **only its public half** in GitHub repository **Settings → Deploy keys**, with write access **off**. Keep the private key on the server with mode `0600`. For example:
 
 ```bash
-chmod 600 /root/mikachan-install.env
-sudo bash deploy/manage.sh install --config /root/mikachan-install.env
+sudo install -d -m 0700 /root/.ssh
+sudo ssh-keygen -t ed25519 -f /root/.ssh/mikachan-deploy -N '' -C mikachan-deploy
+sudo chmod 0600 /root/.ssh/mikachan-deploy
+sudo cat /root/.ssh/mikachan-deploy.pub
 ```
 
-Use `.env.example` as the key reference. The manager overrides `DATA_DIR` with
-the persistent state path. Never put the bot token in a shell argument or in
-source control. The panel validates values against the selected release's
-`Settings` before starting it.
+Copy that public line into GitHub. Configure a dedicated SSH host alias in `/root/.ssh/config` so other GitHub credentials stay separate:
 
-## Layout and service
+```sshconfig
+Host github-mikachan
+    HostName github.com
+    User git
+    IdentityFile /root/.ssh/mikachan-deploy
+    IdentitiesOnly yes
+```
+
+Set that config to mode `0600`. Verify GitHub's SSH host fingerprint against its published fingerprint before accepting the first connection, then test the deploy key with `sudo ssh -T git@github-mikachan`. A GitHub success response may still exit nonzero because shell access is disabled.
+
+Now install from the private repository in **one shell line** (after key setup):
+
+```bash
+sudo bash -c 'd=$(mktemp -d); trap '\''rm -rf "$d"'\'' EXIT; git clone --depth 1 --branch v2 git@github-mikachan:Dneeel/Mikachan.git "$d/repo" && bash "$d/repo/deploy/bootstrap.sh" --source "$d/repo" --repo-url git@github-mikachan:Dneeel/Mikachan.git'
+```
+
+The panel saves the SSH Git remote for later updates. Keep the deploy key in place while this server needs to fetch updates. Never put it in `.env`, a Git remote URL, command history, or a backup shared with others. Revoking the key stops future fetches; it does not delete the installed release.
+
+## First setup
+
+1. Select **Guided setup**. Enter the BotFather token. It identifies the bot and is hidden while typing.
+2. Enter the **numeric owner Telegram user ID**. This grants global owner controls; names and usernames are not accepted.
+3. Optionally enter additional numeric user IDs, comma separated. Press Enter for owner-only access. Maximum total: four.
+4. Optionally enter negative numeric group IDs, comma separated. Press Enter for private chats only. Group membership never authorizes a user automatically.
+
+The manager validates the complete configuration, saves a SQLite/configuration snapshot, and starts the service. It reports a service-start failure without claiming Telegram live acceptance. Use **Live diagnostics** to check `getMe` separately. Re-entering Setup displays a warning and requires typed confirmation; it preserves database content and saves an undo snapshot. Use Settings for a single change instead.
+
+## Everyday controls
+
+Run `mikachan` from a server terminal. The panel has these sections:
+
+| Section | Actions |
+| --- | --- |
+| Overview | Installed branch, exact commit, service, setup, access, database, quality checks; Guided setup; live diagnostics |
+| Settings | View every supported configuration key with secrets masked; edit one key, including token, owner, allowlists, group IDs, and optional providers |
+| Versions | Refresh available `vN` branches, update current branch (including later commits on `v4` or another branch), switch branch or exact reachable commit, rollback, prune old code |
+| Backups | Save, list, and restore SQLite/configuration snapshots |
+| Service | Start, stop, restart, and inspect recent logs |
+| System | Host checks, install missing tools, recover interrupted activation, remove code, or purge managed data |
+
+A version switch takes a consistent SQLite snapshot after stopping the bot. A failed activation restores the previous code and data. A rollback intentionally restores the earlier snapshot and discards later database changes. Regular backups contain the SQLite database and runtime settings; large downloaded job artifacts are not duplicated. Review a target branch before switching to it, especially across major schema changes.
+
+The panel stores:
 
 | Path | Purpose |
 | --- | --- |
-| `/opt/mika-nexus/repository.git` | Local bare mirror of existing `vN` branches |
-| `/opt/mika-nexus/releases/<commit>` | Git worktree and locked bot environment |
-| `/opt/mika-nexus/current` | Atomic symlink to active release |
-| `/opt/mika-nexus/manifest.json` | Installed branch, exact commit and activation history |
-| `/var/lib/mika-nexus` | Persistent SQLite database and job artifacts, owned by the bot user |
-| `/var/backups/mika-nexus` | Root-only SQLite/config snapshots |
-| `/etc/mika-nexus.env` | Runtime secrets, mode `0640`, owner root/group `mika-nexus` |
-| `/etc/systemd/system/mika-nexus.service` | One hardened service, with a polling lock |
+| `/usr/local/bin/mikachan` | Terminal command |
+| `/usr/local/lib/mikachan-panel` | Stable panel code; independent of active bot release |
+| `/opt/mikachan/repository.git` | Local Git mirror |
+| `/opt/mikachan/releases/<commit>` | Locked Python environment for each release |
+| `/opt/mikachan/current` | Symlink to active release |
+| `/opt/mikachan/manifest.json` | Branch, commit, and activation history |
+| `/var/lib/mikachan` | SQLite database and job data |
+| `/var/backups/mikachan` | Manager snapshots |
+| `/etc/mikachan.env` | Bot settings and secrets, root-owned, group-readable by bot only |
+| `/etc/mikachan-manager.json` | Git remote used for updates |
+| `/etc/systemd/system/mikachan.service` | Single bot service and polling lock |
 
-The code and its Python environment are separated from state and configuration.
-The package and systemd service retain the existing `mika-nexus` runtime name;
-the product remains Mikachan.
+The bot service runs as an unprivileged `mikachan` system user. The panel needs sudo because it manages that service, private settings, and backups. **Remove bot code** keeps data and backups. **Delete all managed data** removes code, configuration, SQLite state, and backups after typed confirmation. Keep external backups before purging. A full purge also removes the bootstrap-installed panel launcher, panel environment, and manager remote configuration. Install again with the one-line bootstrap if needed.
 
-Install checks out a specific commit from GitHub's `v2`, runs `uv sync --locked
---extra dev`, the full pytest suite and Ruff as gates, records mypy's result,
-then validates configuration. The current downloader changes have known mypy
-errors; the panel reports them rather than silently calling that check clean.
-Only then does it activate and start the service. An update stages and checks
-the next release **before stopping the running service**. It stops the service,
-uses SQLite's backup API to snapshot the database, switches the `current`
-symlink atomically, then verifies that the service stays active. A failed
-activation restores the prior code, database and settings. If the service was
-intentionally stopped, update and rollback keep it stopped.
+## Noninteractive and development use
 
-Snapshots include SQLite and `/etc/mika-nexus.env`. They do not duplicate
-potentially large job media in `/var/lib/mika-nexus/jobs`. For a full filesystem
-backup, stop the service and back up the entire state directory separately.
-Restoring a prior SQLite snapshot discards later database changes. The panel
-saves an undo snapshot before manual restore or rollback.
+`mikachan status`, `mikachan preflight`, `mikachan diagnostics --live`, and `mikachan logs` work from the shell. `mikachan update` updates the active branch; `mikachan versions --refresh` lists remote major branches. Run `mikachan --help` for the complete CLI. Configuration values are never passed as CLI arguments by the panel. Avoid placing tokens directly in shell commands; use the masked panel input or a private `0600` config file.
 
-## Commands and version semantics
+For a development checkout, run `uv sync --locked --extra dev`, `uv run pytest -q`, `uv run ruff check .`, and `uv run mikachan doctor`. A local poller must not run alongside the managed service for the same bot token.
 
-```bash
-sudo bash deploy/manage.sh status
-sudo bash deploy/manage.sh diagnostics --live
-sudo bash deploy/manage.sh versions --refresh
-sudo bash deploy/manage.sh update
-sudo bash deploy/manage.sh switch v4
-sudo bash deploy/manage.sh switch v4 --commit FULL_40_CHARACTER_SHA
-sudo bash deploy/manage.sh rollback
-sudo bash deploy/manage.sh backups
-sudo bash deploy/manage.sh backup
-sudo bash deploy/manage.sh restore SNAPSHOT_ID
-sudo bash deploy/manage.sh prune
-sudo bash deploy/manage.sh prune --apply
-sudo bash deploy/manage.sh logs --lines 100
-```
+## Existing installations
 
-`update` fetches the newest commit on the **currently installed major branch**;
-it works the same way on v2, v4, or another existing `vN`. It refuses an
-unexpected remote branch rewrite. `switch` selects another existing version
-branch or a full commit reachable from that branch. It does not create `v3` or
-any other new product branch. `rollback` activates the preceding installed
-release and its pre-activation SQLite/config snapshot, even without network.
-`prune` previews old worktrees and `--apply` removes worktrees outside the three
-most recently activated distinct commits; it retains the current and previous
-release and **does not delete backups**.
-
-`diagnostics --live` runs the local doctor, SQLite quick check, host checks, and
-Telegram `getMe`. It does not start a second bot or consume provider APIs.
-An active systemd service and passing offline checks do not prove every external
-provider works. Run feature-specific live acceptance on the target network.
-
-`config` masks secret fields; `set KEY` prompts for a new value without putting
-secrets in shell history. Authorization setting changes synchronize the SQLite
-allowlist and cancel pending jobs for revoked users or groups. The owner ID,
-data path and local Bot API migration are excluded from this generic setting
-editor. For the official local Bot API: obtain Telegram `API_ID` and `API_HASH`,
-bind the official server to loopback, stop public polling, call Telegram Bot API
-`logOut`, then change mode and verify. Never run two consumers with one token.
-
-## Failure, legacy installation, and removal
-
-- If an update fails before activation, the running release is untouched. If
-  activation fails, the manager attempts to restore the previous release and
-  snapshot. `recover` handles an interrupted activation journal after a crash.
-- If first installation fails before a manifest is committed, `status` shows
-  **incomplete install**. `abort-install` clears only that panel-created code and
-  unit, retaining state/config/backups, so installation can be retried.
-- If GitHub or PyPI is unreachable, new staging cannot finish. The current
-  installed release and an existing rollback remain usable.
-- If `status` finds a checkout or systemd unit outside the panel's managed
-  layout, **installation refuses to overwrite it**. An older `/opt/mika-nexus`
-  checkout requires a reviewed migration of its unit, environment file and
-  SQLite state. Do not point the panel at it and assume it was panel-installed.
-- `sudo bash deploy/manage.sh remove --yes` stops and removes only the managed
-  service and code. It retains config, database and backups for reinstall.
-  `sudo bash deploy/manage.sh remove --purge --yes` also deletes those retained
-  paths after an additional typed confirmation. Other projects, users and
-  system packages are never removed.
-
-The older `deploy/setup-ubuntu.sh --install` remains a developer workspace
-setup/test helper; it is not the systemd release manager.
+The one-line bootstrap refuses to overwrite an unmanaged or older managed service. Stop its poller, take a verified SQLite backup that includes WAL contents, preserve its configuration and job directory, and migrate paths and unit files during a planned maintenance window. Reusing a bot token in two simultaneous pollers can drop or duplicate updates. The automatic first-install flow does not claim to migrate an existing state directory.

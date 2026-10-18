@@ -80,11 +80,11 @@ def deployment(tmp_path: Path) -> tuple[FakeManager, Path, str]:
     (source / "uv.lock").write_text("fixture", encoding="utf-8")
     first = commit(source, "first")
     git("branch", "v1", cwd=source)
-    paths = Paths(base=tmp_path / "opt" / "mika-nexus",
-                  state=tmp_path / "var" / "lib" / "mika-nexus",
-                  backups=tmp_path / "var" / "backups" / "mika-nexus",
-                  env=tmp_path / "etc" / "mika-nexus.env",
-                  unit=tmp_path / "etc" / "systemd" / "mika-nexus.service")
+    paths = Paths(base=tmp_path / "opt" / "mikachan",
+                  state=tmp_path / "var" / "lib" / "mikachan",
+                  backups=tmp_path / "var" / "backups" / "mikachan",
+                  env=tmp_path / "etc" / "mikachan.env",
+                  unit=tmp_path / "etc" / "systemd" / "mikachan.service")
     return FakeManager(paths, source), source, first
 
 
@@ -95,7 +95,7 @@ def install(manager: FakeManager) -> None:
 
 
 def database(manager: FakeManager) -> Path:
-    path = manager.paths.state / "nexus.sqlite"
+    path = manager.paths.state / "mikachan.sqlite"
     with sqlite3.connect(path) as db:
         db.executescript("""
         CREATE TABLE access (user_id INTEGER PRIMARY KEY);
@@ -338,7 +338,7 @@ def test_wal_snapshot_includes_uncheckpointed_committed_rows(
         db.execute("UPDATE notes SET value='in-wal'")
         db.commit()
         snapshot = manager.backup()
-        assert note(manager.paths.backups / snapshot / "nexus.sqlite") == "in-wal"
+        assert note(manager.paths.backups / snapshot / "mikachan.sqlite") == "in-wal"
     finally:
         db.close()
 
@@ -368,3 +368,57 @@ def test_manager_validates_against_real_runtime_settings(tmp_path: Path) -> None
         manager._validate_config({**values, "PYTHONPATH": "/tmp/other"}, release)
     with pytest.raises(ManagerError, match="Owner and allowlist"):
         manager._validate_config({**values, "OWNER_TELEGRAM_ID": "somebody"}, release)
+
+
+def test_code_install_then_setup_and_owner_change(
+        deployment: tuple[FakeManager, Path, str]) -> None:
+    manager, _, _ = deployment
+    manager.install()
+    assert manager.status()["setup_required"]
+    assert manager.status()["service"] == "inactive"
+    with pytest.raises(ManagerError, match="Run Setup"):
+        manager.service("start")
+    token = "12345:" + "x" * 30
+    manager.setup({"BOT_TOKEN": token, "OWNER_TELEGRAM_ID": "42",
+                   "ALLOWED_TELEGRAM_IDS": "42", "ALLOWED_GROUP_IDS": ""})
+    assert manager.status()["service"] == "active"
+    assert manager.config()["BOT_TOKEN"] == "(set)"
+    database(manager)
+    manager.set_config("OWNER_TELEGRAM_ID", "77")
+    with sqlite3.connect(manager.paths.state / "mikachan.sqlite") as db:
+        assert {row[0] for row in db.execute("SELECT user_id FROM access")} == {77}
+    assert manager.config()["OWNER_TELEGRAM_ID"] == "77"
+    assert len(manager.backups()) >= 2
+
+
+def test_setup_again_retains_database_and_updates_allowlist(
+        deployment: tuple[FakeManager, Path, str]) -> None:
+    manager, _, _ = deployment
+    install(manager)
+    path = database(manager)
+    manager.setup({"BOT_TOKEN": "99999:" + "y" * 30,
+                   "OWNER_TELEGRAM_ID": "88", "ALLOWED_TELEGRAM_IDS": "88",
+                   "ALLOWED_GROUP_IDS": ""})
+    assert note(path) == "original"
+    with sqlite3.connect(path) as db:
+        assert {row[0] for row in db.execute("SELECT user_id FROM access")} == {88}
+    assert manager.config()["OWNER_TELEGRAM_ID"] == "88"
+    assert manager.config()["BOT_TOKEN"] == "(set)"
+
+
+def test_failed_repeat_setup_restores_config_database_and_service(
+        deployment: tuple[FakeManager, Path, str]) -> None:
+    manager, _, _ = deployment
+    install(manager)
+    path = database(manager)
+    prior = manager.paths.env.read_text()
+    manager.fail_next_start = True
+    with pytest.raises(ManagerError, match="did not stay active"):
+        manager.setup({"BOT_TOKEN": "99999:" + "y" * 30,
+                       "OWNER_TELEGRAM_ID": "88", "ALLOWED_TELEGRAM_IDS": "88",
+                       "ALLOWED_GROUP_IDS": ""})
+    assert manager.paths.env.read_text() == prior
+    assert note(path) == "original"
+    assert manager.status()["service"] == "active"
+    with sqlite3.connect(path) as db:
+        assert {row[0] for row in db.execute("SELECT user_id FROM access")} == {42}

@@ -10,12 +10,12 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
-from mika_nexus.bot import App
-from mika_nexus.config import Settings
-from mika_nexus.market_prices import (MarketPrices, parse_market_response,
+from mikachan.bot import App
+from mikachan.config import Settings
+from mikachan.market_prices import (MarketPrices, parse_market_response,
                                       parse_navasan_response, parse_wallex_response)
-from mika_nexus.store import Store
-from mika_nexus.utilities import Utilities
+from mikachan.store import Store
+from mikachan.utilities import Utilities
 
 
 def row(symbol: str, price: str, *, source: str = "TGJU",

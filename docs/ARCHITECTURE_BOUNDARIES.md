@@ -6,12 +6,12 @@ This historical handoff describes the pre-integration downloader checkout. For t
 
 | Path | Current responsibility | Change owner |
 | --- | --- | --- |
-| `src/mika_nexus/__main__.py`, `cli.py` | One `mika-nexus` CLI; `run` starts the Telegram bot, `doctor` checks local dependencies/configuration. | Integration for future shared bootstrap; downloader for current defects by agreement. |
-| `src/mika_nexus/bot.py` | One aiogram `Dispatcher` and `Router`; command, eligible-link, session-text, and callback handling; starts one polling consumer and the downloader worker. | Shared routing/authorization changes require integration coordination; downloader retains its current handlers until a reviewed contract exists. |
-| `src/mika_nexus/security.py`, `config.py` | Numeric sender allowlist, private-chat policy, URL validation, runtime settings. | Integration for cross-domain auth/config; downloader for provider and URL-specific fixes by agreement. |
-| `src/mika_nexus/store.py` | SQLite WAL access, confirmations, jobs, search sessions, collections, receipts, cache, preferences. | Shared schema/migration decisions require integration coordination; downloader owns existing job behavior. |
-| `src/mika_nexus/search.py`, `catalog.py`, `podcasts.py`, `matching.py`, `music_ui.py` | Federated discovery, catalog identity, podcast resolution, recording matching, lyrics and music UI metadata. | Downloader. |
-| `src/mika_nexus/jobs.py`, `media.py` | Bounded job scheduling, extraction/verification, Telegram media delivery and receipt recovery. | Downloader; future shared job/output contracts require integration review. |
+| `src/mikachan/__main__.py`, `cli.py` | One `mikachan` CLI; `run` starts the Telegram bot, `doctor` checks local dependencies/configuration. | Integration for future shared bootstrap; downloader for current defects by agreement. |
+| `src/mikachan/bot.py` | One aiogram `Dispatcher` and `Router`; command, eligible-link, session-text, and callback handling; starts one polling consumer and the downloader worker. | Shared routing/authorization changes require integration coordination; downloader retains its current handlers until a reviewed contract exists. |
+| `src/mikachan/security.py`, `config.py` | Numeric sender allowlist, private-chat policy, URL validation, runtime settings. | Integration for cross-domain auth/config; downloader for provider and URL-specific fixes by agreement. |
+| `src/mikachan/store.py` | SQLite WAL access, confirmations, jobs, search sessions, collections, receipts, cache, preferences. | Shared schema/migration decisions require integration coordination; downloader owns existing job behavior. |
+| `src/mikachan/search.py`, `catalog.py`, `podcasts.py`, `matching.py`, `music_ui.py` | Federated discovery, catalog identity, podcast resolution, recording matching, lyrics and music UI metadata. | Downloader. |
+| `src/mikachan/jobs.py`, `media.py` | Bounded job scheduling, extraction/verification, Telegram media delivery and receipt recovery. | Downloader; future shared job/output contracts require integration review. |
 | `tests/` | Existing downloader behavior and adapter regressions. | Downloader for existing tests; future domain owners add their own tests. |
 | `pyproject.toml`, `uv.lock`, `.env.example` | Shared dependency and runtime configuration surface. | Serialize edits through integration review. |
 | `deploy/`, `docs/INSTALL_UBUNTU.md` | Existing downloader deployment templates and instructions. | Integration/release owner before any integrated deployment. |
@@ -31,8 +31,13 @@ There is no root `AGENTS.md`, `CONTRIBUTING` file, or tracked GitHub Actions wor
 
 `v1` is the retired downloader-only baseline; preserve it without further development. `v2` is the **only active development branch** for both Main Codex and Downloader Codex. Commit ordinary fixes, features, and documentation directly to the latest `v2` after checking its current HEAD and reconciling concurrent work. Never create local or remote task, feature, fix, agent, experiment, or PR branches. Version branches are named `v1`, `v2`, `v3`, and so on; only the owner may authorize a new major-generation branch. Do not create `main` or `v3` under the current policy. Before editing the dispatcher, authorization, storage schema, entrypoint, dependencies, environment template, deployment, or project-wide guidance, coordinate with Main Codex as integration owner. If a shared-file conflict cannot be safely reconciled, stop that edit rather than overwrite another agent's work. No production release should run until one reviewed intake path owns each update.
 
-The integration owner should first agree on command/callback ownership, numeric authorization in groups, shared database migrations, a single Telegram intake, and a future output/persona contract. Conceptual seams are an authorization check, one update router/feature registry, event-based wording, a downloader job service, and a Telegram output gateway. These are interface discussions, not implemented classes. Future community, utility, entertainment and personality work belongs to their designated agents.
+The integration owner should first agree on command/callback ownership, numeric authorization in groups, shared database migrations, a single Telegram intake, and a future output/persona contract. Conceptual seams are an authorization check, one update router/feature registry, event-based wording, a downloader job service, and a Telegram output gateway. These are interface discussions, not implemented classes. Community, Utilities and personality are integrated in `v2`; subsequent feature work follows the same shared routing and authorization boundaries.
 
-## Legacy internal identifiers
+## Current identity and release manager
 
-`mika_nexus` imports, the `mika-nexus` package/console script, `nexus.sqlite`, and `deploy/mika-nexus.service` remain intentionally intact. Renaming these would affect imports, persistent state and service configuration. The repository and product can be named Mikachan without migrating those runtime identifiers. User-facing bot strings still contain the old label and require a separately reviewed product/UI change; this handoff does not change production bot settings.
+The active package, CLI, SQLite filename and systemd unit use the Mikachan name.
+The standalone terminal manager installs one bot release under `/opt/mikachan`,
+with state and backups in separate persistent directories. It never starts a
+second Telegram update consumer. Community and Utilities are integrated in the
+same `v2` dispatcher, and downloader internals remain owned by the downloader
+maintainer. The retired `v1` branch received only identity cleanup.

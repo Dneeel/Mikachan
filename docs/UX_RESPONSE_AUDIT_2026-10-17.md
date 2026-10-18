@@ -39,7 +39,7 @@ The personality contract has two templates (`ready`, `unavailable`) but only `re
 | `/setrules`, `/setnote`, `/setcmd`, `/nickname` by admin | `Rules saved.`, `Saved.`, `Saved.`, `Group nickname saved.` respectively; custom command returns exactly the owner/admin stored text. |
 | `/del`, `/mute` by admin | Replies `completed` on Telegram success, `failed: ExceptionType` on failure; missing/invalid target says `Reply to a non-admin member's message.` `/mute` lasts 10 minutes. |
 | `/groupstats` | `Observed authorized message requests to Mikachan in this group, last 30 UTC days: N. Distinct requesters: M. Button actions and ordinary conversation are not counted.` |
-| `/modlog` by admin when empty | `No Mika actions recorded.` (legacy name remains in this one message). |
+| `/modlog` by admin when empty | `No Mikachan actions recorded.` (legacy name remains in this one message). |
 
 ## Utilities presentation
 
@@ -73,6 +73,6 @@ Cash FX is distinct from USDT. Quotes are informational, not executable offers.
 
 ## Design and product assessment
 
-The bot currently looks like a functional Telegram command interface. Search menus and downloader confirmations have useful buttons and clear progress. Community and Utilities responses are mostly unstyled plain text; `/help` is one dense block, long market responses end in repeated technical caveats, and successful file tools often send an attachment without a caption. Personality is only visible in `/help`, so the promised calm, selectively affectionate character is barely perceptible. `/modlog` still says `Mika`, and the Transcript button promises a future capability. English interface text complies with the product decision; Persian trigger strings and imported cultural text are intentional exceptions.
+The bot currently looks like a functional Telegram command interface. Search menus and downloader confirmations have useful buttons and clear progress. Community and Utilities responses are mostly unstyled plain text; `/help` is one dense block, long market responses end in repeated technical caveats, and successful file tools often send an attachment without a caption. Personality is only visible in `/help`, so the promised calm, selectively affectionate character is barely perceptible. The moderation empty-state wording was corrected after this audit; the Transcript button still promises a future capability. English interface text complies with the product decision; Persian trigger strings and imported cultural text are intentional exceptions.
 
-No visual redesign or new capability was added as part of this audit. Proposed presentation work for owner approval: concise command-specific help; a shared event wording contract across Community and Utilities; consistent headings, compact market cards with an optional detail button; replacing the inactive Transcript button with an honest unavailable state; removing the legacy `Mika` wording. Such changes should keep numeric authorization, exact triggers, and the existing downloader consent flow intact.
+No visual redesign or new capability was added as part of this audit. Proposed presentation work for owner approval: concise command-specific help; a shared event wording contract across Community and Utilities; consistent headings, compact market cards with an optional detail button; replacing the inactive Transcript button with an honest unavailable state; checking all branding for consistency. Such changes should keep numeric authorization, exact triggers, and the existing downloader consent flow intact.

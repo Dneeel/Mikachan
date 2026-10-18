@@ -40,7 +40,7 @@ async def verified_lyrics(title: str, creator: str, duration: int | None = None)
                 response = await client.get(
                     "https://lrclib.net/api/search",
                     params={"track_name": wanted_title, "artist_name": wanted_artist},
-                    headers={"User-Agent": "MIKA-NEXUS/1.0 (lyrics lookup)"},
+                    headers={"User-Agent": "Mikachan/2.0 (lyrics lookup)"},
                 )
                 response.raise_for_status()
                 payload = response.json()

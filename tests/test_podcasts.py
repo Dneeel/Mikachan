@@ -6,7 +6,7 @@ from urllib.parse import quote
 
 import httpx
 
-from mika_nexus.podcasts import resolve_episode_link
+from mikachan.podcasts import resolve_episode_link
 
 
 class CastboxEpisodeTests(unittest.IsolatedAsyncioTestCase):
@@ -30,8 +30,8 @@ class CastboxEpisodeTests(unittest.IsolatedAsyncioTestCase):
 
         transport = httpx.MockTransport(handler)
         with (
-            patch("mika_nexus.podcasts.validate_dns"),
-            patch("mika_nexus.podcasts.httpx.AsyncClient",
+            patch("mikachan.podcasts.validate_dns"),
+            patch("mikachan.podcasts.httpx.AsyncClient",
                   side_effect=lambda **kw: original_client(transport=transport, **kw)),
         ):
             result = await resolve_episode_link("https://castbox.fm/vi/1012217789")

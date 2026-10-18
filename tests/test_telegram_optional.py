@@ -6,13 +6,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 try:
-    from mika_nexus.bot import App, public_media_result
-    from mika_nexus.jobs import extractor_error
+    from mikachan.bot import App, public_media_result
+    from mikachan.jobs import extractor_error
 except ImportError:
     App = None
 
-from mika_nexus.config import Settings
-from mika_nexus.store import Store
+from mikachan.config import Settings
+from mikachan.store import Store
 
 
 class FakePrompt:

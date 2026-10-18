@@ -7,7 +7,7 @@ from .config import ProviderSettings, Settings
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(prog="mika-nexus")
+    p = argparse.ArgumentParser(prog="mikachan")
     p.add_argument("command", choices=["run", "doctor", "import-content"])
     p.add_argument("path", nargs="?")
     args = p.parse_args()
@@ -17,7 +17,7 @@ def main() -> None:
         from .community import CommunityStore
         from .store import Store
 
-        store = Store(Settings().data_dir / "nexus.sqlite")  # type: ignore[call-arg]
+        store = Store(Settings().data_dir / "mikachan.sqlite")  # type: ignore[call-arg]
         count = CommunityStore(store.db).import_content(Path(args.path))
         print(f"Imported {count} reviewed content items")
         return

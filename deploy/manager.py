@@ -37,7 +37,9 @@ SHA = re.compile(r"[0-9a-f]{40}\Z")
 SNAPSHOT = re.compile(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}\Z")
 MANAGED = "Mikachan manager schema 1\n"
 EDITABLE = {
-    "BOT_TOKEN", "ALLOWED_TELEGRAM_IDS", "ALLOWED_GROUP_IDS", "MOMMY_TELEGRAM_IDS",
+    "BOT_TOKEN", "OWNER_TELEGRAM_ID", "ALLOWED_TELEGRAM_IDS", "ALLOWED_GROUP_IDS",
+    "MOMMY_TELEGRAM_IDS", "BOT_API_MODE", "LOCAL_BOT_API_URL",
+    "TELEGRAM_API_ID", "TELEGRAM_API_HASH",
     "PRIVATE_CHATS_ONLY", "MAX_ACTIVE_DOWNLOADS", "MAX_ACTIVE_PER_USER",
     "MAX_LINKS_PER_MESSAGE", "SEARCH_PAGE_SIZE", "SEARCH_SESSION_TTL_SECONDS",
     "CONFIRMATION_TTL_SECONDS", "SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET",
@@ -50,7 +52,7 @@ ENV_KEYS = EDITABLE | {
     "HTTPS_PROXY", "NO_PROXY", "SSL_CERT_FILE",
 }
 PRIVATE_KEYS = {"BOT_TOKEN", "SPOTIFY_CLIENT_SECRET", "NASA_API_KEY", "NAVASAN_API_KEY",
-                "TRANSLATION_API_KEY"}
+                "TRANSLATION_API_KEY", "TELEGRAM_API_HASH"}
 
 
 class ManagerError(RuntimeError):
@@ -59,11 +61,11 @@ class ManagerError(RuntimeError):
 
 @dataclass(frozen=True)
 class Paths:
-    base: Path = Path("/opt/mika-nexus")
-    state: Path = Path("/var/lib/mika-nexus")
-    backups: Path = Path("/var/backups/mika-nexus")
-    env: Path = Path("/etc/mika-nexus.env")
-    unit: Path = Path("/etc/systemd/system/mika-nexus.service")
+    base: Path = Path("/opt/mikachan")
+    state: Path = Path("/var/lib/mikachan")
+    backups: Path = Path("/var/backups/mikachan")
+    env: Path = Path("/etc/mikachan.env")
+    unit: Path = Path("/etc/systemd/system/mikachan.service")
 
     @property
     def repo(self) -> Path:
@@ -155,10 +157,19 @@ def _ids(raw: str, *, negative: bool = False) -> set[int]:
 
 
 class Manager:
-    def __init__(self, paths: Paths = Paths(), *, repo_url: str = OFFICIAL_REPO,
+    def __init__(self, paths: Paths = Paths(), *, repo_url: str | None = None,
                  require_root: bool = True, uv: str | None = None,
                  on_event: Callable[[str], None] | None = None):
         self.paths = paths
+        if repo_url is None:
+            options = Path("/etc/mikachan-manager.json")
+            try:
+                repo_url = json.loads(options.read_text(encoding="utf-8")).get(
+                    "repo_url", OFFICIAL_REPO) if options.is_file() else OFFICIAL_REPO
+            except (OSError, ValueError, AttributeError) as exc:
+                raise ManagerError("Manager repository configuration is unreadable") from exc
+        if not isinstance(repo_url, str) or not repo_url:
+            raise ManagerError("Manager repository URL is invalid")
         self.repo_url = repo_url
         self.require_root = require_root
         self.uv = uv or shutil.which("uv") or "uv"
@@ -219,7 +230,7 @@ class Manager:
             raise ManagerError("Current release does not match manifest; inspect before changing releases")
 
     def _systemctl(self, action: str, *, check: bool = True) -> subprocess.CompletedProcess[str]:
-        return self._run("systemctl", action, "mika-nexus.service", check=check, timeout=90)
+        return self._run("systemctl", action, "mikachan.service", check=check, timeout=90)
 
     def _active(self) -> bool:
         try:
@@ -282,9 +293,10 @@ class Manager:
         current = manifest["history"][-1]
         result.update(installed=True, branch=current["branch"], commit=current["sha"],
                       installed_at=current["at"], releases=len(manifest["history"]),
-                      database=self.paths.state.joinpath("nexus.sqlite").exists(),
+                      database=self.paths.state.joinpath("mikachan.sqlite").exists(),
                       interrupted=self.paths.journal.exists(),
-                      config=self.paths.env.exists())
+                      config=self.paths.env.exists(),
+                      setup_required=not self.paths.env.exists())
         result["consistent"] = self.paths.current.is_symlink() and \
             self.paths.current.resolve() == self.paths.releases / current["sha"]
         quality = self.paths.releases / current["sha"] / ".manager-quality.json"
@@ -293,7 +305,7 @@ class Manager:
                 result["quality"] = json.loads(quality.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 result["quality"] = {"status": "unreadable"}
-        database = self.paths.state / "nexus.sqlite"
+        database = self.paths.state / "mikachan.sqlite"
         if database.is_file():
             try:
                 with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as db:
@@ -391,7 +403,7 @@ class Manager:
         self.on_event("Installing locked Python dependencies…")
         self._run(self.uv, "sync", "--locked", "--extra", "dev", cwd=release,
                   timeout=1200, env=uv_env)
-        if not (release / ".venv/bin/mika-nexus").is_file():
+        if not (release / ".venv/bin/mikachan").is_file():
             raise ManagerError("Selected release does not provide the expected bot command")
         quality: dict[str, Any] = {"commit": sha, "checked_at": time.time()}
         if checks:
@@ -436,7 +448,7 @@ class Manager:
         with tempfile.TemporaryDirectory() as directory:
             candidate = Path(directory) / "config.env"
             _atomic(candidate, _render_env(values))
-            code = ("import sys; from mika_nexus.config import Settings; "
+            code = ("import sys; from mikachan.config import Settings; "
                     "Settings(_env_file=sys.argv[1]); print('valid')")
             clean = {k: v for k, v in os.environ.items() if k not in ENV_KEYS}
             result = self._run(str(release / ".venv/bin/python"), "-c", code,
@@ -447,19 +459,19 @@ class Manager:
 
     def _create_user(self) -> None:
         try:
-            grp.getgrnam("mika-nexus")
+            grp.getgrnam("mikachan")
         except KeyError:
-            self._run("groupadd", "--system", "mika-nexus")
+            self._run("groupadd", "--system", "mikachan")
         try:
-            pwd.getpwnam("mika-nexus")
+            pwd.getpwnam("mikachan")
         except KeyError:
             self._run("useradd", "--system", "--home-dir", str(self.paths.state),
-                      "--shell", "/usr/sbin/nologin", "--gid", "mika-nexus",
-                      "mika-nexus")
+                      "--shell", "/usr/sbin/nologin", "--gid", "mikachan",
+                      "mikachan")
 
     def _set_file_group(self, path: Path) -> None:
         if self.require_root:
-            os.chown(path, 0, grp.getgrnam("mika-nexus").gr_gid)
+            os.chown(path, 0, grp.getgrnam("mikachan").gr_gid)
         os.chmod(path, 0o640)
 
     def _state_dirs(self) -> None:
@@ -470,19 +482,19 @@ class Manager:
         os.chmod(self.paths.backups, 0o700)
         os.chmod(self.paths.state, 0o700)
         if self.require_root:
-            user = pwd.getpwnam("mika-nexus")
-            os.chown(self.paths.state, user.pw_uid, grp.getgrnam("mika-nexus").gr_gid)
+            user = pwd.getpwnam("mikachan")
+            os.chown(self.paths.state, user.pw_uid, grp.getgrnam("mikachan").gr_gid)
 
     def _unit_text(self) -> str:
         p = self.paths
         return ("# Managed by Mikachan panel\n"
                 "[Unit]\nDescription=Mikachan private Telegram bot\n"
                 "After=network-online.target\nWants=network-online.target\n\n"
-                "[Service]\nType=simple\nUser=mika-nexus\nGroup=mika-nexus\n"
+                "[Service]\nType=simple\nUser=mikachan\nGroup=mikachan\n"
                 f"WorkingDirectory={p.current}\nEnvironmentFile={p.env}\n"
                 f"Environment=PATH={p.current}/.venv/bin:/usr/local/bin:/usr/bin:/bin\n"
                 f"ExecStart=/usr/bin/flock -n {p.state}/polling.lock "
-                f"{p.current}/.venv/bin/mika-nexus run\n"
+                f"{p.current}/.venv/bin/mikachan run\n"
                 "Restart=on-failure\nRestartSec=5\nTimeoutStopSec=60\nUMask=0077\n"
                 "NoNewPrivileges=true\nProtectSystem=strict\nProtectHome=true\n"
                 f"ReadWritePaths={p.state}\nPrivateTmp=true\n\n"
@@ -506,13 +518,13 @@ class Manager:
         snapshot = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + secrets.token_hex(4)
         directory = self.paths.backups / snapshot
         directory.mkdir(mode=0o700)
-        database = self.paths.state / "nexus.sqlite"
+        database = self.paths.state / "mikachan.sqlite"
         if database.is_symlink():
             raise ManagerError("Database path cannot be a symlink")
         if database.exists():
             source = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
             try:
-                destination = sqlite3.connect(directory / "nexus.sqlite")
+                destination = sqlite3.connect(directory / "mikachan.sqlite")
                 try:
                     source.backup(destination)
                     check = destination.execute("PRAGMA integrity_check").fetchone()
@@ -522,7 +534,7 @@ class Manager:
                     destination.close()
             finally:
                 source.close()
-            os.chmod(directory / "nexus.sqlite", 0o600)
+            os.chmod(directory / "mikachan.sqlite", 0o600)
         if self.paths.env.exists():
             shutil.copy2(self.paths.env, directory / "config.env")
             os.chmod(directory / "config.env", 0o600)
@@ -539,9 +551,9 @@ class Manager:
         if directory.is_symlink() or not (directory / "metadata.json").is_file():
             raise ManagerError("Snapshot does not exist")
         metadata = json.loads((directory / "metadata.json").read_text(encoding="utf-8"))
-        database = self.paths.state / "nexus.sqlite"
+        database = self.paths.state / "mikachan.sqlite"
         if metadata["database"]:
-            source = directory / "nexus.sqlite"
+            source = directory / "mikachan.sqlite"
             if source.is_symlink() or not source.is_file():
                 raise ManagerError("Snapshot database is missing")
             with sqlite3.connect(f"file:{source}?mode=ro", uri=True) as db:
@@ -550,7 +562,7 @@ class Manager:
             temporary = database.with_suffix(".restoring")
             shutil.copy2(source, temporary)
             if self.require_root:
-                user = pwd.getpwnam("mika-nexus")
+                user = pwd.getpwnam("mikachan")
                 os.chown(temporary, user.pw_uid, user.pw_gid)
             os.chmod(temporary, 0o600)
             for suffix in ("-wal", "-shm"):
@@ -583,9 +595,9 @@ class Manager:
             if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                 raise ManagerError("Polling lock must be a single regular file")
             if self.require_root:
-                user = pwd.getpwnam("mika-nexus")
+                user = pwd.getpwnam("mikachan")
                 os.fchown(file.fileno(), user.pw_uid,
-                          grp.getgrnam("mika-nexus").gr_gid)
+                          grp.getgrnam("mikachan").gr_gid)
             os.fchmod(file.fileno(), 0o600)
             try:
                 fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -637,7 +649,7 @@ class Manager:
             self.paths.journal.unlink(missing_ok=True)
         return f"Activated {branch}@{sha[:12]}; backup {snapshot}"
 
-    def install(self, config: dict[str, str], *, branch: str = "v2",
+    def install(self, config: dict[str, str] | None = None, *, branch: str = "v2",
                 checks: bool = True) -> str:
         if self.require_root:
             self._root()
@@ -657,19 +669,23 @@ class Manager:
             self._fetch()
             sha = self._target(branch)
             release = self._stage(sha, checks=checks)
-            values = dict(config)
-            values["DATA_DIR"] = str(self.paths.state)
-            self._validate_config(values, release)
+            values = dict(config) if config is not None else None
+            if values is not None:
+                values["DATA_DIR"] = str(self.paths.state)
+                self._validate_config(values, release)
             self._create_user()
             self._state_dirs()
             self._poller_free()
-            _atomic(self.paths.env, _render_env(values), 0o640)
-            self._set_file_group(self.paths.env)
+            if values is not None:
+                _atomic(self.paths.env, _render_env(values), 0o640)
+                self._set_file_group(self.paths.env)
             self._switch_link(sha)
             _atomic(self.paths.unit, self._unit_text(), 0o644)
             self._run("systemctl", "daemon-reload")
             self._save_manifest({"schema": 1, "history": [{"branch": branch, "sha": sha,
                                   "at": time.time(), "snapshot_before": None}]})
+            if values is None:
+                return f"Installed {branch}@{sha[:12]}; open Setup to connect your bot"
             self._systemctl("enable")
             self._systemctl("start")
             self.on_event("Checking service health…")
@@ -677,6 +693,41 @@ class Manager:
                 self._systemctl("stop", check=False)
                 raise ManagerError("Installation staged, but the service did not stay active; inspect logs")
             return f"Installed {branch}@{sha[:12]}; service active (Telegram unverified)"
+
+    def setup(self, config: dict[str, str]) -> str:
+        """Apply first or repeated setup without discarding existing bot data."""
+        with self._lock():
+            manifest = self._manifest()
+            self._ensure_consistent(manifest)
+            old = _parse_env(self.paths.env) if self.paths.env.exists() else {}
+            values = dict(old)
+            values.update(config)
+            values["ALLOWED_TELEGRAM_IDS"] = config.get("ALLOWED_TELEGRAM_IDS") or \
+                config["OWNER_TELEGRAM_ID"]
+            values["ALLOWED_GROUP_IDS"] = config.get("ALLOWED_GROUP_IDS", "")
+            values["PRIVATE_CHATS_ONLY"] = "false" if values["ALLOWED_GROUP_IDS"] else "true"
+            values["DATA_DIR"] = str(self.paths.state)
+            self._validate_config(values, self.paths.current)
+            undo, was_active = self._stop_and_snapshot(reason="before setup")
+            try:
+                _atomic(self.paths.env, _render_env(values), 0o640)
+                self._set_file_group(self.paths.env)
+                if (self.paths.state / "mikachan.sqlite").exists():
+                    self._sync_access("ALLOWED_TELEGRAM_IDS", values)
+                    self._sync_access("ALLOWED_GROUP_IDS", values)
+                self._systemctl("enable")
+                self._systemctl("start")
+                if not self._healthy():
+                    raise ManagerError("Bot service did not stay active after setup")
+            except BaseException:
+                self._systemctl("stop", check=False)
+                self._restore_snapshot(undo)
+                if not old:
+                    self.paths.env.unlink(missing_ok=True)
+                if was_active:
+                    self._systemctl("start", check=False)
+                raise
+            return f"Setup complete; service active. Previous state snapshot: {undo}"
 
     def update(self, *, checks: bool = True) -> str:
         with self._lock():
@@ -692,7 +743,8 @@ class Manager:
             if ancestor.returncode:
                 raise ManagerError("Remote branch diverged; use an explicit reviewed switch")
             self._stage(sha, checks=checks)
-            self._validate_config(_parse_env(self.paths.env), self.paths.releases / sha)
+            if self.paths.env.exists():
+                self._validate_config(_parse_env(self.paths.env), self.paths.releases / sha)
             return self._activate(manifest, current["branch"], sha)
 
     def switch(self, branch: str, *, commit: str | None = None, checks: bool = True) -> str:
@@ -702,7 +754,8 @@ class Manager:
             self._fetch()
             sha = self._target(branch, commit)
             self._stage(sha, checks=checks)
-            self._validate_config(_parse_env(self.paths.env), self.paths.releases / sha)
+            if self.paths.env.exists():
+                self._validate_config(_parse_env(self.paths.env), self.paths.releases / sha)
             return self._activate(manifest, branch, sha)
 
     def rollback(self) -> str:
@@ -823,8 +876,11 @@ class Manager:
 
     def config(self) -> dict[str, str]:
         self._manifest()
-        return {key: ("(set)" if key in PRIVATE_KEYS and value else value)
-                for key, value in _parse_env(self.paths.env).items()}
+        if not self.paths.env.exists():
+            return {"SETUP": "required"}
+        values = _parse_env(self.paths.env)
+        return {key: ("(set)" if key in PRIVATE_KEYS and values.get(key) else
+                      values.get(key, "")) for key in sorted(ENV_KEYS)}
 
     def set_config(self, key: str, value: str) -> str:
         if key not in EDITABLE:
@@ -832,15 +888,31 @@ class Manager:
         with self._lock():
             manifest = self._manifest()
             self._ensure_consistent(manifest)
+            if not self.paths.env.exists():
+                raise ManagerError("Run Setup before editing individual settings")
             values = _parse_env(self.paths.env)
-            values[key] = value
+            if key == "OWNER_TELEGRAM_ID":
+                try:
+                    users = _ids(values["ALLOWED_TELEGRAM_IDS"])
+                    users.discard(int(values["OWNER_TELEGRAM_ID"]))
+                    users.add(int(value))
+                except ValueError as exc:
+                    raise ManagerError("Owner must be a numeric Telegram ID") from exc
+                values["ALLOWED_TELEGRAM_IDS"] = ",".join(map(str, sorted(users)))
+            if key == "ALLOWED_GROUP_IDS":
+                values["PRIVATE_CHATS_ONLY"] = "false" if value else "true"
+            if value or key in {"ALLOWED_GROUP_IDS", "MOMMY_TELEGRAM_IDS"}:
+                values[key] = value
+            else:
+                values.pop(key, None)
             self._validate_config(values, self.paths.current)
             undo, was_active = self._stop_and_snapshot(reason=f"before setting {key}")
             try:
                 _atomic(self.paths.env, _render_env(values), 0o640)
                 self._set_file_group(self.paths.env)
-                if key in {"ALLOWED_TELEGRAM_IDS", "ALLOWED_GROUP_IDS"}:
-                    self._sync_access(key, values)
+                if key in {"ALLOWED_TELEGRAM_IDS", "ALLOWED_GROUP_IDS", "OWNER_TELEGRAM_ID"}:
+                    self._sync_access("ALLOWED_TELEGRAM_IDS" if key == "OWNER_TELEGRAM_ID" else key,
+                                      values)
                 if was_active:
                     self._systemctl("start")
                 if was_active and not self._healthy():
@@ -854,7 +926,7 @@ class Manager:
             return f"Updated {key}; previous configuration and database: {undo}"
 
     def _sync_access(self, key: str, values: dict[str, str]) -> None:
-        database = self.paths.state / "nexus.sqlite"
+        database = self.paths.state / "mikachan.sqlite"
         if not database.is_file():
             raise ManagerError("Bot database is missing; cannot synchronize authorization")
         users = _ids(values["ALLOWED_TELEGRAM_IDS"])
@@ -886,13 +958,15 @@ class Manager:
             raise ManagerError("Unknown service action")
         with self._lock():
             self._manifest()
+            if action in {"start", "restart"} and not self.paths.env.exists():
+                raise ManagerError("Run Setup before starting the bot")
             self._systemctl(action)
             return f"Service {action}: {'active' if self._active() else 'inactive'}"
 
     def logs(self, lines: int = 80) -> str:
         if not 1 <= lines <= 200:
             raise ManagerError("Log lines must be 1–200")
-        return self._run("journalctl", "-u", "mika-nexus.service", "-n", str(lines),
+        return self._run("journalctl", "-u", "mikachan.service", "-n", str(lines),
                          "--no-pager", "--output=short-iso", check=False).stdout
 
     def diagnostics(self, *, live: bool = False) -> dict[str, Any]:
@@ -903,10 +977,10 @@ class Manager:
         values = _parse_env(self.paths.env)
         environment = os.environ.copy()
         environment.update(values)
-        doctor = self._run(str(self.paths.current / ".venv/bin/mika-nexus"), "doctor",
+        doctor = self._run(str(self.paths.current / ".venv/bin/mikachan"), "doctor",
                            cwd=self.paths.current, check=False, env=environment, timeout=30)
         result["doctor"] = doctor.stdout.strip() if doctor.returncode == 0 else "doctor failed"
-        database = self.paths.state / "nexus.sqlite"
+        database = self.paths.state / "mikachan.sqlite"
         if database.is_file():
             try:
                 with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as db:
@@ -957,6 +1031,22 @@ class Manager:
                 if self.paths.backups.exists():
                     shutil.rmtree(self.paths.backups)
                 self.paths.env.unlink(missing_ok=True)
+                if self.paths == Paths():
+                    panel = Path("/usr/local/lib/mikachan-panel")
+                    marker = panel / ".managed-by-mikachan"
+                    if panel.is_dir() and not panel.is_symlink() and marker.is_file() and \
+                            marker.read_text(encoding="utf-8") == \
+                            "Managed by Mikachan bootstrap\n":
+                        launcher = Path("/usr/local/bin/mikachan")
+                        if launcher.is_file() and not launcher.is_symlink() and \
+                                "mikachan-panel/deploy/manage.sh" in \
+                                launcher.read_text(encoding="utf-8"):
+                            launcher.unlink()
+                        shutil.rmtree(panel)
+                        cache = Path("/var/cache/mikachan-panel")
+                        if cache.is_dir() and not cache.is_symlink():
+                            shutil.rmtree(cache)
+                        Path("/etc/mikachan-manager.json").unlink(missing_ok=True)
                 return "Removed managed code, service, configuration, database and backups"
             return "Removed managed code and service; configuration, database and backups retained"
 
@@ -990,6 +1080,7 @@ def _cli() -> None:
     versions.add_argument("--refresh", action="store_true")
     install = sub.add_parser("install")
     install.add_argument("--config", type=Path, help="0600 environment file; otherwise prompt")
+    install.add_argument("--code-only", action="store_true", help="stage code; configure in Setup")
     install.add_argument("--branch", default="v2")
     install.add_argument("--skip-checks", action="store_true")
     update = sub.add_parser("update")
@@ -1032,7 +1123,9 @@ def _cli() -> None:
         elif args.command == "versions":
             result = manager.versions(refresh=args.refresh)
         elif args.command == "install":
-            if args.config:
+            if args.code_only:
+                config = None
+            elif args.config:
                 if args.config.stat().st_mode & 0o077:
                     raise ManagerError("Configuration file must be private (chmod 600)")
                 config = _parse_env(args.config)

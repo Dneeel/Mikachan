@@ -164,7 +164,7 @@ class Utilities:
                         "DO UPDATE SET provider=excluded.provider", (market, name))
 
     async def tgs_to_gif(self, raw: bytes) -> bytes:
-        process = await asyncio.create_subprocess_exec(sys.executable, "-m", "mika_nexus.render_tgs",
+        process = await asyncio.create_subprocess_exec(sys.executable, "-m", "mikachan.render_tgs",
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE)
         try:

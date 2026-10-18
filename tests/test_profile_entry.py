@@ -2,11 +2,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from mika_nexus.bot import App, download_prompt_markup
-from mika_nexus.follow import (FollowService, creator_from_post, profile_target,
+from mikachan.bot import App, download_prompt_markup
+from mikachan.follow import (FollowService, creator_from_post, profile_target,
                                resolve_creator_from_post)
-from mika_nexus.jobs import Worker
-from mika_nexus.store import Store
+from mikachan.jobs import Worker
+from mikachan.store import Store
 
 
 def labels(markup):
@@ -31,15 +31,15 @@ def test_story_links_reveal_public_creator_without_lookup():
 
 @pytest.mark.asyncio
 async def test_resolve_instagram_and_youtube_creator_from_public_metadata(monkeypatch):
-    monkeypatch.setattr("mika_nexus.follow.validate_dns", lambda _url: None)
+    monkeypatch.setattr("mikachan.follow.validate_dns", lambda _url: None)
     async def local_thread(fn, *args):
         return fn(*args)
-    monkeypatch.setattr("mika_nexus.follow.asyncio.to_thread", local_thread)
+    monkeypatch.setattr("mikachan.follow.asyncio.to_thread", local_thread)
     async def extract(command, _timeout):
         if "gallery-dl" in command:
             return [[2, {"username": "alice"}]]
         return {"channel_url": "https://www.youtube.com/@alice"}
-    monkeypatch.setattr("mika_nexus.follow._extract", extract)
+    monkeypatch.setattr("mikachan.follow._extract", extract)
     instagram = await resolve_creator_from_post("https://www.instagram.com/p/ABC123/")
     youtube = await resolve_creator_from_post("https://www.youtube.com/shorts/abcdefghijk")
     assert instagram == profile_target("https://www.instagram.com/alice/")
@@ -83,7 +83,7 @@ async def test_predownload_profile_callback_opens_panel_and_follow(monkeypatch, 
     app.store.set_prompt(cid, 101)
     async def resolve(_url, _meta=None):
         return profile_target("https://www.instagram.com/alice/")
-    monkeypatch.setattr("mika_nexus.bot.resolve_creator_from_post", resolve)
+    monkeypatch.setattr("mikachan.bot.resolve_creator_from_post", resolve)
     await app.callback(query(f"c:{cid}:p", 101))
     assert len(app.bot.sent) == 1
     assert "👤 Profile" not in app.bot.sent[0][1]
@@ -106,6 +106,6 @@ async def test_postdownload_profile_callback_resolves_missing_metadata(monkeypat
     jid = app.store.create_job(42, 42, url)
     async def resolve(_url, _meta=None):
         return profile_target("https://www.youtube.com/@alice")
-    monkeypatch.setattr("mika_nexus.bot.resolve_creator_from_post", resolve)
+    monkeypatch.setattr("mikachan.bot.resolve_creator_from_post", resolve)
     await app.callback(query(f"j:{jid}:profile", 101))
     assert "👀 Follow" in labels(app.bot.sent[0][2]["reply_markup"])
