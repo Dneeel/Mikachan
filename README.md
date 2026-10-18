@@ -1,4 +1,4 @@
-# MIKA NEXUS
+# Mikachan
 
 Private, Telegram-native media utility. It asks for **✅ Yes / ❌ No** before any network work on each submitted URL. `/music`, `/search`, and `/podcast` search public catalogs; provider failures are shown without invented results.
 
@@ -14,7 +14,7 @@ The current source build passes **51 local tests**, Ruff, and mypy. Earlier Free
 
 1. Install Python 3.12+, `uv`, `ffmpeg`, and `ffprobe` in the intended deployment environment. yt-dlp, Deno and yt-dlp-ejs are installed through the locked project environment.
 2. Copy `.env.example` to `.env`; set `BOT_TOKEN`, `OWNER_TELEGRAM_ID`, `ALLOWED_TELEGRAM_IDS` (owner plus at most three others). Optional Spotify catalog search and show browsing require `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET`. Keep `.env` mode `0600`.
-3. Run `UV_CACHE_DIR=/tmp/mika-uv-cache uv sync --locked --extra dev`, then `uv run mika-nexus doctor`, `uv run python -m unittest discover -s tests -v`, and `uv run mika-nexus run`.
+3. Run `UV_CACHE_DIR=/tmp/mikachan-uv-cache uv sync --locked --extra dev`, then `uv run mikachan doctor`, `uv run python -m unittest discover -s tests -v`, and `uv run mikachan run`.
 4. Start in `BOT_API_MODE=public`; uploads above 48 MiB are refused. Local Bot API requires deliberate migration and separate server setup (see [installation](docs/INSTALL_UBUNTU.md)).
 
 All public link submissions receive one separate consent prompt per URL, up to five. A No deletes only the bot prompt. A Yes creates a durable job. Ordinary text and Telegram media are ignored outside a short explicit search query session.

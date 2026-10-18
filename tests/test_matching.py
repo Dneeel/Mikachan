@@ -3,9 +3,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
-from mika_nexus.catalog import CatalogTrack, resolve_collection, resolve_track
-from mika_nexus.matching import match_score, version
-from mika_nexus.store import Store
+from mikachan.catalog import CatalogTrack, resolve_collection, resolve_track
+from mikachan.matching import match_score, version
+from mikachan.store import Store
 
 
 class MatchingTests(unittest.TestCase):
@@ -71,8 +71,8 @@ class CatalogTests(unittest.IsolatedAsyncioTestCase):
         client.__aenter__.return_value = client
         with (
             patch.dict("os.environ", {"SPOTIFY_CLIENT_ID": "id", "SPOTIFY_CLIENT_SECRET": "secret"}),
-            patch("mika_nexus.catalog.validate_dns"),
-            patch("mika_nexus.catalog.httpx.AsyncClient", return_value=client),
+            patch("mikachan.catalog.validate_dns"),
+            patch("mikachan.catalog.httpx.AsyncClient", return_value=client),
         ):
             items, title = await resolve_collection("https://open.spotify.com/playlist/abc")
         self.assertEqual(title, "Playlist")
@@ -104,8 +104,8 @@ class CatalogTests(unittest.IsolatedAsyncioTestCase):
         client.__aenter__.return_value = client
         with (
             patch.dict("os.environ", {"SPOTIFY_CLIENT_ID": "id", "SPOTIFY_CLIENT_SECRET": "secret"}),
-            patch("mika_nexus.catalog.validate_dns"),
-            patch("mika_nexus.catalog.httpx.AsyncClient", return_value=client),
+            patch("mikachan.catalog.validate_dns"),
+            patch("mikachan.catalog.httpx.AsyncClient", return_value=client),
         ):
             items, title = await resolve_collection("https://open.spotify.com/show/abc")
         self.assertEqual(title, "Example Podcast")
@@ -125,8 +125,8 @@ class CatalogTests(unittest.IsolatedAsyncioTestCase):
         client.__aenter__.return_value = client
         with (
             patch.dict("os.environ", {"SPOTIFY_CLIENT_ID": "", "SPOTIFY_CLIENT_SECRET": ""}),
-            patch("mika_nexus.catalog.validate_dns"),
-            patch("mika_nexus.catalog.httpx.AsyncClient", return_value=client),
+            patch("mikachan.catalog.validate_dns"),
+            patch("mikachan.catalog.httpx.AsyncClient", return_value=client),
         ):
             track = await resolve_track("https://open.spotify.com/track/abc")
         self.assertEqual(
@@ -150,8 +150,8 @@ class CatalogTests(unittest.IsolatedAsyncioTestCase):
         client.__aenter__.return_value = client
         with (
             patch.dict("os.environ", {"SPOTIFY_CLIENT_ID": "", "SPOTIFY_CLIENT_SECRET": ""}),
-            patch("mika_nexus.catalog.validate_dns"),
-            patch("mika_nexus.catalog.httpx.AsyncClient", return_value=client),
+            patch("mikachan.catalog.validate_dns"),
+            patch("mikachan.catalog.httpx.AsyncClient", return_value=client),
         ):
             items, title = await resolve_collection("https://open.spotify.com/album/abc")
         self.assertEqual(title, "Album")

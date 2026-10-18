@@ -4,7 +4,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
-from mika_nexus.media import gallery_budget, groups, media_kind, verify
+from mikachan.media import gallery_budget, groups, media_kind, verify
 
 
 class GalleryTests(unittest.TestCase):
@@ -41,7 +41,7 @@ class CachedDeliveryTests(unittest.TestCase):
     def test_only_definite_bad_file_id_is_safe_to_redownload(self):
         from aiogram.exceptions import TelegramBadRequest
         from aiogram.methods import SendAudio
-        from mika_nexus.jobs import invalid_cached_file_id
+        from mikachan.jobs import invalid_cached_file_id
 
         method = SendAudio(chat_id=1, audio="bad")
         invalid = TelegramBadRequest(method, "Bad Request: wrong file identifier/HTTP URL specified")
@@ -53,7 +53,7 @@ class CachedDeliveryTests(unittest.TestCase):
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg required")
 class Mp3Tests(unittest.IsolatedAsyncioTestCase):
     async def test_telegram_compatible_video_keeps_original_file(self):
-        from mika_nexus.jobs import Worker
+        from mikachan.jobs import Worker
 
         with tempfile.TemporaryDirectory() as d:
             original = Path(d) / "original.mp4"
@@ -70,7 +70,7 @@ class Mp3Tests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(original.exists())
 
     async def test_large_episode_is_reencoded_below_public_upload_limit(self):
-        from mika_nexus.jobs import Worker
+        from mikachan.jobs import Worker
 
         with tempfile.TemporaryDirectory() as d:
             original = Path(d) / "episode.mp3"
@@ -85,7 +85,7 @@ class Mp3Tests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(media_kind(compressed, await verify(compressed, 300_000)), "audio")
 
     async def test_webm_is_delivered_as_playable_mp4(self):
-        from mika_nexus.jobs import Worker
+        from mikachan.jobs import Worker
 
         with tempfile.TemporaryDirectory() as d:
             original = Path(d) / "clip.webm"
@@ -119,7 +119,7 @@ class Mp3Tests(unittest.IsolatedAsyncioTestCase):
                 await verify(tiny, 2_000_000)
 
     async def test_post_audio_is_real_mp3(self):
-        from mika_nexus.jobs import Worker
+        from mikachan.jobs import Worker
 
         with tempfile.TemporaryDirectory() as d:
             source = Path(d) / "post.mp4"
@@ -164,7 +164,7 @@ class Mp3Tests(unittest.IsolatedAsyncioTestCase):
 
 class TikTokFallbackTests(unittest.IsolatedAsyncioTestCase):
     async def test_rejects_mismatched_post_id(self):
-        from mika_nexus.jobs import Worker
+        from mikachan.jobs import Worker
 
         response = Mock()
         response.json.return_value = {
@@ -178,8 +178,8 @@ class TikTokFallbackTests(unittest.IsolatedAsyncioTestCase):
         worker._direct = AsyncMock()
         with (
             tempfile.TemporaryDirectory() as d,
-            patch("mika_nexus.jobs.validate_dns"),
-            patch("mika_nexus.jobs.httpx.AsyncClient", return_value=client),
+            patch("mikachan.jobs.validate_dns"),
+            patch("mikachan.jobs.httpx.AsyncClient", return_value=client),
         ):
             files = await worker._tikwm("https://www.tiktok.com/@creator/video/123", Path(d), 1000)
         self.assertIsNone(files)

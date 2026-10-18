@@ -485,7 +485,7 @@ wheels = [
 ]
 
 [[package]]
-name = "mika-nexus"
+name = "mikachan"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

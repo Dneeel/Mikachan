@@ -2,7 +2,7 @@
 
 This records every checkbox in the owner-supplied checklist. `PASS` requires a real provider/Telegram result or a deterministic local behavior test. `UNVERIFIED` means a path exists but a representative live outcome has not been confirmed. `NOT IMPLEMENTED` means the requested behavior is absent. Source-limited failures are `BLOCKED`. The source checklist ends with an incomplete sentence on its final line.
 
-# MIKA NEXUS V1 — COMPLETE FEATURE & USER ACCEPTANCE CHECKLIST
+# Mikachan V1 — COMPLETE FEATURE & USER ACCEPTANCE CHECKLIST
 
 ## دستور اصلی برای Codex
 

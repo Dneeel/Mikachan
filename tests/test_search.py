@@ -2,7 +2,7 @@ import unittest
 import asyncio
 from unittest.mock import AsyncMock
 
-from mika_nexus.search import Hit, MAX_RESULTS, Searcher
+from mikachan.search import Hit, MAX_RESULTS, Searcher
 
 
 class FederationTests(unittest.IsolatedAsyncioTestCase):
@@ -97,7 +97,7 @@ class FederationTests(unittest.IsolatedAsyncioTestCase):
         client.get = get
         client.__aenter__ = AsyncMock(return_value=client)
         client.__aexit__ = AsyncMock(return_value=None)
-        with patch("mika_nexus.search.httpx.AsyncClient", return_value=client):
+        with patch("mikachan.search.httpx.AsyncClient", return_value=client):
             task = asyncio.create_task(Searcher()._apple_podcasts("show", {"podcast", "episode"}))
             try:
                 await asyncio.wait_for(both_started.wait(), 1)
@@ -129,7 +129,7 @@ class FederationTests(unittest.IsolatedAsyncioTestCase):
         client.__aenter__ = AsyncMock(return_value=client)
         client.__aexit__ = AsyncMock(return_value=None)
         with (patch.dict("os.environ", {"SPOTIFY_CLIENT_ID": "id", "SPOTIFY_CLIENT_SECRET": "secret"}),
-              patch("mika_nexus.search.httpx.AsyncClient", return_value=client)):
+              patch("mikachan.search.httpx.AsyncClient", return_value=client)):
             finder = Searcher()
             hits = await finder._spotify("example", {"podcast", "episode"})
             await finder._spotify("example", {"podcast"})
@@ -154,7 +154,7 @@ class FederationTests(unittest.IsolatedAsyncioTestCase):
         client.get = get
         client.__aenter__ = AsyncMock(return_value=client)
         client.__aexit__ = AsyncMock(return_value=None)
-        with patch("mika_nexus.search.httpx.AsyncClient", return_value=client):
+        with patch("mikachan.search.httpx.AsyncClient", return_value=client):
             hits = await Searcher()._apple("Song", {"track", "album"})
         self.assertEqual([(hit.kind, hit.title) for hit in hits], [("track", "Song")])
 

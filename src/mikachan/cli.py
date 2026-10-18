@@ -5,7 +5,7 @@ from .config import ProviderSettings, Settings
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(prog="mika-nexus")
+    p = argparse.ArgumentParser(prog="mikachan")
     p.add_argument("command", choices=["run", "doctor"])
     args = p.parse_args()
     if args.command == "doctor":

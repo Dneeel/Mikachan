@@ -3,7 +3,7 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 from pydantic import ValidationError
-from mika_nexus.config import ProviderSettings, Settings
+from mikachan.config import ProviderSettings, Settings
 
 
 class ConfigTests(unittest.TestCase):

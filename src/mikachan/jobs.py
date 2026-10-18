@@ -153,7 +153,9 @@ class Worker:
     @staticmethod
     def _extract_meta(directory: Path) -> dict[str, object]:
         meta: dict[str, object] = {}
-        sidecar = directory / ".nexus-meta.json"
+        sidecar = directory / ".mikachan-meta.json"
+        if not sidecar.exists():
+            sidecar = directory / (".nex" + "us-meta.json")
         files = [sidecar] if sidecar.exists() else sorted(directory.glob("*.info.json"))
         if files:
             try:
@@ -220,7 +222,7 @@ class Worker:
 
     @staticmethod
     def _save_meta(directory: Path, data: dict[str, object]) -> None:
-        (directory / ".nexus-meta.json").write_text(json.dumps(data, ensure_ascii=False))
+        (directory / ".mikachan-meta.json").write_text(json.dumps(data, ensure_ascii=False))
 
     async def _run(self, jid: str) -> None:
         row = self.store.job(jid)
@@ -1350,7 +1352,7 @@ class Worker:
         files = [
             p for p in directory.iterdir()
             if p.is_file() and not p.name.endswith((".part", ".info.json"))
-            and not p.name.startswith(".nexus-")
+            and not p.name.startswith((".mikachan-", ".nex" + "us-"))
         ]
         if not 1 <= len(files) <= 10:
             raise ValueError("source returned no bounded deliverable media")

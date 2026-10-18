@@ -2,8 +2,8 @@
 
 import json
 
-from mika_nexus.jobs import Worker
-from mika_nexus.music_ui import listening_links
+from mikachan.jobs import Worker
+from mikachan.music_ui import listening_links
 
 
 def test_public_post_caption_survives(tmp_path):

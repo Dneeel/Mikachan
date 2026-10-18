@@ -98,7 +98,7 @@ def public_media_result(hit: dict[str, object]) -> bool:
 
 
 HELP_TEXT = (
-    "<b>MIKA NEXUS · Help</b>\n"
+    "<b>Mikachan · Help</b>\n"
     "<b>Search:</b> /search query · /music query · /podcast query\n"
     "<b>Media:</b> send one or more public HTTP(S) links; approve each with Yes. "
     "Use /youtube, /tiktok, /instagram, or /twitter for platform guidance.\n"
@@ -112,7 +112,7 @@ HELP_TEXT = (
 class App:
     def __init__(self, settings: Settings):
         self.settings = settings
-        self.store = Store(settings.data_dir / "nexus.sqlite")
+        self.store = Store(settings.data_dir / "mikachan.sqlite")
         self.store.recover()
         self.store.seed_access(settings.allowlist)
         self.searcher = Searcher()
@@ -185,7 +185,7 @@ class App:
         arg = arg.strip()
         if cmd == "/start":
             await m.reply(
-                "✨ <b>MIKA NEXUS</b>\nSend a public link or search for music and podcasts.",
+                "✨ <b>Mikachan</b>\nSend a public link or search for music and podcasts.",
                 reply_markup=kb(
                     [
                         [("🎵 Music", "m:music"), ("🎙 Podcast", "m:podcast")],
@@ -893,7 +893,7 @@ class App:
             if self.store.claim_prompt(cid):
                 prompt = await self.bot.send_message(
                     q.message.chat.id,
-                    f"MIKA NEXUS · Confirm public media request\n<code>{html.escape(url[:300])}</code>",
+                    f"Mikachan · Confirm public media request\n<code>{html.escape(url[:300])}</code>",
                     reply_markup=kb([[("✅ Yes", f"c:{cid}:y"), ("❌ No", f"c:{cid}:n")]]),
                 )
                 self.store.set_prompt(cid, prompt.message_id)
@@ -918,7 +918,7 @@ class App:
             [
                 BotCommand(command=x, description=y)
                 for x, y in (
-                    ("start", "Open MIKA NEXUS"),
+                    ("start", "Open Mikachan"),
                     ("help", "How to use"),
                     ("search", "Search music and podcasts"),
                     ("music", "Search music"),

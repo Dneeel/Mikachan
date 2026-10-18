@@ -1,0 +1,23 @@
+[Unit]
+Description=Mikachan private Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mikachan
+Group=mikachan
+WorkingDirectory=/opt/mikachan
+EnvironmentFile=/etc/mikachan.env
+Environment=PATH=/opt/mikachan/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/opt/mikachan/.venv/bin/mikachan run
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/mikachan
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

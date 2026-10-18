@@ -3,8 +3,8 @@
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from mika_nexus.catalog import CatalogTrack, recording_search_alias
-from mika_nexus.music_ui import _genius_lyrics, verified_lyrics
+from mikachan.catalog import CatalogTrack, recording_search_alias
+from mikachan.music_ui import _genius_lyrics, verified_lyrics
 
 
 def response(payload: object) -> MagicMock:
@@ -23,7 +23,7 @@ class MusicLookupTests(unittest.IsolatedAsyncioTestCase):
         client.get = AsyncMock(return_value=response([partial, full]))
         client.__aenter__ = AsyncMock(return_value=client)
         client.__aexit__ = AsyncMock(return_value=None)
-        with patch("mika_nexus.music_ui.httpx.AsyncClient", return_value=client):
+        with patch("mikachan.music_ui.httpx.AsyncClient", return_value=client):
             lyric = await verified_lyrics("Soldier Side", "System Of A Down", 220)
         self.assertEqual(len(lyric.splitlines()), 35)
         client.get.assert_awaited_once()
@@ -37,7 +37,7 @@ class MusicLookupTests(unittest.IsolatedAsyncioTestCase):
         ]}))
         client.__aenter__ = AsyncMock(return_value=client)
         client.__aexit__ = AsyncMock(return_value=None)
-        with patch("mika_nexus.catalog.httpx.AsyncClient", return_value=client):
+        with patch("mikachan.catalog.httpx.AsyncClient", return_value=client):
             alias = await recording_search_alias(track)
         self.assertEqual(alias[1], "Satomi Iida")
 
@@ -49,7 +49,7 @@ class MusicLookupTests(unittest.IsolatedAsyncioTestCase):
         ]}))
         client.__aenter__ = AsyncMock(return_value=client)
         client.__aexit__ = AsyncMock(return_value=None)
-        with patch("mika_nexus.catalog.httpx.AsyncClient", return_value=client):
+        with patch("mikachan.catalog.httpx.AsyncClient", return_value=client):
             alias = await recording_search_alias(track)
         self.assertEqual(alias, ("Dress", "BUCK-TICK"))
 
@@ -62,7 +62,7 @@ class MusicLookupTests(unittest.IsolatedAsyncioTestCase):
         ]}))
         client.__aenter__ = AsyncMock(return_value=client)
         client.__aexit__ = AsyncMock(return_value=None)
-        with patch("mika_nexus.catalog.httpx.AsyncClient", return_value=client):
+        with patch("mikachan.catalog.httpx.AsyncClient", return_value=client):
             alias = await recording_search_alias(track)
         self.assertIsNone(alias)
 
