@@ -16,6 +16,7 @@ import sqlite3
 import shutil
 import sys
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
@@ -24,7 +25,7 @@ import httpx
 from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from .security import allowed, clean_url, source, validate_dns
+from .security import allowed, clean_url, instagram_cookie_args, source, validate_dns
 from .public_social import public_statuses, public_x_media
 from .store import Store
 
@@ -400,9 +401,11 @@ async def _extract(command: list[str], timeout: int) -> object:
         raise ValueError("public source extractor is not installed")
     command = [executable, *command[1:]]
     if Path(executable).name == "gallery-dl":
-        command = [command[0], "--config-ignore", "--cache-file", ":memory:", *command[1:]]
+        command = [command[0], "--config-ignore", "--cache-file", ":memory:",
+                   *instagram_cookie_args(command[-1]), *command[1:]]
     elif Path(executable).name == "yt-dlp":
-        command = [command[0], "--ignore-config", *command[1:]]
+        command = [command[0], "--ignore-config", *instagram_cookie_args(command[-1]),
+                   *command[1:]]
     network_env = {key: value for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
                     "NO_PROXY", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE")
                    if (value := os.environ.get(key))}
@@ -459,6 +462,45 @@ def _gallery_items(data: object, target: Target, kind: str) -> list[tuple[str, s
     return list(found.values())[:15]
 
 
+async def _youtube_feed_items(target: Target) -> list[tuple[str, str, str]]:
+    """Read the public channel feed before invoking a slower channel extractor."""
+    parts = [part for part in urlsplit(target.url).path.split("/") if part]
+    channel_id = parts[1] if len(parts) == 2 and parts[0] == "channel" else ""
+    async with httpx.AsyncClient(timeout=12, follow_redirects=False) as client:
+        if not re.fullmatch(r"UC[\w-]{22}", channel_id):
+            await asyncio.to_thread(validate_dns, target.url)
+            page = await client.get(target.url)
+            page.raise_for_status()
+            if len(page.content) > 2_000_000:
+                raise ValueError("YouTube channel page is too large")
+            match = re.search(
+                r'<meta\s+itemprop="channelId"\s+content="(UC[\w-]{22})"', page.text
+            ) or re.search(r'"externalId":"(UC[\w-]{22})"', page.text)
+            if not match:
+                raise ValueError("YouTube channel ID is unavailable")
+            channel_id = match[1]
+        endpoint = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
+        await asyncio.to_thread(validate_dns, endpoint)
+        response = await client.get(endpoint)
+        response.raise_for_status()
+    if len(response.content) > 500_000:
+        raise ValueError("YouTube feed is too large")
+    root = ET.fromstring(response.content)
+    namespace = {"atom": "http://www.w3.org/2005/Atom",
+                 "yt": "http://www.youtube.com/xml/schemas/2015"}
+    feed_id = root.findtext("yt:channelId", namespaces=namespace)
+    if feed_id != channel_id:
+        raise ValueError("YouTube feed identity mismatch")
+    items = []
+    for entry in root.findall("atom:entry", namespace)[:15]:
+        video_id = entry.findtext("yt:videoId", namespaces=namespace)
+        if re.fullmatch(r"[\w-]{11}", video_id or ""):
+            items.append(("videos", f"https://www.youtube.com/watch?v={video_id}",
+                          (entry.findtext("atom:title", default="Video", namespaces=namespace)
+                           or "Video")[:300]))
+    return items
+
+
 async def public_items(target: Target, kind: str = "posts") -> list[tuple[str, str, str]]:
     await asyncio.to_thread(validate_dns, target.url)
     primary_failed = False
@@ -470,6 +512,11 @@ async def public_items(target: Target, kind: str = "posts") -> list[tuple[str, s
         except (ValueError, TimeoutError, httpx.HTTPError):
             primary_failed = True
     if target.platform == "youtube":
+        if kind != "shorts":
+            try:
+                return await _youtube_feed_items(target)
+            except (ValueError, TimeoutError, OSError, ET.ParseError, httpx.HTTPError):
+                pass
         data = await _extract(["yt-dlp", "--flat-playlist", "--playlist-end", "15",
                                "--dump-single-json", "--skip-download", "--no-warnings",
                                target.url.rstrip("/") + ("/shorts" if kind == "shorts" else "/videos")], 35)
@@ -695,11 +742,13 @@ class FollowService:
         failures = row["failures"] + 1
         self.db.db.execute("UPDATE follows SET failures=?,next_check=? WHERE id=?",
                            (failures, time.time() + INTERVAL, row["id"]))
-        if failures >= 3 and self._alert_due(row["id"], "all"):
+        if self._alert_due(row["id"], "all"):
             try:
                 await self.bot.send_message(row["chat_id"],
-                    f"⚠️ Follow @{html.escape(row['handle'])}: public updates could not be checked. "
-                    "Anonymous access may be blocked. Monitoring will retry automatically.")
+                    f"⚠️ Follow @{html.escape(row['handle'])}: no selected public source "
+                    "could be checked. This follow is saved, but alerts are not active "
+                    "until a source responds. Use /following → Check now for status. "
+                    "Monitoring will retry automatically.")
             except Exception:
                 pass
 
@@ -777,6 +826,10 @@ class FollowService:
                 story_ok = True
             except (ValueError, TimeoutError, OSError, json.JSONDecodeError):
                 pass
+        if shorts_ok and main_ok:
+            short_urls = {url for event_kind, url, _ in batches if event_kind == "shorts"}
+            batches = [event for event in batches
+                       if event[0] != "videos" or event[1] not in short_urls]
         profile = {}
         if selected & {"bio", "name", "avatar"}:
             try:

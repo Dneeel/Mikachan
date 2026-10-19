@@ -58,8 +58,8 @@ async def public_statuses(platform: str, handle: str) -> list[tuple[str, str, st
     return [(kind, url, title) for _, kind, url, title in posts[:15]]
 
 
-async def public_x_media(url: str) -> list[str] | None:
-    """Return only media for the requested X status, from known X media hosts."""
+async def public_x_post(url: str) -> tuple[str, list[str]] | None:
+    """Return verified text and media for exactly the requested public X status."""
     clean = clean_url(url)
     parts = [part for part in urlsplit(clean).path.split("/") if part]
     if (len(parts) < 3 or parts[1] != "status"
@@ -69,7 +69,7 @@ async def public_x_media(url: str) -> list[str] | None:
     try:
         data = await _get("twitter", f"/2/status/{parts[2]}")
     except (ValueError, httpx.HTTPError):
-        return await _vxtwitter_media(parts[0], parts[2])
+        return await _vxtwitter_post(parts[0], parts[2])
     status = data.get("status")
     if not isinstance(status, dict) or str(status.get("id")) != parts[2]:
         raise ValueError("public X status identity mismatch")
@@ -80,7 +80,7 @@ async def public_x_media(url: str) -> list[str] | None:
     media = status.get("media")
     items = media.get("all") if isinstance(media, dict) else None
     if not isinstance(items, list):
-        return None
+        items = []
     urls = []
     for item in items[:10]:
         if not isinstance(item, dict) or item.get("type") not in {"photo", "video", "gif"}:
@@ -91,10 +91,19 @@ async def public_x_media(url: str) -> list[str] | None:
         candidate = clean_url(candidate)
         if urlsplit(candidate).hostname in _MEDIA_HOSTS and candidate.startswith("https://"):
             urls.append(candidate)
-    return urls or None
+    text = status.get("text")
+    if not isinstance(text, str):
+        text = ""
+    return (text, urls) if text or urls else None
 
 
-async def _vxtwitter_media(handle: str, status_id: str) -> list[str] | None:
+async def public_x_media(url: str) -> list[str] | None:
+    """Return only verified media for the requested X status."""
+    post = await public_x_post(url)
+    return (post[1] or None) if post else None
+
+
+async def _vxtwitter_post(handle: str, status_id: str) -> tuple[str, list[str]] | None:
     """Independent public status lookup when FxTwitter challenges this server."""
     endpoint = f"https://api.vxtwitter.com/{handle}/status/{status_id}"
     await asyncio.to_thread(validate_dns, endpoint)
@@ -110,7 +119,7 @@ async def _vxtwitter_media(handle: str, status_id: str) -> list[str] | None:
         raise ValueError("public X author identity mismatch")
     media = data.get("media_extended")
     if not isinstance(media, list):
-        return None
+        media = []
     urls: list[str] = []
     for item in media[:10]:
         if not isinstance(item, dict) or item.get("type") not in {"video", "image", "gif"}:
@@ -121,7 +130,10 @@ async def _vxtwitter_media(handle: str, status_id: str) -> list[str] | None:
         candidate = clean_url(raw)
         if candidate.startswith("https://") and urlsplit(candidate).hostname in _MEDIA_HOSTS:
             urls.append(candidate)
-    return urls or None
+    text = data.get("text")
+    if not isinstance(text, str):
+        text = ""
+    return (text, urls) if text or urls else None
 
 
 async def public_tiktok_sound(sound_id: str) -> tuple[str, str, int]:

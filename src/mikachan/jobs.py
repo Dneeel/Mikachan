@@ -27,14 +27,15 @@ from aiogram.types import (
 )
 
 from .config import Settings
-from .security import source, validate_dns, collection, clean_url, extractor_env
+from .security import (source, validate_dns, collection, clean_url, extractor_env,
+                       instagram_cookie_args)
 from .store import Store
 from .media import gallery_budget, groups, media_kind, verify
 from .catalog import _Meta, recording_search_alias, resolve_collection, resolve_track
 from .matching import match_score
 from .search import Searcher
 from .podcasts import apple_podcast_feed, episodes, is_feed_url, resolve_episode_link
-from .public_social import public_tiktok_sound, public_x_media
+from .public_social import public_tiktok_sound, public_x_post
 
 MIME_EXT = {
     "image/jpeg": ".jpg",
@@ -246,6 +247,34 @@ class Worker:
     def _save_meta(directory: Path, data: dict[str, object]) -> None:
         (directory / ".mikachan-meta.json").write_text(json.dumps(data, ensure_ascii=False))
 
+    async def _deliver_text_post(
+        self, jid: str, chat: int, url: str, context: dict[str, object], body: str,
+    ) -> None:
+        """Deliver an X status that has text but no file to download."""
+        if not self.store.transition(jid, "RESOLVING", "DELIVERING"):
+            return
+        context.update({"source_url": url, "description": body, "kind": "post"})
+        self.store.set_job_context(jid, context)
+        handle = urlsplit(url).path.strip("/").split("/")[0]
+        content = f"👤 @{handle}\n\n{body}"
+        chunks = [content[i:i + 3900] for i in range(0, len(content), 3900)]
+        markup = self._buttons(jid, url, False, False, False, context=context)
+        try:
+            first = None
+            for index, chunk in enumerate(chunks):
+                sent = await self.bot.send_message(
+                    chat, chunk, parse_mode=None,
+                    reply_markup=markup if index == 0 else None,
+                )
+                first = first or sent
+        except Exception as exc:
+            self.store.transition(jid, "DELIVERING", "DELIVERY_UNCERTAIN",
+                                  error=type(exc).__name__)
+            return
+        self.store.receipt(jid, first.message_id, None)
+        self.store.transition(jid, "DELIVERING", "COMPLETED", receipt_id=first.message_id)
+        await self._clear_progress(jid, chat)
+
     async def _run(self, jid: str) -> None:
         row = self.store.job(jid)
         if row is None:
@@ -368,6 +397,16 @@ class Worker:
                     self.store.transition(jid, "DELIVERING", "COMPLETED", receipt_id=sent.message_id)
                     await self._clear_progress(jid, chat)
                     return
+            x_post = None
+            if source(url) == "twitter" and "/status/" in urlsplit(url).path \
+                    and mode != "audio":
+                try:
+                    x_post = await public_x_post(url)
+                except (ValueError, TimeoutError, httpx.HTTPError):
+                    pass
+                if x_post and x_post[0].strip() and not x_post[1]:
+                    await self._deliver_text_post(jid, chat, original_url, context, x_post[0])
+                    return
             if await self._profile(jid, original_url, chat, job_dir):
                 return
             if collection(url):
@@ -407,6 +446,13 @@ class Worker:
                 raise ValueError("Public MEGA downloads need a supported adapter")
             elif source(url) in {"spotify", "deezer"} or host == "music.apple.com":
                 raise ValueError("This catalog link does not expose a downloadable full-audio file")
+            elif source(url) == "danbooru":
+                try:
+                    paths = [await self._danbooru_post(url, job_dir, max_bytes)]
+                except (ValueError, TimeoutError, httpx.HTTPError):
+                    paths = await self._gallery_public(url, job_dir, max_bytes)
+                    if not paths:
+                        raise ValueError("This Danbooru post has no accessible public media") from None
             elif source(url) == "direct":
                 input_limit = 300 * 1024 * 1024 if context.get("kind") == "episode" else max_bytes
                 try:
@@ -437,10 +483,21 @@ class Worker:
                     source(url) == "twitter" and "/status/" in urlsplit(url).path
                 )
                 paths = None
+                if source(url) == "instagram" and mode == "audio":
+                    try:
+                        paths = await self._gallery_public(
+                            url, job_dir, max_bytes, audio_only=True)
+                        if paths:
+                            paths = [await self._transcode_mp3(paths[0], max_bytes)]
+                    except (ValueError, TimeoutError, httpx.HTTPError):
+                        paths = None
+                        for artifact in job_dir.iterdir():
+                            if artifact.is_file():
+                                artifact.unlink()
                 if source(url) == "twitter" and "/status/" in urlsplit(url).path \
                         and mode != "audio":
                     try:
-                        media_urls = await public_x_media(url)
+                        media_urls = x_post[1] if x_post else None
                         if media_urls:
                             remaining = gallery_budget(max_bytes)
                             paths = []
@@ -530,8 +587,8 @@ class Worker:
             if context.get("provisional_title") and meta.get("title"):
                 context["title"] = str(meta["title"])
             for field, names in {
-                "title": ("track", "title"),
-                "artist": ("artist", "uploader", "channel"),
+                "title": ("audio_title", "track", "title"),
+                "artist": ("audio_artist", "artist", "uploader", "channel"),
                 "description": ("description", "content", "caption"),
                 "cover": ("thumbnail",),
                 "uploader_url": ("uploader_url", "channel_url"),
@@ -709,6 +766,7 @@ class Worker:
         proc = await asyncio.create_subprocess_exec(
             "yt-dlp",
             "--ignore-config",
+            *instagram_cookie_args(url),
             *([] if source(url) == "soundcloud" else ["--flat-playlist"]),
             "--playlist-end",
             "300",
@@ -807,6 +865,7 @@ class Worker:
         proc = await asyncio.create_subprocess_exec(
             "gallery-dl",
             "--config-ignore", "--cache-file", ":memory:",
+            *instagram_cookie_args(url),
             "-J",
             "--range",
             "1-30",
@@ -892,6 +951,7 @@ class Worker:
             try:
                 proc = await asyncio.create_subprocess_exec(
                     "gallery-dl", "--config-ignore", "--cache-file", ":memory:",
+                    *instagram_cookie_args(url),
                     "-j", "--range", "1-1", avatar_target,
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
                     start_new_session=True, env=extractor_env(),
@@ -1068,6 +1128,34 @@ class Worker:
                             f.write(chunk)
                     return path
         raise ValueError("too many redirects")
+
+    async def _danbooru_post(self, url: str, directory: Path, max_bytes: int) -> Path:
+        """Resolve one public post using Danbooru's post JSON before downloading."""
+        match = re.fullmatch(r"/posts/(\d+)/?", urlsplit(url).path)
+        if not match:
+            raise ValueError("A Danbooru post link must contain its numeric ID")
+        post_id = match[1]
+        endpoint = f"https://danbooru.donmai.us/posts/{post_id}.json"
+        validate_dns(endpoint)
+        async with httpx.AsyncClient(timeout=12, follow_redirects=False) as client:
+            response = await client.get(endpoint, headers={"Accept": "application/json"})
+            response.raise_for_status()
+            if len(response.content) > 1_000_000:
+                raise ValueError("Danbooru response is too large")
+            post = response.json()
+        if not isinstance(post, dict) or str(post.get("id")) != post_id or post.get("is_deleted"):
+            raise ValueError("Danbooru post is unavailable")
+        media_url = post.get("file_url") or post.get("large_file_url")
+        if not isinstance(media_url, str):
+            raise ValueError("Danbooru post has no public file")
+        media_url = clean_url(urljoin(endpoint, media_url))
+        if not media_url.startswith("https://"):
+            raise ValueError("Danbooru file must use HTTPS")
+        self._save_meta(directory, {
+            "title": f"Danbooru post {post_id}",
+            "description": str(post.get("tag_string_general") or "")[:900],
+        })
+        return await self._direct(media_url, directory, max_bytes)
 
     async def _transcode_mp3(self, path: Path, max_bytes: int) -> Path:
         await verify(path, max(max_bytes, 300 * 1024 * 1024))
@@ -1317,6 +1405,7 @@ class Worker:
         proc = await asyncio.create_subprocess_exec(
             "gallery-dl",
             "--config-ignore", "--cache-file", ":memory:",
+            *instagram_cookie_args(url),
             "-g",
             target,
             stdout=asyncio.subprocess.PIPE,
@@ -1416,7 +1505,9 @@ class Worker:
                 await asyncio.sleep(1)
         return None
 
-    async def _gallery_public(self, url: str, directory: Path, max_bytes: int) -> list[Path] | None:
+    async def _gallery_public(
+        self, url: str, directory: Path, max_bytes: int, *, audio_only: bool = False,
+    ) -> list[Path] | None:
         """Fallback for public image/carousel posts absent from yt-dlp."""
         validate_dns(url)
         if not shutil.which("gallery-dl"):
@@ -1424,6 +1515,8 @@ class Worker:
         proc = await asyncio.create_subprocess_exec(
             "gallery-dl",
             "--config-ignore", "--cache-file", ":memory:",
+            *instagram_cookie_args(url),
+            *(["-o", "extractor.instagram.audio=merged"] if audio_only else []),
             "-j",
             "--range",
             "1-31",
@@ -1458,11 +1551,16 @@ class Worker:
             if not isinstance(message[1], str) or not message[1].startswith(("https://", "http://")):
                 continue
             meta = message[2] if isinstance(message[2], dict) else {}
+            if audio_only and (not meta.get("audio_url") or
+                               message[1] != meta.get("audio_url")):
+                continue
             urls.append((message[1], gallery_media_headers(meta)))
             if len(urls) == 1 and isinstance(message[2], dict):
                 self._save_meta(directory, message[2])
         if not urls or len(urls) > 31:
             return None
+        if audio_only:
+            urls = urls[:1]
         paths: list[Path] = []
         remaining = gallery_budget(max_bytes)
         for index, (item, headers) in enumerate(urls):
@@ -1497,6 +1595,7 @@ class Worker:
             sys.executable,
             "-m", "yt_dlp",
             "--ignore-config",
+            *instagram_cookie_args(url),
             "--playlist-end",
             "10",
             *(["--concurrent-fragments", "4"] if source(url) == "youtube" else []),

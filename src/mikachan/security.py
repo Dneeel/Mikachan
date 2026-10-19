@@ -21,6 +21,24 @@ def extractor_env() -> dict[str, str]:
     return result
 
 
+def instagram_cookie_args(url: str) -> list[str]:
+    """Opt-in Instagram cookies for extractors; never load ambient browser state."""
+    if source(url) != "instagram":
+        return []
+    raw = os.environ.get("MIKACHAN_INSTAGRAM_COOKIES_FILE", "").strip()
+    if not raw:
+        return []
+    path = Path(raw).expanduser()
+    try:
+        info = path.stat()
+    except OSError:
+        raise ValueError("Instagram cookie file is unavailable") from None
+    if (not path.is_file() or path.is_symlink() or info.st_uid != os.geteuid()
+            or info.st_mode & 0o077 or not info.st_mode & 0o400):
+        raise ValueError("Instagram cookie file must be a private regular file owned by the bot")
+    return ["--cookies", str(path.resolve())]
+
+
 def allowed(user_id: int, chat_id: int, chat_type: str, ids: set[int], private_only: bool,
             groups: set[int] | None = None) -> bool:
     return user_id in ids and (
@@ -72,6 +90,11 @@ def validate_dns(url: str) -> None:
 
 
 def links(text: str, limit: int) -> tuple[list[str], int]:
+    # Telegram clients sometimes insert a space before a Danbooru post ID.
+    text = re.sub(
+        r"(https?://(?:www\.)?danbooru\.donmai\.us/posts)\s*/\s*(\d+)",
+        r"\1/\2", text, flags=re.I,
+    )
     found = URL_RE.findall(text)
     valid: list[str] = []
     for raw in found:
@@ -100,6 +123,7 @@ def source(url: str) -> str:
         "deezer": ("deezer.com",),
         "castbox": ("castbox.fm",),
         "pornhub": ("pornhub.com",),
+        "danbooru": ("danbooru.donmai.us",),
     }
     for name, domains in mapping.items():
         if any(host == d or host.endswith("." + d) for d in domains):
