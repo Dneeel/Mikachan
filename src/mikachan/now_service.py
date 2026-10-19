@@ -70,6 +70,7 @@ def time_card(city: str, country: str, zone: str, fields: set[str],
     if countdowns:
         lines.extend(("", "🎉 <b>Next New Year</b>", *countdowns))
     lines.append("Lunar date: Umm al-Qura calculation; local observance may differ.")
+    lines.append("City data · Open-Meteo / OpenStreetMap")
     return "\n".join(lines)
 
 

@@ -108,6 +108,15 @@ async def test_follow_notification_owner_and_tiktok_avatar_stability(monkeypatch
                         "avatarLarger": "https://cdn.example/rotating-1.jpg"}}]]))
     profile = await public_profile(target)
     assert profile == {"name": "Alice", "bio": "Bio"}
+    display = await public_profile(target, display_avatar=True)
+    assert display["avatar"] == "https://cdn.example/rotating-1.jpg"
+    monkeypatch.setattr("mikachan.follow._extract", AsyncMock(return_value=[
+        [2, {"user": {"nickname": "Alice", "signature": "Bio",
+                        "avatarLarger": "https://cdn.example/rotating-2.jpg"},
+              "file_id": "stable_avatar_123"}]]))
+    assert (await public_profile(target))["avatar"] == "stable_avatar_123"
+    assert follow.db.remove(fid, 42)
+    assert follow.db.notification(notice_token, 42, 42, 44)["url"] is None
 
 
 @pytest.mark.asyncio
@@ -133,6 +142,33 @@ async def test_twitter_text_posts_enabled_and_empty_timeline_flagged(monkeypatch
     with pytest.raises(ValueError, match="no public data"):
         await follow.check(row)
     assert bot.send_message.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_tiktok_legacy_avatar_url_rebaselines_without_false_alert(monkeypatch, tmp_path):
+    store = Store(tmp_path / "db.sqlite")
+    bot = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=45)))
+    follow = FollowService(store, bot)
+    target = command_target("tiktok alice")
+    token = follow.db.session(42, 42, target)
+    follow.db.bind(token, 10)
+    follow.db.db.execute("UPDATE follow_sessions SET features=? WHERE id=?",
+                         ('["avatar"]', token))
+    fid = follow.db.save(follow.db.get_session(token, 42, 42, 10))
+    follow.db.db.execute("INSERT INTO follow_baselines VALUES (?,?)", (fid, "avatar"))
+    follow.db.db.execute("UPDATE follows SET profile_data=? WHERE id=?",
+                         ('{"avatar":"https://cdn.example/old-signed.jpg"}', fid))
+    profile = AsyncMock(return_value={"avatar": "stable_avatar_1"})
+    monkeypatch.setattr("mikachan.follow.public_profile", profile)
+    row = follow.db.db.execute("SELECT * FROM follows WHERE id=?", (fid,)).fetchone()
+    await follow.check(row)
+    assert bot.send_message.await_count == 0
+    assert "stable_avatar_1" in follow.db.db.execute(
+        "SELECT profile_data FROM follows WHERE id=?", (fid,)).fetchone()[0]
+    profile.return_value = {"avatar": "stable_avatar_2"}
+    row = follow.db.db.execute("SELECT * FROM follows WHERE id=?", (fid,)).fetchone()
+    await follow.check(row)
+    assert bot.send_message.await_count == 1
 
 
 def test_ocr_enhancement_recognizes_local_fixture():

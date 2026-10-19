@@ -690,10 +690,12 @@ class App:
                      f"fm:{row['id']}:open")] for row in rows]
         buttons.append([("✖ Close", "fm:close:close")])
         if message_id is None:
-            await self.bot.send_message(chat, body, reply_markup=kb(buttons))
+            sent = await self.bot.send_message(chat, body, reply_markup=kb(buttons))
+            self.follow.db.bind_menu(user, chat, sent.message_id)
         else:
             await self.bot.edit_message_text(body, chat_id=chat, message_id=message_id,
                                              reply_markup=kb(buttons))
+            self.follow.db.bind_menu(user, chat, message_id)
 
     async def show_profile(self, chat: int, user: int, target: Target) -> None:
         token = self.follow.db.profile_panel(user, chat, target)
@@ -907,8 +909,14 @@ class App:
             if len(parts) != 3:
                 await acknowledge(q)
                 return
+            if not self.follow.db.menu_owned(q.from_user.id, q.message.chat.id,
+                                             q.message.message_id):
+                await acknowledge(q, "This menu belongs to another user or has expired")
+                return
             follow_id, action = parts[1:]
             if action == "close":
+                self.follow.db.db.execute("DELETE FROM follow_menus WHERE chat_id=? AND message_id=?",
+                                          (q.message.chat.id, q.message.message_id))
                 await acknowledge(q)
                 await q.message.edit_text("Following menu closed.")
                 return
@@ -977,12 +985,16 @@ class App:
             if not notice:
                 await acknowledge(q, "This notification belongs to another user or has expired")
                 return
+            if parts[2] != "thanks" and notice["url"] is None:
+                await acknowledge(q, "This follow has been removed")
+                return
             await acknowledge(q)
-            target = Target(notice["platform"], notice["handle"], notice["url"])
             if parts[2] == "profile":
+                target = Target(notice["platform"], notice["handle"], notice["url"])
                 await self.show_profile(q.message.chat.id, q.from_user.id, target)
             elif parts[2] == "fetch" and notice["kind"] == "avatar" and self.store.rate(
                     q.from_user.id, "profile", 8):
+                target = Target(notice["platform"], notice["handle"], notice["url"])
                 jid = self.store.create_job(q.from_user.id, q.message.chat.id, target.url)
                 prompt = await self.bot.send_message(q.message.chat.id, "⏳ Checking public profile photo…")
                 self.store.bind_progress(jid, prompt.message_id)

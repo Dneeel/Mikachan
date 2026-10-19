@@ -133,8 +133,13 @@ async def test_following_check_now_and_close_controls(tmp_path):
     store.db.execute("UPDATE follows SET next_check=9999999999 WHERE id=?", (fid,))
     message = SimpleNamespace(chat=SimpleNamespace(id=42, type="private"),
                               message_id=22, edit_text=edit_text)
+    app.follow.db.bind_menu(42, 42, 22)
     q = SimpleNamespace(data=f"fm:{fid}:open", from_user=SimpleNamespace(id=42),
                         message=message, answer=answer)
+    q.from_user = SimpleNamespace(id=43)
+    await app.callback(q)
+    assert edits == []
+    q.from_user = SimpleNamespace(id=42)
     await app.callback(q)
     actions = button_data(edits[-1][1]["reply_markup"])
     assert {"⚙️ Settings", "🔄 Check now", "✖ Close"} <= actions.keys()

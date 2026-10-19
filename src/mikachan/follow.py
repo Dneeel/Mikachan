@@ -225,6 +225,9 @@ class FollowStore:
           token TEXT PRIMARY KEY, follow_id TEXT NOT NULL, user_id INTEGER NOT NULL,
           chat_id INTEGER NOT NULL, message_id INTEGER, kind TEXT NOT NULL,
           expires REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS follow_menus (
+          chat_id INTEGER NOT NULL, message_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
+          expires REAL NOT NULL, PRIMARY KEY(chat_id,message_id));
         """)
 
     def session(self, user: int, chat: int, target: Target) -> str:
@@ -312,10 +315,21 @@ class FollowStore:
     def notification(self, token: str, user: int, chat: int, message: int):
         return self.db.execute(
             "SELECT n.*,f.platform,f.handle,f.url FROM follow_notifications n "
-            "JOIN follows f ON f.id=n.follow_id "
+            "LEFT JOIN follows f ON f.id=n.follow_id AND f.user_id=n.user_id "
             "WHERE n.token=? AND n.user_id=? AND n.chat_id=? AND n.message_id=? "
-            "AND n.expires>? AND f.user_id=?",
-            (token, user, chat, message, time.time(), user)).fetchone()
+            "AND n.expires>?",
+            (token, user, chat, message, time.time())).fetchone()
+
+    def bind_menu(self, user: int, chat: int, message: int) -> None:
+        self.db.execute("INSERT INTO follow_menus VALUES (?,?,?,?) "
+                        "ON CONFLICT(chat_id,message_id) DO UPDATE SET "
+                        "user_id=excluded.user_id,expires=excluded.expires",
+                        (chat, message, user, time.time() + 86400))
+
+    def menu_owned(self, user: int, chat: int, message: int) -> bool:
+        return self.db.execute("SELECT 1 FROM follow_menus WHERE user_id=? AND chat_id=? "
+                               "AND message_id=? AND expires>?",
+                               (user, chat, message, time.time())).fetchone() is not None
 
 
 def confirm_panel(target: Target, token: str) -> tuple[str, InlineKeyboardMarkup]:
@@ -494,8 +508,15 @@ async def public_profile(target: Target, *, display_avatar: bool = False) -> dic
                                   "bio": user.get("signature") or ""}
                         # Signed CDN URLs rotate without a profile edit. Only a stable
                         # provider avatar identifier may trigger a change alert.
-                        if isinstance(user.get("avatarUri"), str) and user["avatarUri"]:
+                        if display_avatar:
+                            result["avatar"] = user.get("avatarLarger") or user.get("avatarMedium") or ""
+                        elif isinstance(user.get("avatarUri"), str) and user["avatarUri"]:
                             result["avatar"] = user["avatarUri"]
+                        elif isinstance(meta.get("file_id"), str) and re.fullmatch(
+                                r"[A-Za-z0-9_-]{8,128}", meta["file_id"]):
+                            # gallery-dl derives this from the avatar object filename,
+                            # omitting TikTok's rotating CDN transform suffix.
+                            result["avatar"] = meta["file_id"]
                         if "signature" not in user:
                             result.pop("bio")
                     if any(result.values()):
@@ -656,6 +677,11 @@ class FollowService:
             self.db.db.execute("INSERT OR IGNORE INTO follow_seen VALUES (?,?)", (row["id"], key))
         for key in selected & {"bio", "name", "avatar"}:
             if key in baselines and key in profile and key in old_profile and profile[key] != old_profile[key]:
+                if (key == "avatar" and target.platform == "tiktok" and
+                        str(old_profile[key]).startswith(("http://", "https://"))):
+                    # First check after upgrading the detector re-baselines an old
+                    # signed URL without inventing an avatar edit.
+                    continue
                 value = "Avatar updated" if key == "avatar" else html.escape(profile[key][:500])
                 token = secrets.token_urlsafe(8)
                 buttons = [[InlineKeyboardButton(text="🔗 Link", url=target.url)],
