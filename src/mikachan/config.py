@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     telegram_api_id: int | None = None
     telegram_api_hash: str | None = None
     coinpj_session: str = ""
+    userbot_session: str = ""
+    userbot_staging_chat_id: str = ""
     data_dir: Path = Path("data")
     max_active_downloads: int = 3
     max_active_per_user: int = 3
@@ -71,6 +73,11 @@ class Settings(BaseSettings):
                 raise ValueError("local Bot API must bind to loopback HTTP")
         if self.coinpj_session and not (self.telegram_api_id and self.telegram_api_hash):
             raise ValueError("CoinPJ user session requires Telegram API ID and hash")
+        if self.userbot_staging_chat_id and (not self.userbot_staging_chat_id.lstrip("-").isdigit()
+                                             or int(self.userbot_staging_chat_id) >= 0):
+            raise ValueError("Userbot staging chat must be a negative numeric Telegram ID")
+        if self.userbot_session and not (self.telegram_api_id and self.telegram_api_hash):
+            raise ValueError("Userbot requires Telegram API credentials")
         if not 1 <= self.max_active_downloads <= 6 or not 1 <= self.max_active_per_user <= self.max_active_downloads:
             raise ValueError("download concurrency requires 1–6 global slots and a per-user limit within that range")
         if not 1 <= self.max_links_per_message <= 5 or not 1 <= self.search_page_size <= 10:

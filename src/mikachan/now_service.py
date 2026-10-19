@@ -37,7 +37,7 @@ CITY_ALIASES = {
 def _remaining(now: datetime, day: date) -> str:
     seconds = max(0, int((datetime.combine(day, datetime.min.time(), now.tzinfo) - now)
                          .total_seconds()))
-    return f"{seconds // 86400}d {(seconds % 86400) // 3600}h"
+    return f"★ {seconds // 86400:03d}d {(seconds % 86400) // 3600:02d}h"
 
 
 def time_card(city: str, country: str, zone: str, fields: set[str],
@@ -45,32 +45,30 @@ def time_card(city: str, country: str, zone: str, fields: set[str],
     now = (instant or datetime.now(ZoneInfo(zone))).astimezone(ZoneInfo(zone))
     solar = jdatetime.date.fromgregorian(date=now.date())
     lunar = Gregorian.fromdate(now.date()).to_hijri()
-    lines = [f"🕓 <b>{html.escape(city)}, {html.escape(country)}</b>",
-             f"<b>{now:%H:%M:%S}</b> · {html.escape(zone)}"]
+    lines = [f"📍 <b>{html.escape(city)}, {html.escape(country)}</b>",
+             f"🌎 {html.escape(zone)}", f"🕓 <b>{now:%H:%M:%S}</b> × {now:%A}"]
     if "gregorian" in fields:
-        lines.append(f"📅 Gregorian · {now:%Y/%m/%d}")
+        lines.append(f"📅 {now:%Y/%m/%d} × Gregorian")
     if "jalali" in fields:
-        lines.append(f"☀️ Solar Hijri · {solar.year:04d}/{solar.month:02d}/{solar.day:02d}")
+        lines.append(f"☀️ {solar.year:04d}/{solar.month:02d}/{solar.day:02d} × Solar Hijri")
     if "imperial" in fields:
-        lines.append(f"🏛 Imperial Iranian · {solar.year + 1180:04d}/{solar.month:02d}/{solar.day:02d}")
+        lines.append(f"🏛 {solar.year + 1180:04d}/{solar.month:02d}/{solar.day:02d} × Imperial Iranian")
     if "hijri" in fields:
-        lines.append(f"🌙 Lunar Hijri · {lunar.year:04d}/{lunar.month:02d}/{lunar.day:02d}")
+        lines.append(f"🌙 {lunar.year:04d}/{lunar.month:02d}/{lunar.day:02d} × Lunar Hijri")
     if "japanese" in fields:
         era = f"Reiwa {now.year - 2018}" if now.date() >= date(2019, 5, 1) else "pre-Reiwa"
-        lines.append(f"🇯🇵 Japan · {era} · {now:%m/%d}")
+        lines.append(f"🇯🇵 Japan × {era} - {now:%m/%d}")
     countdowns = []
     if "new_gregorian" in fields:
-        countdowns.append("Gregorian · " + _remaining(now, date(now.year + 1, 1, 1)))
+        countdowns.append(_remaining(now, date(now.year + 1, 1, 1)) + " × Gregorian")
     if "new_imperial" in fields:
         next_solar = jdatetime.date(solar.year + 1, 1, 1).togregorian()
-        countdowns.append("Iranian · " + _remaining(now, next_solar))
+        countdowns.append(_remaining(now, next_solar) + " × Iranian")
     if "new_hijri" in fields:
         next_lunar = Hijri(lunar.year + 1, 1, 1).to_gregorian().datetuple()
-        countdowns.append("Lunar Hijri · " + _remaining(now, date(*next_lunar)))
+        countdowns.append(_remaining(now, date(*next_lunar)) + " × Lunar Hijri")
     if countdowns:
         lines.extend(("", "🎉 <b>Next New Year</b>", *countdowns))
-    lines.append("Lunar date: Umm al-Qura calculation; local observance may differ.")
-    lines.append("City data · Open-Meteo / OpenStreetMap")
     return "\n".join(lines)
 
 

@@ -27,10 +27,11 @@ def main() -> None:
                     code_callback=lambda: getpass.getpass("Telegram login code: "),
                     password=lambda: getpass.getpass("Telegram 2FA password, if requested: "),
                 )
-                peer = await client.get_entity("CoinPJbot")
-                if not getattr(peer, "bot", False):
-                    raise ValueError("CoinPJbot did not resolve to a Telegram bot")
-                print("Paste this secret only into Configuration → COINPJ_SESSION:")
+                for username in ("CoinPJbot", "FileToLinkiBot"):
+                    peer = await client.get_entity(username)
+                    if not getattr(peer, "bot", False):
+                        raise ValueError(f"{username} did not resolve to a Telegram bot")
+                print("Paste this secret only into protected USERBOT_SESSION configuration:")
                 print(client.session.save())
             finally:
                 await client.disconnect()

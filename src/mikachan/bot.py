@@ -36,7 +36,8 @@ from .music_ui import listening_links, verified_lyrics
 from .security import allowed, clean_url, collection, links, source, validate_dns
 from .store import Store
 from .community import Community, CommunityStore
-from .utilities import Utilities, _market_card
+from .utilities import Utilities, _market_card, qr_png
+from .userbot import UserbotBridge, is_currency_query
 from .market_prices import parse_asset_query
 from .personality import Mode, mode_for, response
 from .public_social import public_x_media
@@ -184,14 +185,14 @@ HELP_TEXT = (
     "◈ <b>Mikachan</b>\nChoose a command. Eligible links always ask before downloading.\n\n"
     "⬇️ <b>Media</b>\n"
     "/search · /music · /podcast · /twitter\n"
-    "/follow · /following · /queue · /cancel\n\n"
+    "/follow · /following · /queue\n\n"
     "👥 <b>Community</b>\n"
     "/fal · /poem · /quote · /dice\n"
     "Groups: /rules · /note · /groupstats · /groupsettings\n\n"
     "🛠 <b>Utilities</b>\n"
-    "/qr · /scan · /ocr\n"
+    "/qr · /scan · /ocr · /url (reply to a file)\n"
     "/weather CITY · /rate ASSET IRT · /now [CITY]\n"
-    "/apod · /translate en|fa TEXT\n\n"
+    "/nasa · /translate en|fa TEXT\n\n"
     "💱 Toman quotes: send exactly دلار, سکه, طلا, تتر or ارز.\n"
     "For file tools, reply to the file with a command."
 )
@@ -218,7 +219,17 @@ class App:
         self.bot = Bot(
             settings.bot_token, session=session, default=DefaultBotProperties(parse_mode="HTML")
         )
+        user_session = settings.userbot_session or settings.coinpj_session
+        self.userbot = (UserbotBridge(settings.telegram_api_id, settings.telegram_api_hash,
+                                      user_session, int(settings.userbot_staging_chat_id or 0))
+                        if user_session and settings.telegram_api_id and
+                        settings.telegram_api_hash else None)
         self.worker = Worker(settings, self.store, self.bot)
+        self.worker.userbot = self.userbot if settings.userbot_staging_chat_id else None
+        self.store.db.execute("CREATE TABLE IF NOT EXISTS url_links ("
+                              "token TEXT PRIMARY KEY,user_id INTEGER NOT NULL,"
+                              "chat_id INTEGER NOT NULL,message_id INTEGER,"
+                              "url TEXT NOT NULL,expires REAL NOT NULL)")
         self.follow = FollowService(self.store, self.bot, settings.private_chats_only)
         self._check_all_tasks: dict[int, asyncio.Task[None]] = {}
         community_store = CommunityStore(self.store.db)
@@ -228,7 +239,7 @@ class App:
         self.utilities = Utilities(self.bot, settings, self.store.db)
         assert self.store.access_registry is not None
         self.settings_ui = SettingsUI(self.store.db, self.store.access_registry,
-                                      self.utilities.now)
+                                      self.utilities.now, self.bot)
         self.group_status = GroupStatus(self.store.db, self.store.access_registry)
         self.router = Router()
         self.router.message.register(self.message)
@@ -306,11 +317,11 @@ class App:
             builtin = command_name in {
                 "help", "search", "music", "podcast", "pod", "twitter", "instagram",
                 "follow", "following",
-                "tiktok", "youtube", "settings", "queue", "status", "cancel", "admin",
+                "tiktok", "youtube", "settings", "queue", "status", "admin",
                 "fal", "poem", "quote", "dice", "nickname", "rules", "setrules",
                 "note", "setnote", "delnote", "setcmd", "delcmd", "welcome", "del",
                 "mute", "modlog", "groupstats", "groupstatus", "groupsettings", "qr", "scan", "ocr",
-                "weather", "rate", "now", "apod", "translate"}
+                "weather", "rate", "now", "nasa", "translate", "url"}
             custom = text.startswith("/") and self.community.store.item(
                 "group_commands", m.chat.id, command_name) is not None
             if explicit_text or text.startswith("/") and (builtin or custom):
@@ -320,6 +331,14 @@ class App:
                 (text == "ارز" or parse_asset_query(text) is not None or
                  text.startswith(("ارز ", "ترجمه ", "هواشناسی ", "اکنون ")) or
                  text in {"هواشناسی", "اکنون"})):
+            return
+        if self.userbot and is_currency_query(text) and self.module_enabled("utilities", m.chat.id):
+            if not self.store.rate(m.from_user.id, "currency", 8):
+                return
+            try:
+                await m.reply(await self.userbot.currency(text))
+            except ValueError as exc:
+                await m.reply(html.escape(str(exc)))
             return
         if text == "اکنون" or text.startswith("اکنون "):
             await self.utilities.command(m, "/now", text.removeprefix("اکنون").strip())
@@ -420,13 +439,13 @@ class App:
         follow_commands = {"/follow", "/following", "/twitter", "/instagram",
                            "/tiktok", "/youtube"}
         utility_commands = {"/qr", "/scan", "/ocr", "/weather", "/rate", "/now",
-                            "/apod", "/translate", "/image", "/sticker", "/stickerimage",
+                            "/nasa", "/translate", "/url", "/image", "/sticker", "/stickerimage",
                             "/gif", "/pack", "/convert"}
         if (cmd in downloader_commands and not self.module_enabled("downloader", m.chat.id) or
                 cmd in follow_commands and not self.module_enabled("follow", m.chat.id) or
                 cmd in utility_commands and not self.module_enabled("utilities", m.chat.id) or
                 cmd not in downloader_commands | follow_commands | utility_commands |
-                    {"/help", "/settings", "/admin", "/queue", "/status", "/cancel"} and
+                    {"/help", "/settings", "/admin", "/queue", "/status"} and
                     not self.module_enabled("community", m.chat.id)):
             return
         if cmd == "/admin" and m.chat.type != "private":
@@ -442,7 +461,29 @@ class App:
         if (m.chat.type in {"group", "supergroup"} and
                 not self.community.store.enabled(m.chat.id, "utilities") and
                 cmd in {"/qr", "/scan", "/ocr", "/weather", "/rate", "/now",
-                        "/apod", "/translate"}):
+                        "/nasa", "/translate", "/url"}):
+            return
+        if cmd == "/url":
+            if not self.userbot:
+                await m.reply("File links are unavailable until the private userbot session is configured.")
+            elif not m.reply_to_message:
+                await m.reply("Reply to a file, photo, video, or audio message with /url.")
+            elif self.store.rate(m.from_user.id, "file_to_link", 5):
+                try:
+                    link = await self.userbot.file_to_link(self.bot, m.chat.id,
+                                                           m.reply_to_message.message_id)
+                    token = secrets.token_urlsafe(9)
+                    buttons = InlineKeyboardMarkup(inline_keyboard=[[
+                        InlineKeyboardButton(text="▣ QR", callback_data=f"url:{token}"),
+                        InlineKeyboardButton(text="⬇ Download", url=link)]])
+                    sent = await m.reply("✅ <b>Your link is ready</b>\n\n🔗 " +
+                                         html.escape(link) + "\n\n⏳ Expires within 24 hours.",
+                                         reply_markup=buttons)
+                    self.store.db.execute("INSERT INTO url_links VALUES (?,?,?,?,?,?)",
+                                          (token, m.from_user.id, m.chat.id,
+                                           sent.message_id, link, time.time() + 86400))
+                except ValueError as exc:
+                    await m.reply(html.escape(str(exc)))
             return
         if await self.utilities.command(m, cmd, arg):
             return
@@ -483,30 +524,16 @@ class App:
                     f"Send a public {cmd[1:].title()} link or use {cmd} @handle to open Follow."
                 )
         elif cmd == "/queue":
-            jobs = self.store.jobs(m.from_user.id)
-            await m.reply(
-                "\n".join(f"<code>{j['id']}</code> · {j['state']}" for j in jobs) or "No jobs."
-            )
-        elif cmd == "/cancel":
-            if not arg:
-                active = [
-                    j
-                    for j in self.store.jobs(m.from_user.id)
-                    if j["state"] in {"QUEUED", "RESOLVING", "DOWNLOADING", "VERIFYING"}
-                ]
-                await m.reply(
-                    "Select a job to cancel:" if active else "No cancellable jobs.",
-                    reply_markup=kb([[(j["id"], f"j:{j['id']}:cancel")] for j in active])
-                    if active
-                    else None,
-                )
-            elif self.store.cancel(arg, m.from_user.id):
-                task = self.worker.tasks.get(arg)
-                if task:
-                    task.cancel()
-                await m.reply("Cancelled.")
+            active = [j for j in self.store.jobs(m.from_user.id) if j["state"] in
+                      {"QUEUED", "RESOLVING", "DOWNLOADING", "VERIFYING", "DELIVERING"}]
+            if not active:
+                await m.reply("✅ No active downloads.")
             else:
-                await m.reply("Job not found or cannot be cancelled.")
+                await m.reply("⬇️ <b>Active downloads</b>\n" + "\n".join(
+                    f"{i}. {html.escape(str(j['state']).title())}"
+                    for i, j in enumerate(active, 1)),
+                    reply_markup=kb([[(f"✖ Cancel {i}", f"j:{j['id']}:cancel")]
+                                     for i, j in enumerate(active, 1)]))
         elif cmd == "/status":
             await m.reply(
                 f"Jobs: {len(self.store.jobs(m.from_user.id))} recent · Active: {len(self.worker.tasks)}"
@@ -1035,6 +1062,19 @@ class App:
             await acknowledge(q)
             return
         data = q.data or ""
+        if data.startswith("url:"):
+            entry = self.store.db.execute("SELECT url FROM url_links WHERE token=? AND "
+                    "user_id=? AND chat_id=? AND message_id=? AND expires>?",
+                    (data[4:], q.from_user.id, q.message.chat.id, q.message.message_id,
+                     time.time())).fetchone()
+            if entry:
+                await acknowledge(q)
+                await self.bot.send_photo(q.message.chat.id,
+                    BufferedInputFile(qr_png(str(entry[0])), "link-qr.png"),
+                    caption="▣ Scan to open your link.")
+            else:
+                await acknowledge(q, "Link expired or unavailable")
+            return
         if hasattr(self, "group_status") and await self.group_status.callback(q, data):
             return
         if hasattr(self, "settings_ui") and await self.settings_ui.callback(q, data):
@@ -1784,7 +1824,6 @@ class App:
                     ("settings", "Preferences"),
                     ("queue", "My jobs"),
                     ("status", "Status"),
-                    ("cancel", "Cancel my job"),
                     ("fal", "Reviewed Hafez fortune"),
                     ("poem", "Poetry menu"),
                     ("dice", "Roll a Telegram die"),
@@ -1792,12 +1831,13 @@ class App:
                     ("groupstatus", "Observed group message statistics"),
                     ("note", "Group note"),
                     ("qr", "Create a QR image"),
+                    ("url", "Get a link for a replied file"),
                     ("scan", "Scan a replied QR or barcode"),
                     ("ocr", "Read text in a replied image"),
                     ("weather", "Weather and forecast"),
                     ("rate", "Fiat or crypto reference rate"),
                     ("now", "Local time and calendars"),
-                    ("apod", "NASA astronomy picture"),
+                    ("nasa", "NASA astronomy picture"),
                     ("translate", "Translate selected text"),
                 )
             ]
@@ -1815,5 +1855,8 @@ class App:
             await asyncio.gather(follow_task, return_exceptions=True)
             await self.worker.stop()
             task.cancel()
+            await self.settings_ui.close()
             await self.utilities.close()
+            if self.userbot:
+                await self.userbot.close()
             await self.bot.session.close()

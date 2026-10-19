@@ -28,6 +28,8 @@ CREATE TABLE IF NOT EXISTS access_bootstrap (singleton INTEGER PRIMARY KEY CHECK
  primary_owner_id INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS module_policies (
  domain TEXT PRIMARY KEY, enabled INTEGER NOT NULL CHECK(enabled IN (0,1)));
+CREATE TABLE IF NOT EXISTS private_access (
+ user_id INTEGER PRIMARY KEY, enabled INTEGER NOT NULL CHECK(enabled IN (0,1)));
 CREATE TABLE IF NOT EXISTS owner_requests (
  token TEXT PRIMARY KEY, requester_id INTEGER NOT NULL, target_id INTEGER NOT NULL,
  action TEXT NOT NULL CHECK(action IN ('PROMOTE','REVOKE')),
@@ -116,7 +118,13 @@ class AccessRegistry:
         if role is None:
             return False
         if chat_type == "private":
-            return role == "OWNER" and chat == user
+            if chat != user:
+                return False
+            if role == "OWNER":
+                return True
+            row = self.db.execute("SELECT enabled FROM private_access WHERE user_id=?",
+                                  (user,)).fetchone()
+            return bool(row[0]) if row else False
         return chat_type in {"group", "supergroup"} and chat in self.groups()
 
     def can_manage(self, user: int, chat: int) -> bool:
@@ -132,6 +140,21 @@ class AccessRegistry:
               chat: int | None = None, detail: str = "") -> None:
         self.db.execute("INSERT INTO access_audit(created,actor_id,action,user_id,chat_id,detail) "
                         "VALUES (?,?,?,?,?,?)", (time.time(), actor, action, user, chat, detail[:200]))
+
+    def private_enabled(self, user: int) -> bool:
+        if user == self.primary_owner:
+            return True
+        row = self.db.execute("SELECT enabled FROM private_access WHERE user_id=?",
+                              (user,)).fetchone()
+        return bool(row[0]) if row else False
+
+    def set_private(self, actor: int, user: int, enabled: bool) -> None:
+        if self.role(actor) != "OWNER" or user == self.primary_owner or not self.person(user):
+            raise ValueError("Only an Owner can change another registered person's private access")
+        with self._transaction():
+            self.db.execute("INSERT INTO private_access VALUES (?,?) ON CONFLICT(user_id) "
+                            "DO UPDATE SET enabled=excluded.enabled", (user, int(enabled)))
+            self.audit(actor, "private_access", user, detail="on" if enabled else "off")
 
     def module_enabled(self, domain: str) -> bool:
         if domain not in MODULES:

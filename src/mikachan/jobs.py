@@ -95,6 +95,7 @@ def extractor_error(url: str, stderr: bytes) -> str:
 class Worker:
     def __init__(self, settings: Settings, store: Store, bot: Bot):
         self.settings, self.store, self.bot = settings, store, bot
+        self.userbot = None
         self.tasks: dict[str, asyncio.Task[None]] = {}
         self.running_users: dict[int, int] = {}
         self.running = False
@@ -283,7 +284,8 @@ class Worker:
         job_dir = self.settings.data_dir / "jobs" / jid
         shutil.rmtree(job_dir, ignore_errors=True)
         job_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
-        max_bytes = (48 if self.settings.bot_api_mode == "public" else 1900) * 1024 * 1024
+        max_bytes = (1800 if self.userbot else 1900 if self.settings.bot_api_mode == "local"
+                     else 48) * 1024 * 1024
         try:
             await self._progress(jid, chat, "Resolving")
             url = await self._resolve_short(url)
@@ -615,7 +617,11 @@ class Worker:
                 sent_messages: list[Message] = []
                 visuals = [(p, k, c) for p, k, c in zip(paths, kinds, checks) if k in {"photo", "video"}]
                 others = [(p, k, c) for p, k, c in zip(paths, kinds, checks) if k not in {"photo", "video"}]
-                for chunk in groups([p for p, _, _ in visuals]):
+                visual_chunks = ([[p] for p, _, _ in visuals]
+                                 if self.userbot and any(p.stat().st_size > 48 * 1024 * 1024
+                                                         for p, _, _ in visuals)
+                                 else groups([p for p, _, _ in visuals]))
+                for chunk in visual_chunks:
                     if len(chunk) == 1:
                         path = chunk[0]
                         check = next(c for p, _, c in visuals if p == path)
@@ -625,7 +631,11 @@ class Worker:
                             bool(context.get("description")), False,
                             context=context,
                         )
-                        if media_kind(path, check) == "photo":
+                        if self.userbot and path.stat().st_size > 48 * 1024 * 1024:
+                            sent = await self.userbot.upload_and_copy(
+                                self.bot, path, chat, caption if not sent_messages else None,
+                                markup, video=media_kind(path, check) == "video")
+                        elif media_kind(path, check) == "photo":
                             sent = await self.bot.send_photo(
                                 chat, FSInputFile(path),
                                 caption=caption if not sent_messages else None,
@@ -666,7 +676,11 @@ class Worker:
                         context.get("kind") == "episode",
                         context,
                     )
-                    if kind == "audio":
+                    if self.userbot and path.stat().st_size > 48 * 1024 * 1024:
+                        sent = await self.userbot.upload_and_copy(
+                            self.bot, path, chat, caption if not sent_messages else None,
+                            markup)
+                    elif kind == "audio":
                         title = str(context.get("title") or Path(urlsplit(url).path).stem or "Audio")[:64]
                         artist = str(context.get("artist") or "")[:64]
                         audio_name = re.sub(
@@ -697,10 +711,10 @@ class Worker:
                     )
                 for sent in sent_messages:
                     file_id = (
-                        sent.audio.file_id if sent.audio else
-                        sent.video.file_id if sent.video else
-                        sent.photo[-1].file_id if sent.photo else
-                        sent.document.file_id if sent.document else None
+                        sent.audio.file_id if getattr(sent, "audio", None) else
+                        sent.video.file_id if getattr(sent, "video", None) else
+                        sent.photo[-1].file_id if getattr(sent, "photo", None) else
+                        sent.document.file_id if getattr(sent, "document", None) else None
                     )
                     self.store.receipt(jid, sent.message_id, file_id)
             except Exception as exc:
@@ -720,23 +734,24 @@ class Worker:
             if len(paths) == 1:
                 sent = sent_messages[0]
                 file_id = (
-                    sent.audio.file_id if sent.audio else
-                    sent.video.file_id if sent.video else
-                    sent.photo[-1].file_id if sent.photo else
-                    sent.document.file_id if sent.document else None
+                    sent.audio.file_id if getattr(sent, "audio", None) else
+                    sent.video.file_id if getattr(sent, "video", None) else
+                    sent.photo[-1].file_id if getattr(sent, "photo", None) else
+                    sent.document.file_id if getattr(sent, "document", None) else None
                 )
-                assert file_id is not None
-                self.store.db.execute(
-                    "INSERT OR REPLACE INTO cache VALUES (?,?,?,?,strftime('%s','now'))",
-                    (key, file_id, "document" if sent.document else kinds[0], row["user_id"]),
-                )
-                self.store.db.execute(
-                    "INSERT OR REPLACE INTO cache_captions VALUES (?,?)", (key, caption)
-                )
-                self.store.db.execute(
-                    "INSERT OR REPLACE INTO cache_audio VALUES (?,?)",
-                    (key, int(bool(checks[0]["audio"]))),
-                )
+                if file_id is not None:
+                    self.store.db.execute(
+                        "INSERT OR REPLACE INTO cache VALUES (?,?,?,?,strftime('%s','now'))",
+                        (key, file_id, "document" if getattr(sent, "document", None) else kinds[0],
+                         row["user_id"]),
+                    )
+                    self.store.db.execute(
+                        "INSERT OR REPLACE INTO cache_captions VALUES (?,?)", (key, caption)
+                    )
+                    self.store.db.execute(
+                        "INSERT OR REPLACE INTO cache_audio VALUES (?,?)",
+                        (key, int(bool(checks[0]["audio"]))),
+                    )
         except asyncio.CancelledError:
             raise
         except Exception as exc:

@@ -103,6 +103,26 @@ def weather_label(code: int) -> str:
                 f"WMO weather code {code}")
 
 
+def weather_icon(code: int) -> str:
+    if code == 0:
+        return "☀️"
+    if code == 1:
+        return "🌤"
+    if code == 2:
+        return "⛅️"
+    if code == 3:
+        return "☁️"
+    if code in {45, 48}:
+        return "🌫"
+    if code in {51, 53, 55, 56, 57, 80, 81, 82}:
+        return "🌦"
+    if code in {61, 63, 65, 66, 67}:
+        return "🌧"
+    if code in {71, 73, 75, 77, 85, 86}:
+        return "🌨"
+    return "⛈" if code in {95, 96, 99} else "🌤"
+
+
 def aqi_label(value: int) -> str:
     """US EPA AQI bands; the index is modeled by Open-Meteo, not a local sensor."""
     if value < 0 or value > 500:
@@ -472,7 +492,7 @@ class Utilities:
 
     async def command(self, m: Message, cmd: str, arg: str) -> bool:
         if cmd not in {"/qr", "/scan", "/ocr", "/weather", "/rate", "/now",
-                       "/apod", "/translate"}:
+                       "/nasa", "/translate"}:
             return False
         try:
             await self._command(m, cmd, arg)
@@ -676,11 +696,12 @@ class Utilities:
                     air_advice = aqi_label(index).replace(" · ", "\n", 1)
                 except (KeyError, TypeError, ValueError):
                     pass
-            lines = [f"🌤 <b>{html.escape(str(place['name']))}, "
+            current_icon = weather_icon(int(now["weather_code"]))
+            lines = [f"{current_icon} <b>{html.escape(str(place['name']))}, "
                      f"{html.escape(str(place.get('country', '')))}</b>", "",
                      f"🌡 {safe(now['temperature_2m'])} °C",
                      f"👀 {safe(today_low)}–{safe(today_high)} °C",
-                     f"🌤 {html.escape(weather_label(int(now['weather_code'])))}",
+                     f"{current_icon} {html.escape(weather_label(int(now['weather_code'])))}",
                      f"🌧 Rain {safe(now['precipitation'])} mm",
                      f"🌪 Wind {safe(now['wind_speed_10m'])} km/h",
                      f"⚠️ {html.escape(air_line)}", "",
@@ -693,9 +714,8 @@ class Utilities:
                 daily["time"], daily["temperature_2m_min"], daily["temperature_2m_max"],
                 daily["precipitation_sum"], daily["weather_code"])):
                 label = weather_label(int(code))
-                icon = "🌨" if "Snow" in label else "⛈" if "Thunder" in label else \
-                    "🌧" if "Rain" in label or "Drizzle" in label else "☀️"
-                separator = " × " if index == 0 else " "
+                icon = weather_icon(int(code))
+                separator = " × "
                 lines.extend(("", f"{icon} <b>{safe(str(day).replace('-', '/'))}</b>"
                               f"{separator}{html.escape(label)}",
                               f"🌡 {safe(low)}–{safe(high)} °C", f"🌧 Rain {safe(rain)} mm"))
@@ -778,7 +798,7 @@ class Utilities:
             jalali = jdatetime.date.fromgregorian(date=now.date())
             await m.reply(html.escape(f"{zone}: {now:%A %Y-%m-%d %H:%M %Z}\n"
                                       f"Jalali: {jalali:%Y-%m-%d}"))
-        elif cmd == "/apod":
+        elif cmd == "/nasa":
             try:
                 data = await self.apod_page()
             except (httpx.HTTPError, ValueError, OSError):
