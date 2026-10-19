@@ -10,6 +10,12 @@ from mikachan.podcasts import resolve_episode_link
 
 
 class CastboxEpisodeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_spotify_chapter_reports_no_public_full_audio(self):
+        with self.assertRaisesRegex(ValueError, "do not expose full public audio"):
+            await resolve_episode_link(
+                "https://open.spotify.com/podcast-chapter/0340Px49RB7h1l7NrIphNY"
+            )
+
     async def test_short_link_resolves_only_unique_exact_episode(self):
         original_client = httpx.AsyncClient
         title = "اپیزود دویست و هشتاد و سوم: اقتصاد انقلاب می‌کند؟"

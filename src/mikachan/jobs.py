@@ -81,31 +81,34 @@ class Worker:
     def __init__(self, settings: Settings, store: Store, bot: Bot):
         self.settings, self.store, self.bot = settings, store, bot
         self.tasks: dict[str, asyncio.Task[None]] = {}
-        self.running_users: set[int] = set()
+        self.running_users: dict[int, int] = {}
         self.running = False
 
     async def loop(self) -> None:
         self.running = True
         while self.running:
-            if len(self.tasks) < self.settings.max_active_downloads:
-                rows = self.store.next_jobs()
-                for row in rows:
-                    if len(self.tasks) >= self.settings.max_active_downloads:
-                        break
-                    if row["user_id"] not in self.running_users:
-                        old = row["state"]
-                        if self.store.transition(row["id"], old, "RESOLVING"):
-                            self.running_users.add(row["user_id"])
-                            task = asyncio.create_task(self._run(row["id"]))
-                            self.tasks[row["id"]] = task
-                            task.add_done_callback(
-                                partial(self._task_done, str(row["id"]), int(row["user_id"]))
-                            )
-            await asyncio.sleep(1)
+            while len(self.tasks) < self.settings.max_active_downloads:
+                row = next((candidate for candidate in self.store.next_jobs()
+                            if self.running_users.get(int(candidate['user_id']), 0)
+                            < self.settings.max_active_per_user), None)
+                if row is None:
+                    break
+                if not self.store.transition(row['id'], row['state'], 'RESOLVING'):
+                    break
+                user = int(row['user_id'])
+                self.running_users[user] = self.running_users.get(user, 0) + 1
+                task = asyncio.create_task(self._run(row['id']))
+                self.tasks[row['id']] = task
+                task.add_done_callback(partial(self._task_done, str(row['id']), user))
+            await asyncio.sleep(0.5)
 
     def _done(self, jid: str, user: int) -> None:
         self.tasks.pop(jid, None)
-        self.running_users.discard(user)
+        remaining = self.running_users.get(user, 0) - 1
+        if remaining > 0:
+            self.running_users[user] = remaining
+        else:
+            self.running_users.pop(user, None)
 
     def _task_done(self, jid: str, user: int, task: asyncio.Task[None]) -> None:
         self._done(jid, user)
@@ -114,9 +117,9 @@ class Worker:
 
     async def stop(self) -> None:
         self.running = False
-        for task in self.tasks.values():
+        for task in list(self.tasks.values()):
             task.cancel()
-        await asyncio.gather(*self.tasks.values(), return_exceptions=True)
+        await asyncio.gather(*list(self.tasks.values()), return_exceptions=True)
 
     async def _progress(self, jid: str, chat: int, stage: str, active: bool = True) -> None:
         from .bot import kb
@@ -321,10 +324,18 @@ class Worker:
                         self.store.transition(
                             jid, "DELIVERING", "DELIVERY_UNCERTAIN", error=type(exc).__name__
                         )
+                        await self._progress(
+                            jid, chat, "⚠️ Telegram did not confirm delivery. Check the chat before retrying.",
+                            active=False,
+                        )
                         return
                 except Exception as exc:
                     self.store.transition(
                         jid, "DELIVERING", "DELIVERY_UNCERTAIN", error=type(exc).__name__
+                    )
+                    await self._progress(
+                        jid, chat, "⚠️ Telegram did not confirm delivery. Check the chat before retrying.",
+                        active=False,
                     )
                     return
                 else:
@@ -412,10 +423,12 @@ class Worker:
                                 artifact.unlink()
                 try:
                     if paths is None:
-                        paths = await self._ytdlp(
-                            url, job_dir,
-                            min(300 * 1024 * 1024, max_bytes * 6) if mode == "audio" else max_bytes,
-                            mode)
+                        download_limit = (
+                            min(240 * 1024 * 1024, max_bytes * 5)
+                            if mode == "audio" or source(url) == "youtube" and mode != "document"
+                            else max_bytes
+                        )
+                        paths = await self._ytdlp(url, job_dir, download_limit, mode)
                 except ValueError as extraction_error:
                     for artifact in job_dir.iterdir():
                         if artifact.is_file():
@@ -455,8 +468,9 @@ class Worker:
             await self._progress(jid, chat, "Processing")
             if mode == "audio" and len(paths) == 1 and paths[0].stat().st_size > max_bytes:
                 paths = [await self._compress_mp3(paths[0], max_bytes)]
-            if source(original_url) == "youtube" and len(paths) == 1 and paths[0].stat().st_size > max_bytes:
-                raise ValueError("Video exceeds the Telegram upload limit; try 480p or MP3")
+            if source(original_url) == "youtube" and mode != "audio" and len(paths) == 1 \
+                    and paths[0].stat().st_size > max_bytes:
+                paths = [await self._fit_video(paths[0], max_bytes, mode)]
             if sum(p.stat().st_size for p in paths) > gallery_budget(max_bytes):
                 raise ValueError("gallery exceeds Bot API mode limit")
             if mode != "document":
@@ -514,11 +528,20 @@ class Worker:
                                 reply_markup=markup,
                             )
                         else:
-                            sent = await self.bot.send_video(
-                                chat, FSInputFile(path), supports_streaming=True,
-                                caption=caption if not sent_messages else None,
-                                reply_markup=markup,
-                            )
+                            try:
+                                sent = await self.bot.send_video(
+                                    chat, FSInputFile(path), supports_streaming=True,
+                                    caption=caption if not sent_messages else None,
+                                    reply_markup=markup,
+                                )
+                            except TelegramBadRequest:
+                                # Telegram can reject a playable MP4 as native
+                                # video. A document still delivers the exact file.
+                                sent = await self.bot.send_document(
+                                    chat, FSInputFile(path),
+                                    caption=caption if not sent_messages else None,
+                                    reply_markup=markup,
+                                )
                         sent_messages.append(sent)
                     else:
                         media: list[
@@ -580,6 +603,11 @@ class Worker:
                 self.store.transition(
                     jid, "DELIVERING", "DELIVERY_UNCERTAIN", error=type(exc).__name__
                 )
+                await self._progress(
+                    jid, chat,
+                    "⚠️ Telegram did not confirm delivery. Check the chat before retrying.",
+                    active=False,
+                )
                 return
             self.store.transition(
                 jid, "DELIVERING", "COMPLETED", receipt_id=sent_messages[0].message_id
@@ -596,7 +624,7 @@ class Worker:
                 assert file_id is not None
                 self.store.db.execute(
                     "INSERT OR REPLACE INTO cache VALUES (?,?,?,?,strftime('%s','now'))",
-                    (key, file_id, kinds[0], row["user_id"]),
+                    (key, file_id, "document" if sent.document else kinds[0], row["user_id"]),
                 )
                 self.store.db.execute(
                     "INSERT OR REPLACE INTO cache_captions VALUES (?,?)", (key, caption)
@@ -1054,6 +1082,53 @@ class Worker:
         path.unlink()
         return target
 
+    async def _fit_video(self, path: Path, max_bytes: int, mode: str) -> Path:
+        """Fit a YouTube video to the selected Bot API upload budget."""
+        probe = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "json", str(path), stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await asyncio.wait_for(probe.communicate(), 20)
+        if probe.returncode:
+            raise ValueError("Video duration could not be verified")
+        try:
+            duration = float(json.loads(stdout)["format"]["duration"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("Video duration could not be verified") from exc
+        if not 0 < duration <= 7200:
+            raise ValueError("Video is too long for the public Telegram upload limit")
+        video_rate = int(max_bytes * 0.87 * 8 / duration - 112_000)
+        if video_rate < 350_000:
+            raise ValueError("Video is too long to fit Telegram's upload limit at usable quality")
+        target = path.with_name(path.stem + ".fitted.mp4")
+        height = 480 if mode == "480" else 720 if mode == "720" else 1080
+        if video_rate < 1_200_000:
+            height = min(height, 480)
+        elif video_rate < 2_500_000:
+            height = min(height, 720)
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(path),
+            "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "libx264",
+            "-preset", "veryfast", "-b:v", str(video_rate),
+            "-maxrate", str(video_rate), "-bufsize", str(video_rate * 2),
+            "-vf", f"scale=-2:min(ih\\,{height})", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart",
+            "-threads", "2", str(target), stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL, start_new_session=True,
+        )
+        try:
+            await asyncio.wait_for(proc.communicate(), 600)
+        except (TimeoutError, asyncio.CancelledError):
+            import signal
+            os.killpg(proc.pid, signal.SIGTERM)
+            await proc.wait()
+            raise
+        if proc.returncode or not target.is_file() or target.stat().st_size > max_bytes:
+            raise ValueError("Video could not be fitted within Telegram's upload limit")
+        path.unlink()
+        return target
+
     async def _prepare_media(self, paths: list[Path], max_bytes: int) -> list[Path]:
         """Make visual posts playable in Telegram and standalone audio MP3."""
         prepared: list[Path] = []
@@ -1354,9 +1429,9 @@ class Worker:
         if source(url) == "youtube" and mode in {"480", "720", "1080"}:
             quality_args = [
                 "-f",
-                (f"bv*[height<={mode}][ext=mp4]+ba[ext=m4a]/"
+                (f"bv[height<={mode}][ext=mp4]+ba[ext=m4a]/"
                  f"b[height<={mode}][ext=mp4]/"
-                 f"bv*[height<={mode}]+ba/best[height<={mode}]"),
+                 f"bv[height<={mode}]+ba/best[height<={mode}]"),
                 "--merge-output-format", "mp4",
             ]
         proc = await asyncio.create_subprocess_exec(
@@ -1365,6 +1440,7 @@ class Worker:
             "--ignore-config",
             "--playlist-end",
             "10",
+            *(["--concurrent-fragments", "4"] if source(url) == "youtube" else []),
             *(["--no-playlist"] if not collection(url) else []),
             "--no-warnings",
             "--restrict-filenames",

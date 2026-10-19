@@ -2,7 +2,7 @@
 
 import json
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
@@ -121,7 +121,7 @@ async def test_following_check_now_and_close_controls(tmp_path):
         edits.append((body, kwargs))
     async def answer(_text=None):
         return None
-    bot = SimpleNamespace(edit_message_text=edit_text)
+    bot = SimpleNamespace(edit_message_text=edit_text, send_message=AsyncMock())
     app = App.__new__(App)
     app.store = store
     app.bot = bot
@@ -144,8 +144,9 @@ async def test_following_check_now_and_close_controls(tmp_path):
     actions = button_data(edits[-1][1]["reply_markup"])
     assert {"⚙️ Settings", "🔄 Check now", "✖ Close"} <= actions.keys()
     q.data = actions["🔄 Check now"]
+    app.follow.check = AsyncMock(return_value={"timeline": False, "profile": True})
     await app.callback(q)
-    assert store.db.execute("SELECT next_check FROM follows WHERE id=?", (fid,)).fetchone()[0] < 9999999999
+    assert "Unavailable from public sources: timeline" in bot.send_message.await_args.args[1]
     q.data = "fm:close:close"
     await app.callback(q)
     assert edits[-1][0] == "Following menu closed."

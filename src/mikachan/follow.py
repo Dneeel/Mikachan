@@ -469,8 +469,31 @@ async def public_items(target: Target, kind: str = "posts") -> list[tuple[str, s
     if target.platform == "twitter":
         # gallery-dl omits text-only tweets unless this option is enabled.
         command.extend(["-o", "extractor.twitter.text-tweets=true"])
-    data = await _extract([*command, url], 35)
-    return _gallery_items(data, target, kind)
+    try:
+        data = await _extract([*command, url], 35)
+        return _gallery_items(data, target, kind)
+    except (ValueError, TimeoutError, OSError, json.JSONDecodeError):
+        if target.platform != "tiktok" or kind == "stories":
+            raise
+        # Some public TikTok timelines are unavailable to gallery-dl while
+        # yt-dlp's user extractor can still return their post IDs.
+        data = await _extract([
+            "yt-dlp", "--flat-playlist", "--playlist-end", "15",
+            "--dump-single-json", "--skip-download", "--no-warnings", target.url,
+        ], 35)
+        if not isinstance(data, dict) or not isinstance(data.get("entries"), list):
+            raise ValueError("public TikTok timeline unavailable")
+        fallback_items: list[tuple[str, str, str]] = []
+        for entry in data["entries"][:15]:
+            if not isinstance(entry, dict):
+                continue
+            item_id = str(entry.get("id") or "")
+            if re.fullmatch(r"\d{10,22}", item_id):
+                fallback_items.append((
+                    "posts", f"https://www.tiktok.com/@{target.handle}/video/{item_id}",
+                    str(entry.get("title") or "")[:300],
+                ))
+        return fallback_items
 
 
 async def public_profile(target: Target, *, display_avatar: bool = False) -> dict[str, str]:
@@ -541,6 +564,7 @@ class FollowService:
         self.private_chats_only = private_chats_only
         self.db = FollowStore(store.db)
         self.running = False
+        self.check_lock = asyncio.Lock()
 
     async def loop(self) -> None:
         self.running = True
@@ -554,7 +578,8 @@ class FollowService:
                     self.db.remove(row["id"], row["user_id"])
                     continue
                 try:
-                    await self.check(row)
+                    async with self.check_lock:
+                        await self.check(row)
                 except (ValueError, TimeoutError, httpx.HTTPError, OSError, json.JSONDecodeError):
                     await self._failed(row)
                 except Exception:
@@ -586,6 +611,10 @@ class FollowService:
         entry = self.db.db.execute("SELECT failures,warned FROM follow_health "
                                    "WHERE follow_id=? AND category=?",
                                    (row["id"], category)).fetchone()
+        if category == "stories":
+            # No story or a blocked anonymous story endpoint is not an
+            # account change. Keep the status for explicit checks, no alert.
+            return
         if entry["failures"] == 3 and not entry["warned"]:
             self.db.db.execute("UPDATE follow_health SET warned=1 WHERE follow_id=? AND category=?",
                                (row["id"], category))
@@ -596,7 +625,7 @@ class FollowService:
             except Exception:
                 pass
 
-    async def check(self, row) -> None:
+    async def check(self, row) -> dict[str, bool]:
         target = Target(row["platform"], row["handle"], row["url"])
         selected = set(json.loads(row["features"]))
         baselines = {r[0] for r in self.db.db.execute(
@@ -714,6 +743,7 @@ class FollowService:
         self.db.db.execute("DELETE FROM follow_seen WHERE follow_id=? AND rowid NOT IN "
                            "(SELECT rowid FROM follow_seen WHERE follow_id=? ORDER BY rowid DESC LIMIT 100)",
                            (row["id"], row["id"]))
+        return health
 
     async def deliver(self, row, target: Target, kind: str, url: str, title: str) -> None:
         if row["mode"] == "media":

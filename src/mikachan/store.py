@@ -47,6 +47,8 @@ CREATE TABLE IF NOT EXISTS preferences (
 CREATE TABLE IF NOT EXISTS collection_selections (
  collection_id TEXT NOT NULL, item_index INTEGER NOT NULL, job_id TEXT NOT NULL,
  PRIMARY KEY(collection_id,item_index));
+CREATE TABLE IF NOT EXISTS collection_batches (
+ collection_id TEXT PRIMARY KEY, state TEXT NOT NULL DEFAULT 'ACTIVE');
 CREATE TABLE IF NOT EXISTS collections (
  id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, chat_id INTEGER NOT NULL,
  message_id INTEGER, title TEXT NOT NULL, items TEXT NOT NULL, expires REAL NOT NULL);
@@ -353,7 +355,11 @@ class Store:
             result: tuple[str | None, bool]
             row = self.collection(cid, user, chat)
             items = json.loads(row["items"]) if row else []
-            if not 0 <= index < len(items):
+            stopped = self.db.execute(
+                "SELECT 1 FROM collection_batches WHERE collection_id=? AND state='CANCELLED'",
+                (cid,),
+            ).fetchone()
+            if stopped or not 0 <= index < len(items):
                 result = (None, False)
             else:
                 existing = self.db.execute(
@@ -368,6 +374,13 @@ class Store:
                     self.db.execute(
                         "INSERT INTO collection_selections VALUES (?,?,?)", (cid, index, jid)
                     )
+                    self.db.execute(
+                        "INSERT OR IGNORE INTO collection_batches VALUES (?,'ACTIVE')", (cid,)
+                    )
+                    self.db.execute(
+                        "UPDATE collections SET expires=? WHERE id=?",
+                        (time.time() + 86400, cid),
+                    )
                     result = (jid, True)
             self.db.execute("COMMIT")
             return result
@@ -381,15 +394,63 @@ class Store:
             (cid, user, chat, time.time()),
         ).fetchone()
 
+    def collection_batch(self, cid: str, user: int, chat: int) -> tuple[int, int, bool]:
+        row = self.collection(cid, user, chat)
+        if row is None:
+            return 0, 0, False
+        counts = self.db.execute(
+            "SELECT count(*),sum(CASE WHEN j.state IN ('QUEUED','RETRYABLE','RESOLVING',"
+            "'DOWNLOADING','VERIFYING') THEN 1 ELSE 0 END) "
+            "FROM collection_selections s JOIN jobs j ON j.id=s.job_id "
+            "WHERE s.collection_id=?", (cid,),
+        ).fetchone()
+        stopped = self.db.execute(
+            "SELECT state FROM collection_batches WHERE collection_id=?", (cid,)
+        ).fetchone()
+        return int(counts[0]), int(counts[1] or 0), bool(stopped and stopped[0] == 'CANCELLED')
+
+    def cancel_collection(self, cid: str, user: int, chat: int, message: int) -> int | None:
+        """Stop undispatched items only; let the current item complete."""
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.collection(cid, user, chat)
+            if row is None or row['message_id'] != message:
+                self.db.execute("COMMIT")
+                return None
+            self.db.execute(
+                "INSERT INTO collection_batches VALUES (?,'CANCELLED') "
+                "ON CONFLICT(collection_id) DO UPDATE SET state='CANCELLED'", (cid,),
+            )
+            changed = self.db.execute(
+                "UPDATE jobs SET state='CANCELLED',updated=? WHERE id IN "
+                "(SELECT job_id FROM collection_selections WHERE collection_id=?) "
+                "AND state IN ('QUEUED','RETRYABLE')", (time.time(), cid),
+            ).rowcount
+            self.db.execute("COMMIT")
+            return changed
+        except BaseException:
+            self.db.execute("ROLLBACK")
+            raise
+
     def job(self, jid: str) -> sqlite3.Row | None:
         return self.db.execute("SELECT * FROM jobs WHERE id=?", (jid,)).fetchone()
 
     def next_jobs(self) -> list[sqlite3.Row]:
         return list(
-            self.db.execute("""SELECT * FROM (
-            SELECT *, ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY created,id) AS priority
-            FROM jobs WHERE state IN ('QUEUED','RETRYABLE')
-        ) WHERE priority=1 ORDER BY created LIMIT 4""")
+            self.db.execute("""WITH eligible AS (
+              SELECT j.*, ROW_NUMBER() OVER (
+                PARTITION BY j.user_id
+                ORDER BY CASE WHEN s.collection_id IS NULL THEN 0 ELSE 1 END,
+                         j.created,j.id) AS user_priority
+              FROM jobs j LEFT JOIN collection_selections s ON s.job_id=j.id
+              WHERE j.state IN ('QUEUED','RETRYABLE')
+                AND (s.collection_id IS NULL OR NOT EXISTS (
+                  SELECT 1 FROM collection_selections other
+                  JOIN jobs running ON running.id=other.job_id
+                  WHERE other.collection_id=s.collection_id
+                    AND running.state IN ('RESOLVING','DOWNLOADING','VERIFYING','DELIVERING')))
+            ) SELECT * FROM eligible WHERE user_priority<=6
+              ORDER BY user_priority,created,id""")
         )
 
     def jobs(self, user: int) -> list[sqlite3.Row]:

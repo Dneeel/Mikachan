@@ -26,8 +26,8 @@ class Settings(BaseSettings):
     telegram_api_id: int | None = None
     telegram_api_hash: str | None = None
     data_dir: Path = Path("data")
-    max_active_downloads: int = 2
-    max_active_per_user: int = 1
+    max_active_downloads: int = 3
+    max_active_per_user: int = 3
     max_links_per_message: int = 5
     search_page_size: int = 10
     search_session_ttl_seconds: int = 600
@@ -68,8 +68,8 @@ class Settings(BaseSettings):
             parsed = urlsplit(self.local_bot_api_url)
             if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "::1", "localhost"}:
                 raise ValueError("local Bot API must bind to loopback HTTP")
-        if not 1 <= self.max_active_downloads <= 2 or self.max_active_per_user != 1:
-            raise ValueError("download concurrency must be at most two global and one per user")
+        if not 1 <= self.max_active_downloads <= 6 or not 1 <= self.max_active_per_user <= self.max_active_downloads:
+            raise ValueError("download concurrency requires 1–6 global slots and a per-user limit within that range")
         if not 1 <= self.max_links_per_message <= 5 or not 1 <= self.search_page_size <= 10:
             raise ValueError("invalid message/search limits")
         if not 60 <= self.navasan_refresh_seconds <= 86_400:

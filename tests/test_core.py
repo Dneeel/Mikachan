@@ -131,7 +131,7 @@ class CollectionTests(unittest.TestCase):
 
 
 class QueueTests(unittest.TestCase):
-    def test_one_oldest_job_per_user(self):
+    def test_multiple_candidates_fairly_span_users(self):
         with tempfile.TemporaryDirectory() as d:
             db = Store(Path(d) / "n.sqlite")
             for i in range(35):
@@ -139,7 +139,8 @@ class QueueTests(unittest.TestCase):
             db.create_job(2, 2, "https://a.com/other")
             rows = db.next_jobs()
             self.assertEqual({r["user_id"] for r in rows}, {1, 2})
-            self.assertEqual(len(rows), 2)
+            self.assertEqual(len(rows), 7)
+            self.assertEqual({r["user_id"] for r in rows[:2]}, {1, 2})
 
 
 class RateTests(unittest.TestCase):

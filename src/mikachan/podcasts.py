@@ -106,6 +106,11 @@ async def resolve_episode_link(url: str) -> dict[str, str | int] | None:
     """Resolve a specific Apple, Spotify, or Castbox episode to public audio."""
     clean = clean_url(url)
     host = urlsplit(clean).hostname or ""
+    if host == "open.spotify.com" and urlsplit(clean).path.startswith("/podcast-chapter/"):
+        raise ValueError(
+            "Spotify podcast chapters do not expose full public audio; "
+            "use the publisher's RSS episode link if one exists"
+        )
     castbox = host == "castbox.fm" or host.endswith(".castbox.fm")
     if not (
         host == "podcasts.apple.com" and "i=" in urlsplit(clean).query
@@ -185,7 +190,9 @@ async def resolve_episode_link(url: str) -> dict[str, str | int] | None:
         match = candidate
         break
     if match is None:
-        raise ValueError("The episode's public audio link is no longer available")
+        detail = ("; Spotify only exposes a preview for this episode"
+                  if host == "open.spotify.com" else "")
+        raise ValueError("The episode's public audio link is no longer available" + detail)
     return {
         "url": clean_url(str(match["episodeUrl"])),
         "title": str(match.get("trackName") or title),

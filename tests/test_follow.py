@@ -4,7 +4,7 @@ import pytest
 
 from mikachan.follow import (FollowService, FollowStore, command_target,
                                creator_from_post, profile_target, public_profile,
-                               _gallery_items)
+                               _gallery_items, public_items)
 from mikachan.store import Store
 
 
@@ -49,6 +49,36 @@ def test_gallery_accepts_text_tweets_and_rejects_embedded_errors():
         ("tweets", "https://x.com/alice/status/123", "text only")]
     with pytest.raises(ValueError):
         _gallery_items([[-1, {"error": "HttpError"}]], target, "posts")
+
+
+@pytest.mark.asyncio
+async def test_tiktok_timeline_uses_second_public_extractor(monkeypatch):
+    calls = []
+    async def extract(command, _timeout):
+        calls.append(command[0])
+        if command[0] == "gallery-dl":
+            raise ValueError("public source unavailable")
+        return {"entries": [{"id": "1234567890123456789", "title": "new post"}]}
+    monkeypatch.setattr("mikachan.follow.validate_dns", lambda _url: None)
+    monkeypatch.setattr("mikachan.follow._extract", extract)
+    items = await public_items(command_target("tiktok alice"))
+    assert calls == ["gallery-dl", "yt-dlp"]
+    assert items == [("posts", "https://www.tiktok.com/@alice/video/1234567890123456789",
+                      "new post")]
+
+
+@pytest.mark.asyncio
+async def test_story_source_failure_does_not_send_account_alert(tmp_path):
+    store = Store(tmp_path / "db.sqlite")
+    class Bot:
+        messages = []
+        async def send_message(self, chat, text, **kwargs):
+            self.messages.append(text)
+    service = FollowService(store, Bot())
+    row = {"id": "follow", "chat_id": 42, "handle": "alice"}
+    for _ in range(4):
+        await service._source_health(row, "stories", False)
+    assert service.bot.messages == []
 
 
 @pytest.mark.asyncio

@@ -104,7 +104,7 @@ def download_prompt_markup(cid: str, url: str) -> InlineKeyboardMarkup:
 
 def collection_view(
     cid: str, title: str, items: Sequence[Mapping[str, object]], page: int,
-    context: dict[str, object],
+    context: dict[str, object], batch: tuple[int, int, bool] = (0, 0, False),
 ) -> tuple[str, InlineKeyboardMarkup]:
     page = max(0, min(page, (len(items) - 1) // 10))
     rows: list[list[tuple[str, str]]] = []
@@ -121,7 +121,14 @@ def collection_view(
         nav.append(("Next ▶", f"v:{cid}:p:{page + 1}"))
     if nav:
         rows.append(nav)
-    rows.append([("⬇️ Download all", f"v:{cid}:q:all")])
+    if batch[2]:
+        rows.append([("⏹ Remaining downloads stopped", f"v:{cid}:status:0")])
+    elif batch[0] == len(items) and not batch[1]:
+        rows.append([("✅ Selected items processed", f"v:{cid}:status:0")])
+    else:
+        rows.append([("⬇️ Download all", f"v:{cid}:q:all")])
+        if batch[1]:
+            rows.append([("⏹ Stop remaining downloads", f"v:{cid}:stop:0")])
     if context.get("search_sid"):
         rows.append([("◀ Back to result", f"v:{cid}:back:0")])
     rows.append([("✖ Close", f"v:{cid}:close:0")])
@@ -140,6 +147,8 @@ def collection_view(
         markup.inline_keyboard.append([
             InlineKeyboardButton(text="👀 Follow creator", callback_data=f"v:{cid}:follow:0")])
     text = f"📚 <b>{html.escape(title[:150])}</b>\n{len(items)} items · Page {page + 1}"
+    if batch[0]:
+        text += f"\n⬇️ {batch[0]} selected · {batch[1]} remaining"
     return text, markup
 
 
@@ -194,11 +203,13 @@ class App:
         self.store.seed_access(settings.allowlist)
         self.store.seed_groups(settings.groups)
         self.searcher = Searcher()
-        session = None
+        # Public Bot API uploads can take longer than aiogram's 60-second default.
+        session = AiohttpSession(timeout=300)
         if settings.bot_api_mode == "local":
             assert settings.local_bot_api_url is not None
             session = AiohttpSession(
-                api=TelegramAPIServer.from_base(settings.local_bot_api_url, is_local=True)
+                api=TelegramAPIServer.from_base(settings.local_bot_api_url, is_local=True),
+                timeout=300,
             )
         self.bot = Bot(
             settings.bot_token, session=session, default=DefaultBotProperties(parse_mode="HTML")
@@ -466,13 +477,13 @@ class App:
             user_change = (len(parts) == 2 and parts[0] in {"add", "remove"} and
                            parts[1].isdigit())
             if group_change or user_change:
-                target = int(parts[2] if group_change else parts[1])
+                admin_target_id = int(parts[2] if group_change else parts[1])
                 action = "group_" + parts[1] if group_change else parts[0]
                 token = self.store.propose_access(
-                    m.from_user.id, m.chat.id, target, action
+                    m.from_user.id, m.chat.id, admin_target_id, action
                 )
                 prompt = await m.reply(
-                    f"Confirm {html.escape(action)} {target}?",
+                    f"Confirm {html.escape(action)} {admin_target_id}?",
                     reply_markup=kb(
                         [[("✅ Confirm", f"a:{token}:yes"), ("❌ Cancel", f"a:{token}:no")]]
                     ),
@@ -656,7 +667,8 @@ class App:
             return
         items = json.loads(row["items"])
         body, markup = collection_view(
-            cid, str(row["title"]), items, page, self.store.collection_context(cid)
+            cid, str(row["title"]), items, page, self.store.collection_context(cid),
+            self.store.collection_batch(cid, user, chat),
         )
         try:
             await self.bot.edit_message_text(
@@ -752,7 +764,10 @@ class App:
         try:
             stories = await public_items(target, "stories")
         except (ValueError, TimeoutError, OSError):
-            stories = []
+            await self.bot.send_message(
+                chat, "⚠️ Public stories could not be checked. This platform may require login."
+            )
+            return
         if not stories:
             await self.bot.send_message(chat, "No accessible public stories found.")
             return
@@ -766,6 +781,9 @@ class App:
         await self.render_collection(cid, user, chat, 0)
 
     async def profile_callback(self, q: CallbackQuery, data: str) -> None:
+        if q.message is None or isinstance(q.message, InaccessibleMessage):
+            await acknowledge(q)
+            return
         parts = data.split(":")
         if len(parts) != 3:
             await acknowledge(q)
@@ -811,6 +829,9 @@ class App:
                 self.store.set_prompt(cid, prompt.message_id)
 
     async def follow_callback(self, q: CallbackQuery, data: str) -> None:
+        if q.message is None or isinstance(q.message, InaccessibleMessage):
+            await acknowledge(q)
+            return
         parts = data.split(":")
         if len(parts) < 3:
             await acknowledge(q)
@@ -958,9 +979,24 @@ class App:
                 if not self.store.rate(q.from_user.id, "follow_check", 2):
                     await acknowledge(q, "Check limit reached")
                     return
-                self.follow.db.db.execute("UPDATE follows SET next_check=? WHERE id=? AND user_id=?",
-                                          (0, follow_id, q.from_user.id))
-                await acknowledge(q, "Queued for the next monitor check")
+                await acknowledge(q, "Checking public sources…")
+                try:
+                    async with self.follow.check_lock:
+                        fresh = self.follow.db.db.execute(
+                            "SELECT * FROM follows WHERE id=? AND user_id=?",
+                            (follow_id, q.from_user.id),
+                        ).fetchone()
+                        if fresh is None:
+                            return
+                        health = await self.follow.check(fresh)
+                    available = ", ".join(k for k, ok in health.items() if ok) or "none"
+                    blocked = ", ".join(k for k, ok in health.items() if not ok)
+                    status = f"🔄 Follow check complete. Accessible: {available}."
+                    if blocked:
+                        status += f"\nUnavailable from public sources: {blocked}."
+                except (ValueError, TimeoutError, OSError, httpx.HTTPError):
+                    status = "⚠️ Public follow sources could not be checked right now. No change was inferred."
+                await self.bot.send_message(q.message.chat.id, status)
                 return
             if action == "remove":
                 self.follow.db.remove(follow_id, q.from_user.id)
@@ -1087,17 +1123,17 @@ class App:
                 try:
                     if source(url) == "tiktok":
                         url = await self.worker._resolve_short(url)
-                    target = await resolve_creator_from_post(url)
+                    confirmation_creator = await resolve_creator_from_post(url)
                 except (ValueError, TimeoutError, httpx.HTTPError):
-                    target = None
-                if target:
-                    await self.show_profile(q.message.chat.id, q.from_user.id, target)
+                    confirmation_creator = None
+                if confirmation_creator:
+                    await self.show_profile(q.message.chat.id, q.from_user.id, confirmation_creator)
                 else:
                     await self.bot.send_message(q.message.chat.id,
                         "Creator profile could not be identified from this public post.")
                 return
             mode = parts[2] if parts[2] in {"480", "1080", "audio"} else "auto"
-            state, jid = self.store.decision(
+            state, decision_jid = self.store.decision(
                 parts[1], q.from_user.id, q.message.chat.id, q.message.message_id,
                 parts[2] != "n", mode,
             )
@@ -1113,7 +1149,7 @@ class App:
             elif state == "ACCEPTED":
                 await q.message.edit_text(
                     "⏳ Preparing your download…",
-                    reply_markup=kb([[("Cancel ✕", f"j:{jid}:cancel")]]),
+                    reply_markup=kb([[("Cancel ✕", f"j:{decision_jid}:cancel")]]),
                 )
             elif state == "EXPIRED":
                 await q.message.edit_reply_markup(reply_markup=None)
@@ -1151,9 +1187,20 @@ class App:
                     await q.message.edit_text("Search expired. Send /podcast to search again.")
                 return
             if action == "follow":
-                target = profile_target(str(self.store.collection_context(cid).get("source_url") or ""))
-                if target:
-                    await self.show_follow(q.message.chat.id, q.from_user.id, target)
+                collection_creator = profile_target(
+                    str(self.store.collection_context(cid).get("source_url") or "")
+                )
+                if collection_creator:
+                    await self.show_follow(q.message.chat.id, q.from_user.id, collection_creator)
+            elif action == "stop":
+                stopped = self.store.cancel_collection(
+                    cid, q.from_user.id, q.message.chat.id, q.message.message_id)
+                if stopped is not None:
+                    await self.render_collection(cid, q.from_user.id, q.message.chat.id, 0)
+                    await self.bot.send_message(q.message.chat.id,
+                        f"⏹ Stopped {stopped} pending items. The current download may finish.")
+            elif action == "status":
+                return
             elif action == "p" and arg.isdigit():
                 number = int(arg)
                 await self.render_collection(cid, q.from_user.id, q.message.chat.id, number)
@@ -1187,11 +1234,11 @@ class App:
                 for number in indexes:
                     if not 0 <= number < len(items):
                         continue
-                    jid, created = self.store.select_collection(
+                    selected_jid, created = self.store.select_collection(
                         cid, q.from_user.id, q.message.chat.id, number, mode
                     )
-                    if created and jid:
-                        created_jobs.append(jid)
+                    if created and selected_jid:
+                        created_jobs.append(selected_jid)
                 if created_jobs:
                     await self.bot.send_message(
                         q.message.chat.id,
@@ -1211,20 +1258,20 @@ class App:
                     return
                 context = self.store.job_context(parts[1])
                 url = str(context.get("source_url") or job["url"])
-                target = profile_target(str(context.get("profile_url") or "")) or creator_from_post(
+                job_creator = profile_target(str(context.get("profile_url") or "")) or creator_from_post(
                     url, context)
-                if not target and self.store.rate(q.from_user.id, "profile", 8):
+                if not job_creator and self.store.rate(q.from_user.id, "profile", 8):
                     try:
                         if source(url) == "tiktok":
                             url = await self.worker._resolve_short(url)
-                        target = await resolve_creator_from_post(url, context)
+                        job_creator = await resolve_creator_from_post(url, context)
                     except (ValueError, TimeoutError, httpx.HTTPError):
-                        target = None
-                if target:
+                        job_creator = None
+                if job_creator:
                     if parts[2] == "profile":
-                        await self.show_profile(q.message.chat.id, q.from_user.id, target)
+                        await self.show_profile(q.message.chat.id, q.from_user.id, job_creator)
                     else:
-                        await self.show_follow(q.message.chat.id, q.from_user.id, target)
+                        await self.show_follow(q.message.chat.id, q.from_user.id, job_creator)
                 else:
                     await self.bot.send_message(q.message.chat.id, "Creator profile is unavailable for this item.")
                 return
@@ -1237,7 +1284,7 @@ class App:
                     return
                 profile_url = str(context.get("profile_url") or "")
                 if parts[2] == "avatar":
-                    target = clean_url(str(context.get("avatar_url") or ""))
+                    download_url = clean_url(str(context.get("avatar_url") or ""))
                     mode = "document"
                     item_context = {
                         "kind": "profile_avatar", "source_url": profile_url,
@@ -1245,19 +1292,19 @@ class App:
                     }
                 elif parts[2] == "latest":
                     try:
-                        items, _ = await self.worker._browse_profile_gallery(profile_url)
-                        target = next(
-                            str(x["url"]) for x in items
-                            if "/video/" in x["url"] or "/photo/" in x["url"]
-                            or "/p/" in x["url"] or "/status/" in x["url"]
-                        )
+                        profile = profile_target(profile_url)
+                        if profile is None:
+                            return
+                        posts = await public_items(profile)
+                        download_url = next(url for _kind, url, _title in posts)
                     except (ValueError, TimeoutError, StopIteration):
                         await self.bot.send_message(
-                            q.message.chat.id, "The latest public post is unavailable."
+                            q.message.chat.id,
+                            "The latest post could not be read from public sources. The platform may require login."
                         )
                         return
                     mode = "auto"
-                    item_context = {"source_url": target, "kind": "post"}
+                    item_context = {"source_url": download_url, "kind": "post"}
                 else:
                     username = str(context.get("artist") or "")
                     story_target = profile_target(profile_url)
@@ -1266,13 +1313,13 @@ class App:
                     await self.show_stories(q.message.chat.id, q.from_user.id, story_target)
                     return
                 jid = self.store.create_job(
-                    q.from_user.id, q.message.chat.id, target, mode, item_context
+                    q.from_user.id, q.message.chat.id, download_url, mode, item_context
                 )
-                status = await self.bot.send_message(
+                progress_message = await self.bot.send_message(
                     q.message.chat.id, "⏳ Checking public media…",
                     reply_markup=kb([[("Cancel ✕", f"j:{jid}:cancel")]]),
                 )
-                self.store.bind_progress(jid, status.message_id)
+                self.store.bind_progress(jid, progress_message.message_id)
                 return
             if len(parts) == 3 and parts[2] in {"info", "lyrics", "transcribe"}:
                 job = self.store.job(parts[1])
@@ -1321,19 +1368,19 @@ class App:
                     task.cancel()
                 await q.message.edit_text("Cancelled")
             elif len(parts) == 3 and parts[2] == "audio":
-                jid, created = self.store.create_derivative(
+                derivative_jid, created = self.store.create_derivative(
                     parts[1], q.from_user.id, q.message.chat.id, "audio"
                 )
-                if created and jid is not None:
+                if created and derivative_jid is not None:
                     if q.message.document or q.message.video:
                         await q.message.edit_reply_markup(reply_markup=None)
-                        status = await self.bot.send_message(
+                        derivative_progress = await self.bot.send_message(
                             q.message.chat.id, "🎵 Preparing MP3…"
                         )
-                        self.store.bind_progress(jid, status.message_id)
+                        self.store.bind_progress(derivative_jid, derivative_progress.message_id)
                     else:
                         await q.message.edit_text("🎵 Preparing MP3…")
-                        self.store.bind_progress(jid, q.message.message_id)
+                        self.store.bind_progress(derivative_jid, q.message.message_id)
             return
         if not data.startswith("s:"):
             await acknowledge(q)
