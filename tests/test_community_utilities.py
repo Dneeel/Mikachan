@@ -198,7 +198,7 @@ async def test_reference_rate_uses_second_provider_on_connection_error(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_apod_sends_bounded_image_and_short_caption(tmp_path):
+async def test_nasa_sends_bounded_image_and_short_caption(tmp_path):
     db = Store(tmp_path / "state.sqlite").db
     utility = Utilities(SimpleNamespace(), Settings(bot_token="123:fake", owner_telegram_id=1,
         allowed_telegram_ids="1"), db)
@@ -211,14 +211,14 @@ async def test_apod_sends_bounded_image_and_short_caption(tmp_path):
     utility.apod_page = AsyncMock(side_effect=ValueError("test fallback"))
     utility.apod_image = AsyncMock(return_value=output.getvalue())
     message = SimpleNamespace(reply=AsyncMock(), reply_photo=AsyncMock())
-    await utility._command(message, "/apod", "")
+    await utility._command(message, "/nasa", "")
     message.reply_photo.assert_awaited_once()
     assert len(message.reply_photo.await_args.kwargs["caption"]) < 1024
     message.reply.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_apod_uses_official_page_video_preview(tmp_path):
+async def test_nasa_uses_official_page_video_preview(tmp_path):
     utility = Utilities(SimpleNamespace(), Settings(bot_token="123:fake", owner_telegram_id=1,
         allowed_telegram_ids="1"), Store(tmp_path / "state.sqlite").db)
     utility.api = AsyncMock()
@@ -227,7 +227,7 @@ async def test_apod_uses_official_page_video_preview(tmp_path):
         "explanation": "Real feature explanation", "copyright": "NASA", "preview": True})
     utility.apod_image = AsyncMock(return_value=qr_png("valid-image"))
     message = SimpleNamespace(reply=AsyncMock(), reply_photo=AsyncMock())
-    await utility._command(message, "/apod", "")
+    await utility._command(message, "/nasa", "")
     caption = message.reply_photo.await_args.kwargs["caption"]
     assert "Real APOD video" in caption and "video preview" in caption
     assert "NASA Science" not in caption

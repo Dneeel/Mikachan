@@ -48,7 +48,7 @@ def test_explicit_asset_amounts_and_calendar_labels():
     card = time_card("Tokyo", "Japan", "Asia/Tokyo", {"gregorian", "jalali", "imperial",
                      "hijri", "japanese", "new_gregorian"},
                      datetime(2026, 10, 18, 12, tzinfo=timezone.utc))
-    assert "21:00" in card and "Solar Hijri" in card and "Japan · Reiwa 8" in card
+    assert "21:00" in card and "Solar Hijri" in card and "Japan × Reiwa 8" in card
     assert "Lunar Hijri" in card and "Next New Year" in card
 
 
@@ -188,7 +188,8 @@ async def test_removed_utility_commands_are_not_dispatched(tmp_path):
     utilities = Utilities(SimpleNamespace(), Settings(bot_token="123:fake", owner_telegram_id=1,
                                                        allowed_telegram_ids="1"),
                           Store(tmp_path / "db.sqlite").db)
-    for command in ("/time", "/image", "/sticker", "/stickerimage", "/gif", "/pack", "/convert"):
+    for command in ("/time", "/apod", "/image", "/sticker", "/stickerimage",
+                    "/gif", "/pack", "/convert"):
         assert await utilities.command(SimpleNamespace(), command, "") is False
 
 
@@ -217,12 +218,12 @@ async def test_persian_weather_renders_air_and_three_days(tmp_path):
     assert "Unhealthy for sensitive groups" in card
     assert "Local Asia/Tokyo\n📅 2026/10/18\n🕓 20:30" in card
     assert "2026/10/20" in card
-    assert card == ("🌤 <b>Kyoto, Japan</b>\n\n"
-        "🌡 18.8 °C\n👀 18–25 °C\n🌤 Clear sky\n🌧 Rain 0.0 mm\n"
+    assert card == ("☀️ <b>Kyoto, Japan</b>\n\n"
+        "🌡 18.8 °C\n👀 18–25 °C\n☀️ Clear sky\n🌧 Rain 0.0 mm\n"
         "🌪 Wind 3.3 km/h\n⚠️ AQI 125\n\n"
         "Unhealthy for sensitive groups\n"
         "children and people with heart or lung conditions should limit prolonged outdoor activity\n\n"
         "Local Asia/Tokyo\n📅 2026/10/18\n🕓 20:30\n\n<b>Next 3 days</b>\n\n"
         "☀️ <b>2026/10/18</b> × Clear sky\n🌡 18–25 °C\n🌧 Rain 0 mm\n\n"
-        "🌧 <b>2026/10/19</b> Rain\n🌡 17–24 °C\n🌧 Rain 2 mm\n\n"
-        "🌨 <b>2026/10/20</b> Snow\n🌡 16–23 °C\n🌧 Rain 3 mm")
+        "🌧 <b>2026/10/19</b> × Rain\n🌡 17–24 °C\n🌧 Rain 2 mm\n\n"
+        "🌨 <b>2026/10/20</b> × Snow\n🌡 16–23 °C\n🌧 Rain 3 mm")

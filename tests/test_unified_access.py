@@ -181,8 +181,9 @@ async def test_personal_settings_identical_and_bound(tmp_path):
     await ui.show(SimpleNamespace(from_user=SimpleNamespace(id=1),
         chat=SimpleNamespace(id=1, type="private"), reply=owner_reply))
     buttons = owner_reply.await_args.kwargs["reply_markup"]
-    assert len(buttons.inline_keyboard) == 8
+    assert len(buttons.inline_keyboard) == 7
     assert "Access Control" in buttons.inline_keyboard[0][0].text
+    assert "Modules & Features" not in str(buttons)
     # A button from the Owner's menu cannot be used in another chat or by another actor.
     token = buttons.inline_keyboard[0][0].callback_data.split(":")[1]
     assert ui._session(token, 1, 1, 20)

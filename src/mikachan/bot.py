@@ -332,11 +332,12 @@ class App:
                  text.startswith(("ارز ", "ترجمه ", "هواشناسی ", "اکنون ")) or
                  text in {"هواشناسی", "اکنون"})):
             return
-        if self.userbot and is_currency_query(text) and self.module_enabled("utilities", m.chat.id):
+        userbot = getattr(self, "userbot", None)
+        if userbot and is_currency_query(text) and self.module_enabled("utilities", m.chat.id):
             if not self.store.rate(m.from_user.id, "currency", 8):
                 return
             try:
-                await m.reply(await self.userbot.currency(text))
+                await m.reply(await userbot.currency(text))
             except ValueError as exc:
                 await m.reply(html.escape(str(exc)))
             return
