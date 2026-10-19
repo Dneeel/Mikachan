@@ -25,6 +25,25 @@ def test_default_paths_keep_managed_files_beneath_one_root():
     assert paths.unit == Path("/etc/systemd/system/mikachan.service")
 
 
+def test_panel_refresh_requires_bootstrap_marker_and_rejects_symlink(tmp_path):
+    paths = Paths(base=tmp_path / "managed", state=tmp_path / "managed" / "state")
+    manager = Manager(paths, require_root=False)
+    release = Path(__file__).resolve().parents[1]
+    panel = paths.base / "panel"
+    manager._refresh_panel(release)
+    assert not panel.exists()
+    panel.mkdir(parents=True)
+    (panel / ".managed-by-mikachan").write_text("Managed by Mikachan bootstrap\n")
+    manager._refresh_panel(release)
+    target = panel / "deploy" / "manager_ui.py"
+    assert target.read_text() == (release / "deploy" / "manager_ui.py").read_text()
+    assert stat.S_IMODE((panel / "deploy" / "manage.sh").stat().st_mode) == 0o755
+    target.unlink()
+    target.symlink_to(tmp_path / "outside")
+    with pytest.raises(ValueError, match="unsafe"):
+        manager._refresh_panel(release)
+
+
 def test_install_grants_service_read_access_to_restrictive_release(
         deployment: tuple["FakeManager", Path, str]) -> None:
     manager, _, sha = deployment

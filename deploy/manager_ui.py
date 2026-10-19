@@ -23,8 +23,8 @@ SETTING_HELP = {
     "MOMMY_TELEGRAM_IDS": "Optional authorized numeric IDs for the separate fictional personality mode.",
     "BOT_API_MODE": "public is the default. local requires a separately installed Bot API server.",
     "LOCAL_BOT_API_URL": "Loopback URL for an explicitly configured local Bot API server.",
-    "TELEGRAM_API_ID": "Telegram app ID for optional CoinPJ user session or a local Bot API server.",
-    "TELEGRAM_API_HASH": "Telegram app hash for optional CoinPJ user session or a local Bot API server.",
+    "TELEGRAM_API_ID": "Numeric API ID from my.telegram.org for your Telegram user account.",
+    "TELEGRAM_API_HASH": "Private API hash paired with that API ID. Never send it to the bot.",
     "COINPJ_SESSION": "Optional secret Telegram user session; create with the one-time userbot-login command.",
     "USERBOT_SESSION": "Optional secret user session for large uploads, /url and currency requests.",
     "USERBOT_STAGING_CHAT_ID": "Private channel/group ID accessible to both the bot and the user account. Never use a public chat.",
@@ -66,15 +66,16 @@ SECTION_LABELS = {
 SETTING_GROUPS = {
     "Identity and access": ("BOT_TOKEN", "OWNER_TELEGRAM_ID", "ALLOWED_TELEGRAM_IDS",
                             "ALLOWED_GROUP_IDS", "PRIVATE_CHATS_ONLY", "MOMMY_TELEGRAM_IDS"),
+    "Telegram user account · userbot": ("TELEGRAM_API_ID", "TELEGRAM_API_HASH",
+                                        "USERBOT_SESSION", "USERBOT_STAGING_CHAT_ID",
+                                        "COINPJ_SESSION"),
     "Information and language": ("NASA_API_KEY", "NAVASAN_API_KEY",
                                  "NAVASAN_REFRESH_SECONDS", "TRANSLATION_API_URL",
-                                 "TRANSLATION_API_KEY", "COINPJ_SESSION"),
-    "Userbot bridge": ("USERBOT_SESSION", "USERBOT_STAGING_CHAT_ID"),
+                                 "TRANSLATION_API_KEY"),
     "Music catalog": ("SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET"),
     "Limits": ("MAX_ACTIVE_DOWNLOADS", "MAX_ACTIVE_PER_USER", "MAX_LINKS_PER_MESSAGE",
                "SEARCH_PAGE_SIZE", "SEARCH_SESSION_TTL_SECONDS", "CONFIRMATION_TTL_SECONDS"),
-    "Advanced Bot API": ("BOT_API_MODE", "LOCAL_BOT_API_URL", "TELEGRAM_API_ID",
-                         "TELEGRAM_API_HASH"),
+    "Advanced Bot API": ("BOT_API_MODE", "LOCAL_BOT_API_URL"),
     "Network and storage": ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "SSL_CERT_FILE",
                             "DATA_DIR", "FREESTYLE_API_KEY"),
 }
@@ -314,24 +315,46 @@ class MikachanPanel(App[None]):
 
     def _next_setup(self) -> None:
         steps = [
-            ("1 / 4  ·  Connect Telegram", "token", "Bot token", True,
+            ("1 / 6  ·  Connect Telegram", "token", "Bot token", True,
              "Required. Create or select a bot with @BotFather. The token identifies this bot; "
              "it is stored in a private server file and hidden in this panel."),
-            ("2 / 4  ·  Choose owner", "owner", "Owner numeric Telegram user ID", False,
+            ("2 / 6  ·  Choose owner", "owner", "Owner numeric Telegram user ID", False,
              "Required. This numeric ID grants global owner controls. A username is not accepted."),
-            ("3 / 4  ·  Allow users", "users", "Optional additional numeric user IDs", False,
+            ("3 / 6  ·  Allow users", "users", "Optional additional numeric user IDs", False,
              "Press Enter to keep access owner-only. Separate multiple IDs with commas; "
              "the owner is automatically included. Maximum four users total."),
-            ("4 / 4  ·  Allow groups", "groups", "Optional negative group IDs", False,
+            ("4 / 6  ·  Allow groups", "groups", "Optional negative group IDs", False,
              "Press Enter for private chats only. Every group member still needs individual access."),
+            ("5 / 6  ·  Telegram user account", "api_id", "Optional Telegram API ID", False,
+             "Get your numeric API ID at my.telegram.org. This is for the userbot account, "
+             "not the BotFather token. Leave both API fields blank to skip userbot setup."),
+            ("6 / 6  ·  Telegram user account", "api_hash", "Optional Telegram API Hash", True,
+             "Paste the API Hash paired with your API ID. It is masked and stored privately. "
+             "After setup, log in once from private SSH with: mikachan userbot-login."),
         ]
         if self.setup_step == len(steps):
+            api_id = self.setup_data.get("api_id", "")
+            api_hash = self.setup_data.get("api_hash", "")
+            if bool(api_id) != bool(api_hash):
+                self.query_one("#log", RichLog).write(
+                    "Enter both Telegram API ID and Hash, or leave both blank.")
+                self.setup_step = 4
+                self._next_setup()
+                return
+            if api_id and (not api_id.isascii() or not api_id.isdigit() or int(api_id) <= 0):
+                self.query_one("#log", RichLog).write("Telegram API ID must be a positive number.")
+                self.setup_step = 4
+                self._next_setup()
+                return
             owner = self.setup_data["owner"]
             users = self.setup_data.get("users", "")
-            self._launch("setup", {"BOT_TOKEN": self.setup_data["token"],
-                                   "OWNER_TELEGRAM_ID": owner,
-                                   "ALLOWED_TELEGRAM_IDS": ",".join(filter(None, (owner, users))),
-                                   "ALLOWED_GROUP_IDS": self.setup_data.get("groups", "")})
+            settings = {"BOT_TOKEN": self.setup_data["token"],
+                        "OWNER_TELEGRAM_ID": owner,
+                        "ALLOWED_TELEGRAM_IDS": ",".join(filter(None, (owner, users))),
+                        "ALLOWED_GROUP_IDS": self.setup_data.get("groups", "")}
+            if api_id:
+                settings.update({"TELEGRAM_API_ID": api_id, "TELEGRAM_API_HASH": api_hash})
+            self._launch("setup", settings)
             self.setup_data = {}
             return
         title, name, label, secret, guidance = steps[self.setup_step]

@@ -806,7 +806,34 @@ class Manager:
             raise
         else:
             self.paths.journal.unlink(missing_ok=True)
+        try:
+            self._refresh_panel(self.paths.releases / sha)
+        except (OSError, ValueError) as exc:
+            self.on_event(f"Panel refresh skipped: {type(exc).__name__}")
         return f"Activated {branch}@{sha[:12]}; backup {snapshot}"
+
+    def _refresh_panel(self, release: Path) -> None:
+        """Refresh only bootstrap-owned panel files after a verified activation."""
+        panel = self.paths.base / "panel"
+        directory = panel / "deploy"
+        marker = panel / ".managed-by-mikachan"
+        if not marker.is_file():
+            return
+        if panel.is_symlink() or directory.is_symlink() or marker.is_symlink() or \
+                marker.read_text(encoding="utf-8") != "Managed by Mikachan bootstrap\n":
+            raise ValueError("Panel ownership marker is invalid")
+        sources = []
+        for name in ("__init__.py", "manager.py", "manager_ui.py",
+                     "manager-requirements.txt", "manage.sh"):
+            source = release / "deploy" / name
+            target = directory / name
+            if not source.is_file() or source.is_symlink() or target.is_symlink() or \
+                    source.stat().st_size > 500_000:
+                raise ValueError("Panel source or target is unsafe")
+            sources.append((name, target, source.read_text(encoding="utf-8")))
+        for name, target, content in sources:
+            _atomic(target, content,
+                    0o755 if name == "manage.sh" else 0o644)
 
     def install(self, config: dict[str, str] | None = None, *, branch: str = "v2",
                 checks: bool = True, reuse_existing_config: bool = False) -> str:

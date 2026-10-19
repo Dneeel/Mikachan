@@ -51,8 +51,14 @@ The panel saves the SSH Git remote and reuses that SSH configuration for later u
 2. Enter the **numeric owner Telegram user ID**. This grants global owner controls; names and usernames are not accepted.
 3. Optionally enter additional numeric user IDs, comma separated. Press Enter for owner-only access. This legacy setup seed accepts up to four IDs; the Owner can register more named people through private `/settings` later.
 4. Optionally enter negative numeric group IDs, comma separated. Press Enter for private chats only. Group membership never authorizes a user automatically.
+5. Optionally enter the numeric **Telegram API ID** from `my.telegram.org` for a real user account. This is separate from the bot token.
+6. Enter the matching **Telegram API Hash** in the masked field. Leave both API fields blank if the user account is not ready yet.
 
 The manager validates the complete configuration, saves a SQLite/configuration snapshot, and starts the service. It reports a service-start failure without claiming Telegram live acceptance. Use **Live diagnostics** to check `getMe` separately. Re-entering Setup displays a warning and requires typed confirmation; it preserves database content and saves an undo snapshot. Use Settings for a single change instead.
+
+The API fields also appear near the top of **Configuration → Telegram user account · userbot**. After entering both fields, run `mikachan userbot-login` in a private SSH terminal to create the account session, then save it as masked `USERBOT_SESSION`. Configure `USERBOT_STAGING_CHAT_ID` there when large uploads or `/url` are needed. Do not paste a session or API hash into a Telegram chat.
+
+The server's panel is a separate bootstrap copy from the active bot release. The first update from an older panel needs a one-time panel refresh: update the `v2` release, then install its `deploy/manager.py` and `deploy/manager_ui.py` into `/opt/Mikachan/panel/deploy/` using `install -m 0644`. Subsequent release activations refresh the bootstrap-owned panel automatically.
 
 After startup, the protected Owner opens `/settings` in their private bot conversation to register people with required internal names, approve groups, assign Mikachan Admins to specific groups and set global module policy. ADMIN and USER may interact only in approved groups, even when Telegram has delivered them an outbound direct notice. Native Telegram administrator status alone does not grant Mikachan permissions. Editing the legacy allowlist/group ID fields in the VPS panel applies only the explicit difference from their previous values and preserves other people/groups registered inside the bot. Changing the primary Owner through the authenticated VPS panel updates the protected Owner registry with a snapshot.
 
