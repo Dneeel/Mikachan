@@ -25,6 +25,7 @@ from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from .security import allowed, clean_url, source, validate_dns
+from .public_social import public_statuses, public_x_media
 from .store import Store
 
 INTERVAL = 15 * 60
@@ -210,12 +211,22 @@ class FollowStore:
         CREATE TABLE IF NOT EXISTS follow_seen (
           follow_id TEXT NOT NULL, event_key TEXT NOT NULL,
           PRIMARY KEY(follow_id,event_key));
+        CREATE TABLE IF NOT EXISTS follow_media_jobs (
+          follow_id TEXT NOT NULL, event_key TEXT NOT NULL,
+          url TEXT NOT NULL, job_id TEXT NOT NULL, attempts INTEGER NOT NULL,
+          next_retry REAL NOT NULL, PRIMARY KEY(follow_id,event_key));
+        CREATE INDEX IF NOT EXISTS follow_media_retry ON follow_media_jobs(next_retry);
         CREATE TABLE IF NOT EXISTS follow_baselines (
           follow_id TEXT NOT NULL, category TEXT NOT NULL,
           PRIMARY KEY(follow_id,category));
         CREATE TABLE IF NOT EXISTS follow_health (
           follow_id TEXT NOT NULL, category TEXT NOT NULL,
           failures INTEGER NOT NULL DEFAULT 0, warned INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY(follow_id,category));
+        CREATE TABLE IF NOT EXISTS follow_start (
+          follow_id TEXT PRIMARY KEY, started REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS follow_alerts (
+          follow_id TEXT NOT NULL, category TEXT NOT NULL, warned_at REAL NOT NULL,
           PRIMARY KEY(follow_id,category));
         CREATE INDEX IF NOT EXISTS follows_due ON follows(next_check);
         CREATE TABLE IF NOT EXISTS follow_downloads (
@@ -300,6 +311,8 @@ class FollowStore:
                         "features=excluded.features,mode=excluded.mode,chat_id=excluded.chat_id",
                         (token, session["user_id"], destination_chat, session["platform"],
                          session["handle"], target, session["features"], session["mode"], time.time()))
+        if not existing:
+            self.db.execute("INSERT INTO follow_start VALUES (?,?)", (token, time.time()))
         self.db.execute("DELETE FROM follow_sessions WHERE id=?", (session["id"],))
         return token
 
@@ -308,8 +321,11 @@ class FollowStore:
                               (token, user)).fetchone()
         if row:
             self.db.execute("DELETE FROM follow_seen WHERE follow_id=?", (token,))
+            self.db.execute("DELETE FROM follow_media_jobs WHERE follow_id=?", (token,))
             self.db.execute("DELETE FROM follow_baselines WHERE follow_id=?", (token,))
             self.db.execute("DELETE FROM follow_health WHERE follow_id=?", (token,))
+            self.db.execute("DELETE FROM follow_start WHERE follow_id=?", (token,))
+            self.db.execute("DELETE FROM follow_alerts WHERE follow_id=?", (token,))
         return bool(row)
 
     def notification(self, token: str, user: int, chat: int, message: int):
@@ -445,6 +461,14 @@ def _gallery_items(data: object, target: Target, kind: str) -> list[tuple[str, s
 
 async def public_items(target: Target, kind: str = "posts") -> list[tuple[str, str, str]]:
     await asyncio.to_thread(validate_dns, target.url)
+    primary_failed = False
+    if target.platform in {"twitter", "tiktok"} and kind == "posts":
+        try:
+            items = await public_statuses(target.platform, target.handle)
+            if items:
+                return items
+        except (ValueError, TimeoutError, httpx.HTTPError):
+            primary_failed = True
     if target.platform == "youtube":
         data = await _extract(["yt-dlp", "--flat-playlist", "--playlist-end", "15",
                                "--dump-single-json", "--skip-download", "--no-warnings",
@@ -471,7 +495,10 @@ async def public_items(target: Target, kind: str = "posts") -> list[tuple[str, s
         command.extend(["-o", "extractor.twitter.text-tweets=true"])
     try:
         data = await _extract([*command, url], 35)
-        return _gallery_items(data, target, kind)
+        items = _gallery_items(data, target, kind)
+        if target.platform == "twitter" and kind == "posts" and primary_failed and not items:
+            raise ValueError("public X timeline is unavailable")
+        return items
     except (ValueError, TimeoutError, OSError, json.JSONDecodeError):
         if target.platform != "tiktok" or kind == "stories":
             raise
@@ -558,6 +585,19 @@ def _stable_profile(data: dict[str, object], *, display_avatar: bool = False) ->
     return result
 
 
+def _post_timestamp(url: str) -> float | None:
+    """Read the published time encoded in X and TikTok public post IDs."""
+    parts = [part for part in urlsplit(url).path.split("/") if part]
+    if len(parts) < 3 or not re.fullmatch(r"\d{10,22}", parts[2]):
+        return None
+    ident = int(parts[2])
+    if source(url) == "twitter" and parts[1] == "status":
+        return ((ident >> 22) + 1288834974657) / 1000
+    if source(url) == "tiktok" and parts[1] == "video":
+        return float(ident >> 32)
+    return None
+
+
 class FollowService:
     def __init__(self, store: Store, bot: Bot, private_chats_only: bool = False):
         self.store, self.bot = store, bot
@@ -566,15 +606,40 @@ class FollowService:
         self.running = False
         self.check_lock = asyncio.Lock()
 
+    def _enabled(self, chat: int) -> bool:
+        access = self.store.access_registry
+        if access is not None and not access.module_enabled("follow"):
+            return False
+        if chat < 0:
+            try:
+                row = self.db.db.execute("SELECT value FROM group_settings WHERE chat_id=? "
+                                         "AND name='module_follow'", (chat,)).fetchone()
+            except sqlite3.OperationalError:
+                row = None
+            if row and row[0] == "0":
+                return False
+        return True
+
     async def loop(self) -> None:
         self.running = True
         while self.running:
+            if not self._enabled(0):
+                await asyncio.sleep(10)
+                continue
+            self.retry_failed_media()
             row = self.db.db.execute("SELECT * FROM follows WHERE next_check<=? ORDER BY next_check LIMIT 1",
                                      (time.time(),)).fetchone()
             if row:
+                if not self._enabled(int(row["chat_id"])):
+                    self.db.db.execute("UPDATE follows SET next_check=? WHERE id=?",
+                                       (time.time() + INTERVAL, row["id"]))
+                    continue
                 chat_type = "private" if row["chat_id"] == row["user_id"] else "group"
-                if not allowed(row["user_id"], row["chat_id"], chat_type,
-                               self.store.allowlist(), self.private_chats_only, self.store.groups()):
+                if not (self.store.can_access(row["user_id"], row["chat_id"], chat_type)
+                        if self.store.access_registry is not None else allowed(
+                            row["user_id"], row["chat_id"], chat_type,
+                            self.store.allowlist(), self.private_chats_only,
+                            self.store.groups())):
                     self.db.remove(row["id"], row["user_id"])
                     continue
                 try:
@@ -588,17 +653,65 @@ class FollowService:
             else:
                 await asyncio.sleep(5)
 
+    def retry_failed_media(self) -> bool:
+        """Retry proven pre-delivery failures; uncertain deliveries never duplicate."""
+        row = self.db.db.execute("SELECT m.*,f.user_id,f.chat_id,f.platform,f.url AS profile_url "
+            "FROM follow_media_jobs m JOIN follows f ON f.id=m.follow_id "
+            "JOIN jobs j ON j.id=m.job_id WHERE j.state='FAILED' AND m.attempts<3 "
+            "AND m.next_retry<=? ORDER BY m.next_retry LIMIT 1", (time.time(),)).fetchone()
+        if not row:
+            return False
+        chat_type = "private" if row["chat_id"] == row["user_id"] else "group"
+        if not self._enabled(int(row["chat_id"])) or (
+                self.store.access_registry is not None and not self.store.can_access(
+                    row["user_id"], row["chat_id"], chat_type)):
+            self.db.db.execute("UPDATE follow_media_jobs SET next_retry=? "
+                "WHERE follow_id=? AND event_key=?", (time.time() + INTERVAL,
+                 row["follow_id"], row["event_key"]))
+            return False
+        self.db.db.execute("BEGIN IMMEDIATE")
+        try:
+            current = self.db.db.execute("SELECT j.state FROM follow_media_jobs m "
+                "JOIN jobs j ON j.id=m.job_id WHERE m.follow_id=? AND m.event_key=?",
+                (row["follow_id"], row["event_key"])).fetchone()
+            if not current or current[0] != "FAILED":
+                self.db.db.execute("COMMIT")
+                return False
+            kind = str(row["event_key"]).split(":", 1)[0]
+            jid = self.store.create_job(row["user_id"], row["chat_id"], row["url"], "auto",
+                {"kind": "post", "source_url": row["url"],
+                 "profile_url": row["profile_url"], "follow_event": kind})
+            attempts = int(row["attempts"]) + 1
+            self.db.db.execute("UPDATE follow_media_jobs SET job_id=?,attempts=?,next_retry=? "
+                "WHERE follow_id=? AND event_key=?", (jid, attempts,
+                time.time() + attempts * 900, row["follow_id"], row["event_key"]))
+            self.db.db.execute("COMMIT")
+            return True
+        except BaseException:
+            self.db.db.execute("ROLLBACK")
+            raise
+
     async def _failed(self, row) -> None:
         failures = row["failures"] + 1
         self.db.db.execute("UPDATE follows SET failures=?,next_check=? WHERE id=?",
                            (failures, time.time() + INTERVAL, row["id"]))
-        if failures == 3:
+        if failures >= 3 and self._alert_due(row["id"], "all"):
             try:
                 await self.bot.send_message(row["chat_id"],
                     f"⚠️ Follow @{html.escape(row['handle'])}: public updates could not be checked. "
                     "Anonymous access may be blocked. Monitoring will retry automatically.")
             except Exception:
                 pass
+
+    def _alert_due(self, follow_id: str, category: str) -> bool:
+        now = time.time()
+        changed = self.db.db.execute(
+            "INSERT INTO follow_alerts VALUES (?,?,?) ON CONFLICT(follow_id,category) "
+            "DO UPDATE SET warned_at=excluded.warned_at "
+            "WHERE follow_alerts.warned_at<? RETURNING warned_at",
+            (follow_id, category, now, now - 86400),
+        ).fetchone()
+        return changed is not None
 
     async def _source_health(self, row, category: str, healthy: bool) -> None:
         if healthy:
@@ -615,7 +728,8 @@ class FollowService:
             # No story or a blocked anonymous story endpoint is not an
             # account change. Keep the status for explicit checks, no alert.
             return
-        if entry["failures"] == 3 and not entry["warned"]:
+        if entry["failures"] >= 3 and not entry["warned"] and self._alert_due(
+                row["id"], category):
             self.db.db.execute("UPDATE follow_health SET warned=1 WHERE follow_id=? AND category=?",
                                (row["id"], category))
             try:
@@ -683,6 +797,10 @@ class FollowService:
         for category, healthy in health.items():
             await self._source_health(row, category, healthy)
         old_profile = json.loads(row["profile_data"])
+        started_row = self.db.db.execute(
+            "SELECT started FROM follow_start WHERE follow_id=?", (row["id"],)
+        ).fetchone()
+        started = float(started_row[0]) if started_row else 0.0
         for event_kind, url, title in reversed(batches):
             if event_kind not in selected:
                 continue
@@ -690,18 +808,15 @@ class FollowService:
             if self.db.db.execute("SELECT 1 FROM follow_seen WHERE follow_id=? AND event_key=?",
                                   (row["id"], key)).fetchone():
                 continue
-            if event_kind in baselines and row["mode"] == "media":
-                self.db.db.execute("BEGIN IMMEDIATE")
-                try:
-                    await self.deliver(row, target, event_kind, url, title)
-                    self.db.db.execute("INSERT OR IGNORE INTO follow_seen VALUES (?,?)",
-                                       (row["id"], key))
-                    self.db.db.execute("COMMIT")
-                except BaseException:
-                    self.db.db.execute("ROLLBACK")
-                    raise
+            new_since_follow = (event_kind not in baselines and started > 0
+                                and (posted := _post_timestamp(url)) is not None
+                                and started <= posted <= time.time() + 300)
+            if (event_kind in baselines or new_since_follow) and row["mode"] == "media":
+                await self.deliver(row, target, event_kind, url, title, key)
+                self.db.db.execute("INSERT OR IGNORE INTO follow_seen VALUES (?,?)",
+                                   (row["id"], key))
                 continue
-            if event_kind in baselines:
+            if event_kind in baselines or new_since_follow:
                 await self.deliver(row, target, event_kind, url, title)
             self.db.db.execute("INSERT OR IGNORE INTO follow_seen VALUES (?,?)", (row["id"], key))
         for key in selected & {"bio", "name", "avatar"}:
@@ -745,11 +860,41 @@ class FollowService:
                            (row["id"], row["id"]))
         return health
 
-    async def deliver(self, row, target: Target, kind: str, url: str, title: str) -> None:
-        if row["mode"] == "media":
-            self.store.create_job(row["user_id"], row["chat_id"], url, "auto",
-                                  {"kind": "post", "source_url": url,
-                                   "profile_url": target.url, "follow_event": kind})
+    async def deliver(self, row, target: Target, kind: str, url: str, title: str,
+                      event_key: str | None = None) -> None:
+        if self.store.access_registry is not None:
+            if not self._enabled(int(row["chat_id"])):
+                return
+            chat_type = "private" if row["chat_id"] == row["user_id"] else "group"
+            if not self.store.can_access(row["user_id"], row["chat_id"], chat_type):
+                return
+        text_only = False
+        if (row["mode"] == "media" and target.platform == "twitter" and kind == "tweets"
+                and _post_timestamp(url) is not None):
+            try:
+                text_only = await public_x_media(url) is None
+            except (ValueError, TimeoutError, httpx.HTTPError):
+                pass
+        if row["mode"] == "media" and not text_only:
+            if event_key is not None:
+                self.db.db.execute("BEGIN IMMEDIATE")
+            try:
+                exists = (self.db.db.execute("SELECT 1 FROM follow_media_jobs "
+                    "WHERE follow_id=? AND event_key=?", (row["id"], event_key)).fetchone()
+                    if event_key is not None else None)
+                if not exists:
+                    jid = self.store.create_job(row["user_id"], row["chat_id"], url, "auto",
+                        {"kind": "post", "source_url": url,
+                         "profile_url": target.url, "follow_event": kind})
+                    if event_key is not None:
+                        self.db.db.execute("INSERT INTO follow_media_jobs VALUES (?,?,?,?,?,?)",
+                            (row["id"], event_key, url, jid, 1, time.time() + 600))
+                if event_key is not None:
+                    self.db.db.execute("COMMIT")
+            except BaseException:
+                if event_key is not None:
+                    self.db.db.execute("ROLLBACK")
+                raise
             return
         notice_token = secrets.token_urlsafe(8)
         markup = InlineKeyboardMarkup(inline_keyboard=[

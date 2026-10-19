@@ -80,7 +80,8 @@ class NowService:
         db.executescript("""
         CREATE TABLE IF NOT EXISTS now_preferences (
           user_id INTEGER PRIMARY KEY, city TEXT NOT NULL, country TEXT NOT NULL,
-          zone TEXT NOT NULL, fields TEXT NOT NULL);
+          zone TEXT NOT NULL, fields TEXT NOT NULL,
+          latitude REAL, longitude REAL);
         CREATE TABLE IF NOT EXISTS now_prompts (
           user_id INTEGER NOT NULL, chat_id INTEGER NOT NULL, message_id INTEGER NOT NULL,
           kind TEXT NOT NULL, expires REAL NOT NULL, PRIMARY KEY(user_id,chat_id));
@@ -88,11 +89,20 @@ class NowService:
           token TEXT PRIMARY KEY, user_id INTEGER NOT NULL, chat_id INTEGER NOT NULL,
           message_id INTEGER, expires REAL NOT NULL);
         """)
+        columns = {str(row[1]) for row in db.execute("PRAGMA table_info(now_preferences)")}
+        for name in ("latitude", "longitude"):
+            if name not in columns:
+                db.execute(f"ALTER TABLE now_preferences ADD COLUMN {name} REAL")
 
-    async def city(self, query: str) -> tuple[str, str, str]:
+    async def city(self, query: str) -> tuple[str, str, str, float, float]:
         if not 1 <= len(query) <= 80:
             raise ValueError("Enter a city name, for example Tehran or تهران.")
-        lookup, country = CITY_ALIASES.get(query.casefold(), (query, ""))
+        segments = [part.strip() for part in query.split(",")]
+        if not 1 <= len(segments) <= 3 or not all(segments):
+            raise ValueError("Use CITY[, COUNTRY[, REGION]]")
+        lookup, alias_country = CITY_ALIASES.get(segments[0].casefold(), (segments[0], ""))
+        country = segments[1] if len(segments) > 1 else alias_country
+        region = segments[2] if len(segments) > 2 else ""
         if any(ord(char) > 127 for char in lookup):
             places = await nominatim_places(lookup)
         else:
@@ -104,13 +114,27 @@ class NowService:
                     raise ValueError("Location response is too large")
                 places = response.json().get("results") or []
         if country:
-            places = [place for place in places if place.get("country_code") == country]
+            places = [place for place in places if str(place.get("country_code") or "").casefold()
+                      == country.casefold() or str(place.get("country") or "").casefold()
+                      == country.casefold()]
+        if region:
+            places = [place for place in places if str(place.get("admin1") or "").casefold()
+                      == region.casefold()]
         exact = [place for place in places if str(place.get("name", "")).casefold() ==
                  lookup.casefold()]
         candidates = exact or places
         if not candidates:
             raise ValueError("City not found. Try CITY, COUNTRY in Latin letters.")
+        distinct = {(str(p.get("country_code") or p.get("country") or "").casefold(),
+                     str(p.get("admin1") or "").casefold()) for p in candidates}
+        if len(distinct) > 1 and not region:
+            examples = "; ".join(f"{p.get('name')}, {p.get('country')}, {p.get('admin1')}"
+                                 for p in candidates[:4])
+            raise ValueError("Multiple places found. Refine CITY, COUNTRY, REGION: " + examples)
         place = max(candidates, key=lambda item: int(item.get("population") or 0))
+        latitude, longitude = float(place["latitude"]), float(place["longitude"])
+        if not -90 <= latitude <= 90 or not -180 <= longitude <= 180:
+            raise ValueError("Location coordinates are invalid")
         zone = str(place.get("timezone") or "")
         if not zone:
             async with httpx.AsyncClient(timeout=9, follow_redirects=False) as client:
@@ -123,16 +147,21 @@ class NowService:
             ZoneInfo(zone)
         except (ZoneInfoNotFoundError, ValueError) as exc:
             raise ValueError("This location has no supported time zone") from exc
-        return str(place["name"])[:80], str(place.get("country") or "")[:80], zone
+        return (str(place["name"])[:80], str(place.get("country") or "")[:80], zone,
+                latitude, longitude)
 
     def preference(self, user: int) -> sqlite3.Row | None:
         return self.db.execute("SELECT * FROM now_preferences WHERE user_id=?", (user,)).fetchone()
 
-    def _save_city(self, user: int, place: tuple[str, str, str]) -> None:
-        self.db.execute("INSERT INTO now_preferences VALUES (?,?,?,?,?) "
+    def _save_city(self, user: int, place: tuple[str, str, str] |
+                   tuple[str, str, str, float, float]) -> None:
+        latitude, longitude = (place[3], place[4]) if len(place) == 5 else (None, None)
+        self.db.execute("INSERT INTO now_preferences "
+                        "(user_id,city,country,zone,fields,latitude,longitude) VALUES (?,?,?,?,?,?,?) "
                         "ON CONFLICT(user_id) DO UPDATE SET city=excluded.city, "
-                        "country=excluded.country,zone=excluded.zone",
-                        (user, *place, json.dumps(DEFAULT_FIELDS)))
+                        "country=excluded.country,zone=excluded.zone,"
+                        "latitude=excluded.latitude,longitude=excluded.longitude",
+                        (user, *place[:3], json.dumps(DEFAULT_FIELDS), latitude, longitude))
 
     def _fields(self, pref: sqlite3.Row | None) -> set[str]:
         return set(json.loads(pref["fields"])) & FIELDS.keys() if pref else set(DEFAULT_FIELDS)
@@ -170,10 +199,7 @@ class NowService:
             return
         if arg:
             place = await self.city(arg)
-            if pref is None:
-                self._save_city(m.from_user.id, place)
-                pref = self.preference(m.from_user.id)
-            await self._card(m, place, self._fields(pref))
+            await self._card(m, place[:3], self._fields(pref))
         elif pref:
             await self._card(m, (pref["city"], pref["country"], pref["zone"]),
                              self._fields(pref))
@@ -199,7 +225,7 @@ class NowService:
                         (m.from_user.id, m.chat.id))
         self._save_city(m.from_user.id, place)
         pref = self.preference(m.from_user.id)
-        await self._card(m, place, self._fields(pref))
+        await self._card(m, place[:3], self._fields(pref))
         return True
 
     def _settings(self, token: str, fields: set[str]) -> InlineKeyboardMarkup:

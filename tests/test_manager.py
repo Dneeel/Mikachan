@@ -13,6 +13,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from deploy.manager import MANAGED, Manager, ManagerError, Paths, _parse_env, _render_env
+from mikachan.access import AccessRegistry
 
 
 def test_default_paths_keep_managed_files_beneath_one_root():
@@ -455,6 +456,57 @@ def test_code_install_then_setup_and_owner_change(
         assert {row[0] for row in db.execute("SELECT user_id FROM access")} == {77}
     assert manager.config()["OWNER_TELEGRAM_ID"] == "77"
     assert len(manager.backups()) >= 2
+
+
+def test_operator_changes_preserve_ui_registered_people_and_groups(deployment):
+    manager, _, _ = deployment
+    install(manager)
+    path = database(manager)
+    with sqlite3.connect(path) as db:
+        db.row_factory = sqlite3.Row
+        access = AccessRegistry(db, 42)
+        access.register(42, 99, "Added in Telegram")
+        access.add_group(42, -200, "Telegram group")
+    manager.set_config("ALLOWED_GROUP_IDS", "-100")
+    manager.set_config("OWNER_TELEGRAM_ID", "77")
+    with sqlite3.connect(path) as db:
+        db.row_factory = sqlite3.Row
+        access = AccessRegistry(db, 77)
+        assert access.role(77) == "OWNER"
+        assert access.role(42) is None
+        assert access.role(99) == "USER"
+        assert access.groups() == {-100, -200}
+
+
+def test_owner_promotion_needs_independent_manager_approval(deployment):
+    manager, _, _ = deployment
+    install(manager)
+    path = database(manager)
+    with sqlite3.connect(path) as db:
+        db.row_factory = sqlite3.Row
+        access = AccessRegistry(db, 42)
+        access.register(42, 99, "Second Owner")
+        request = access.request_owner_change(42, 99, "PROMOTE")
+        assert access.role(99) == "USER"
+    assert manager.owner_approvals()[0]["token"] == request
+    with pytest.raises(ManagerError):
+        manager.approve_owner(request, 100)
+    assert "approved" in manager.approve_owner(request, 99)
+    with sqlite3.connect(path) as db:
+        db.row_factory = sqlite3.Row
+        access = AccessRegistry(db, 42)
+        assert access.role(99) == "OWNER"
+        with pytest.raises(ValueError, match="independent operator"):
+            access.update_person(42, 99, status="REVOKED")
+        remove = access.request_owner_change(42, 99, "REVOKE")
+    assert "approved" in manager.approve_owner(remove, 99)
+    with sqlite3.connect(path) as db:
+        db.row_factory = sqlite3.Row
+        access = AccessRegistry(db, 42)
+        assert access.role(99) is None
+        assert access.role(42) == "OWNER"
+    with pytest.raises(ManagerError):
+        manager.approve_owner(remove, 99)
 
 
 def test_diagnostics_reports_pending_setup_without_configuration(

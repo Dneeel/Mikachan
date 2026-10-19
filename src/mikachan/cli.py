@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import getpass
 import shutil
 import subprocess
 from pathlib import Path
@@ -8,9 +9,34 @@ from .config import ProviderSettings, Settings
 
 def main() -> None:
     p = argparse.ArgumentParser(prog="mikachan")
-    p.add_argument("command", choices=["run", "doctor", "import-content"])
+    p.add_argument("command", choices=["run", "doctor", "import-content", "userbot-login"])
     p.add_argument("path", nargs="?")
     args = p.parse_args()
+    if args.command == "userbot-login":
+        from telethon import TelegramClient  # type: ignore[import-untyped]
+        from telethon.sessions import StringSession  # type: ignore[import-untyped]
+
+        async def login() -> None:
+            api_id = int(input("Telegram app API ID: ").strip())
+            api_hash = getpass.getpass("Telegram app API hash: ").strip()
+            phone = input("Telegram user account phone: ").strip()
+            client = TelegramClient(StringSession(), api_id, api_hash)
+            try:
+                await client.start(
+                    phone=phone,
+                    code_callback=lambda: getpass.getpass("Telegram login code: "),
+                    password=lambda: getpass.getpass("Telegram 2FA password, if requested: "),
+                )
+                peer = await client.get_entity("CoinPJbot")
+                if not getattr(peer, "bot", False):
+                    raise ValueError("CoinPJbot did not resolve to a Telegram bot")
+                print("Paste this secret only into Configuration → COINPJ_SESSION:")
+                print(client.session.save())
+            finally:
+                await client.disconnect()
+
+        asyncio.run(login())
+        return
     if args.command == "import-content":
         if not args.path:
             p.error("import-content requires a reviewed JSON file")

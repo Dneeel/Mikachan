@@ -58,5 +58,4 @@ def render_poem(poem: dict[str, Any]) -> str:
     excerpt = body.strip()[:3100]
     if len(body.strip()) > 3100:
         excerpt = excerpt.rsplit("\n", 1)[0] + "\n…"
-    return (f"📜 <b>{html.escape(title[:150])}</b>\n\n{html.escape(excerpt)}\n\n"
-            f'<a href="https://ganjoor.net{html.escape(path, quote=True)}">Source · Ganjoor</a>')
+    return f"📜 <b>{html.escape(title[:150])}</b>\n\n{html.escape(excerpt)}"

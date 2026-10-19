@@ -38,6 +38,8 @@ from .config import Settings
 from .market_prices import ASSETS, MarketPrices
 from .now_service import CITY_ALIASES, NowService
 from .geocoding import nominatim_places
+from .translator import translate_public
+from .coinpj import CoinPJ
 
 MAX_INPUT = 8 * 1024 * 1024
 Image.MAX_IMAGE_PIXELS = 20_000_000
@@ -298,6 +300,10 @@ class Utilities:
         self.media_slots = asyncio.Semaphore(2)
         self.market_prices = MarketPrices(db, settings.navasan_api_key,
                                          settings.navasan_refresh_seconds)
+        self.coinpj = (CoinPJ(settings.telegram_api_id, settings.telegram_api_hash,
+                              settings.coinpj_session)
+                       if settings.coinpj_session and settings.telegram_api_id
+                       and settings.telegram_api_hash else None)
         self.now = NowService(db)
         self._apod_cache: tuple[dict[str, Any], float] | None = None
         db.execute("CREATE TABLE IF NOT EXISTS utility_packs (name TEXT PRIMARY KEY, owner_id INTEGER NOT NULL)")
@@ -309,6 +315,10 @@ class Utilities:
     def provider(self, market: str) -> str:
         row = self.db.execute("SELECT provider FROM provider_choices WHERE market=?", (market,)).fetchone()
         return str(row[0]) if row else ("frankfurter" if market == "fiat" else "coingecko")
+
+    async def close(self) -> None:
+        if self.coinpj is not None:
+            await self.coinpj.close()
 
     def set_provider(self, market: str, name: str) -> None:
         choices = {"fiat": {"frankfurter", "open_er_api"},
@@ -366,11 +376,18 @@ class Utilities:
         """Try the chosen free reference source, then the independent alternative."""
         kind = "crypto" if base in {"BTC", "ETH"} and quote in {"USD", "EUR"} else "fiat"
         options = ([self.provider(kind)] + (["coinpaprika", "coingecko"] if kind == "crypto"
-                    else ["open_er_api", "frankfurter"]))
+                    else ["open_er_api", "frankfurter"]) +
+                   ["currency_api", "currency_api_cdn"])
         errors = 0
         for provider in dict.fromkeys(options):
             try:
-                if provider == "coinpaprika":
+                if provider in {"currency_api", "currency_api_cdn"}:
+                    host = ("https://latest.currency-api.pages.dev" if provider == "currency_api"
+                            else "https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest")
+                    data = await self.api(
+                        f"{host}/v1/currencies/{base.lower()}.json", {})
+                    value, updated = data[base.lower()][quote.lower()], data["date"]
+                elif provider == "coinpaprika":
                     asset = "btc-bitcoin" if base == "BTC" else "eth-ethereum"
                     data = await self.api(f"https://api.coinpaprika.com/v1/tickers/{asset}",
                                           {"quotes": quote})
@@ -393,7 +410,8 @@ class Utilities:
                     data = await self.api("https://api.frankfurter.dev/v1/latest",
                                           {"base": base, "symbols": quote})
                     value, updated = data["rates"][quote], data["date"]
-                return _rate_text(base, quote, value, provider, str(updated))
+                label = "Currency API · daily" if provider.startswith("currency_api") else provider
+                return _rate_text(base, quote, value, label, str(updated))
             except (httpx.HTTPError, ValueError, KeyError, TypeError, OverflowError, OSError):
                 errors += 1
         raise ValueError(f"Rate unavailable from {errors} reference sources. Try again later.")
@@ -585,36 +603,49 @@ class Utilities:
                 await self.bot.add_sticker_to_set(m.from_user.id, name, input_sticker)
             await m.reply(html.escape(f"Sticker pack updated: https://t.me/addstickers/{name}"))
         elif cmd == "/weather":
+            saved_place: dict[str, Any] | None = None
+            if not arg and m.from_user:
+                saved = self.now.preference(m.from_user.id)
+                if saved:
+                    arg = f"{saved['city']}, {saved['country']}"
+                    if saved["latitude"] is not None and saved["longitude"] is not None:
+                        saved_place = {"name": saved["city"], "country": saved["country"],
+                            "latitude": saved["latitude"], "longitude": saved["longitude"],
+                            "timezone": saved["zone"]}
             if not 1 <= len(arg) <= 80:
-                raise ValueError("Use /weather CITY")
-            segments = [part.strip() for part in arg.split(",")]
-            if len(segments) > 3:
-                raise ValueError("Use /weather CITY[, COUNTRY[, REGION]]")
-            city = segments[0]
-            lookup, alias_country = CITY_ALIASES.get(city.casefold(), (city, ""))
-            country = segments[1] if len(segments) > 1 else alias_country
-            region = segments[2] if len(segments) > 2 else ""
-            if any(ord(char) > 127 for char in lookup):
-                places = await nominatim_places(lookup)
+                raise ValueError("Set a home city in /settings or use /weather CITY")
+            if saved_place is not None:
+                place = saved_place
             else:
-                geo = await self.api("https://geocoding-api.open-meteo.com/v1/search",
-                                     {"name": lookup.strip(), "count": 20, "language": "en"})
-                places = geo.get("results") or []
-            if country.strip():
-                places = [p for p in places if _place_key(str(p.get("country", ""))) ==
-                          _place_key(country.strip()) or str(p.get("country_code", "")).casefold() ==
-                          country.strip().casefold()]
-            if region:
-                places = [p for p in places if _place_key(str(p.get("admin1", ""))) == _place_key(region)]
-            if not places:
-                raise ValueError("Location not found. Try CITY, COUNTRY (for example Tehran, IR).")
-            place, suggestions = select_place(places, lookup)
-            if place is None:
-                await m.reply("📍 <b>Choose a location</b>\n" +
-                              "\n".join(html.escape(f"• {p['name']}, {p.get('country', '')}, "
-                                                   f"{p.get('admin1', '')}") for p in suggestions) +
-                              "\nTry /weather CITY, COUNTRY, REGION")
-                return
+                segments = [part.strip() for part in arg.split(",")]
+                if len(segments) > 3:
+                    raise ValueError("Use /weather CITY[, COUNTRY[, REGION]]")
+                city = segments[0]
+                lookup, alias_country = CITY_ALIASES.get(city.casefold(), (city, ""))
+                country = segments[1] if len(segments) > 1 else alias_country
+                region = segments[2] if len(segments) > 2 else ""
+                if any(ord(char) > 127 for char in lookup):
+                    places = await nominatim_places(lookup)
+                else:
+                    geo = await self.api("https://geocoding-api.open-meteo.com/v1/search",
+                                         {"name": lookup.strip(), "count": 20, "language": "en"})
+                    places = geo.get("results") or []
+                if country.strip():
+                    places = [p for p in places if _place_key(str(p.get("country", ""))) ==
+                              _place_key(country.strip()) or str(p.get("country_code", "")).casefold() ==
+                              country.strip().casefold()]
+                if region:
+                    places = [p for p in places if _place_key(str(p.get("admin1", ""))) == _place_key(region)]
+                if not places:
+                    raise ValueError("Location not found. Try CITY, COUNTRY (for example Tehran, IR).")
+                selected_place, suggestions = select_place(places, lookup)
+                if selected_place is None:
+                    await m.reply("📍 <b>Choose a location</b>\n" +
+                                  "\n".join(html.escape(f"• {p['name']}, {p.get('country', '')}, "
+                                                       f"{p.get('admin1', '')}") for p in suggestions) +
+                                  "\nTry /weather CITY, COUNTRY, REGION")
+                    return
+                place = selected_place
             location = {"latitude": str(place["latitude"]),
                         "longitude": str(place["longitude"]),
                         "timezone": str(place.get("timezone") or "auto")}
@@ -637,31 +668,37 @@ class Utilities:
             today_low = daily["temperature_2m_min"][0]
             today_high = daily["temperature_2m_max"][0]
             air_line = "AQI unavailable"
+            air_advice = ""
             if not isinstance(air, BaseException):
                 try:
                     index = int(air["current"]["us_aqi"])
-                    air_line = f"US AQI {index} · {aqi_label(index)}"
+                    air_line = f"AQI {index}"
+                    air_advice = aqi_label(index).replace(" · ", "\n", 1)
                 except (KeyError, TypeError, ValueError):
                     pass
             lines = [f"🌤 <b>{html.escape(str(place['name']))}, "
                      f"{html.escape(str(place.get('country', '')))}</b>", "",
-                     f"🌡 <b>{safe(now['temperature_2m'])} °C</b> · today {safe(today_low)}–{safe(today_high)} °C",
+                     f"🌡 {safe(now['temperature_2m'])} °C",
+                     f"👀 {safe(today_low)}–{safe(today_high)} °C",
                      f"🌤 {html.escape(weather_label(int(now['weather_code'])))}",
                      f"🌧 Rain {safe(now['precipitation'])} mm",
                      f"🌪 Wind {safe(now['wind_speed_10m'])} km/h",
                      f"⚠️ {html.escape(air_line)}", "",
+                     html.escape(air_advice), "",
+                     f"Local {safe(location['timezone'])}",
                      f"📅 {safe(current_date.replace('-', '/'))}",
-                     f"🕓 {safe(current_time[:5])} local · {safe(location['timezone'])}",
+                     f"🕓 {safe(current_time[:5])}",
                      "", "<b>Next 3 days</b>"]
-            for day, low, high, rain, code in zip(
+            for index, (day, low, high, rain, code) in enumerate(zip(
                 daily["time"], daily["temperature_2m_min"], daily["temperature_2m_max"],
-                daily["precipitation_sum"], daily["weather_code"]):
+                daily["precipitation_sum"], daily["weather_code"])):
                 label = weather_label(int(code))
                 icon = "🌨" if "Snow" in label else "⛈" if "Thunder" in label else \
                     "🌧" if "Rain" in label or "Drizzle" in label else "☀️"
-                lines.extend(("", f"{icon} <b>{safe(str(day).replace('-', '/'))}</b> · {html.escape(label)}",
+                separator = " × " if index == 0 else " "
+                lines.extend(("", f"{icon} <b>{safe(str(day).replace('-', '/'))}</b>"
+                              f"{separator}{html.escape(label)}",
                               f"🌡 {safe(low)}–{safe(high)} °C", f"🌧 Rain {safe(rain)} mm"))
-            lines.append("\nOpen-Meteo forecast and modeled air quality · OpenStreetMap geocoding where used")
             await m.reply("\n".join(lines))
         elif cmd == "/rate":
             parts = arg.upper().split()
@@ -678,10 +715,25 @@ class Utilities:
             if quote == "IRT":
                 if base not in ASSETS:
                     raise ValueError("Supported Iranian Toman assets: " + ", ".join(ASSETS))
-                if amount == 1:
-                    await m.reply(_market_card(await self.market_prices.report((base,))))
-                else:
-                    await m.reply(await self.market_prices.amount_card(base, amount))
+                if self.coinpj is not None:
+                    try:
+                        await m.reply(await self.coinpj.quote(base, amount))
+                        return
+                    except ValueError:
+                        pass
+                try:
+                    if amount == 1:
+                        card = _market_card(await self.market_prices.report((base,)))
+                    else:
+                        card = await self.market_prices.amount_card(base, amount)
+                except (ValueError, httpx.HTTPError) as exc:
+                    if self.coinpj is not None:
+                        raise ValueError("CoinPJ and public market sources are unavailable. "
+                                         "Try again later.") from exc
+                    raise
+                if self.coinpj is not None:
+                    card = "CoinPJ unavailable · public market estimate\n\n" + card
+                await m.reply(card)
             elif base == "IRT":
                 raise ValueError("Use ASSET IRT for an Iranian Toman quote")
             elif "IRR" in {base, quote}:
@@ -784,19 +836,23 @@ class Utilities:
             value = value or (m.reply_to_message.text if m.reply_to_message else "") or ""
             if not value or len(value) > 2000:
                 raise ValueError("Translation text must be 1–2000 characters")
-            if not self.settings.translation_api_url:
-                raise ValueError("Translation provider is not configured. Text was not sent.")
-            if not self.settings.translation_api_url.startswith("https://"):
-                raise ValueError("Translation provider must use HTTPS")
-            async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
-                translation_reply = await client.post(self.settings.translation_api_url, json={
-                    "q": value, "source": "auto", "target": target,
-                    "api_key": self.settings.translation_api_key})
-                translation_reply.raise_for_status()
-                translated = translation_reply.json().get("translatedText")
+            if self.settings.translation_api_url:
+                if not self.settings.translation_api_url.startswith("https://"):
+                    raise ValueError("Translation provider must use HTTPS")
+                async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
+                    translation_reply = await client.post(self.settings.translation_api_url, json={
+                        "q": value, "source": "auto", "target": target,
+                        "api_key": self.settings.translation_api_key})
+                    translation_reply.raise_for_status()
+                    translated = translation_reply.json().get("translatedText")
+            else:
+                try:
+                    translated = await translate_public(value, target)
+                except (ValueError, httpx.HTTPError) as exc:
+                    raise ValueError("Public translation is unavailable. Try again later.") from exc
             if not isinstance(translated, str) or not translated:
                 raise ValueError("Translation provider returned no text")
-            await m.reply(html.escape(f"{target.upper()} · external translation provider\n{translated[:3500]}"))
+            await m.reply(html.escape(f"Translation · {target.upper()}\n\n{translated[:3500]}"))
 
     @staticmethod
     def _ocr(raw: bytes, lang: str, model_root: Path | None = None) -> str:

@@ -77,6 +77,27 @@ class FederationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({(hit.source, hit.id) for hit in hits},
                          {("apple_podcasts", "1"), ("spotify", "2")})
 
+    async def test_verified_catalog_hit_does_not_wait_for_slow_source(self):
+        s = Searcher()
+        cancelled = asyncio.Event()
+
+        async def slow(_query, _kinds):
+            try:
+                await asyncio.sleep(30)
+            finally:
+                cancelled.set()
+
+        s._soundcloud = AsyncMock(return_value=[Hit(
+            "soundcloud", "track", "Exact title", "Artist",
+            "https://soundcloud.com/artist/exact", "1")])
+        s._ytmusic = slow
+        hits, failures = await asyncio.wait_for(s.search(
+            "Exact title", {"track"}, {"soundcloud", "ytmusic"},
+            ready=lambda rows: any(row.title == "Exact title" for row in rows)), 1)
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(failures, {})
+        self.assertTrue(cancelled.is_set())
+
     async def test_apple_podcast_types_start_without_waiting_for_each_other(self):
         from unittest.mock import MagicMock, patch
 

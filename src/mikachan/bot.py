@@ -39,6 +39,9 @@ from .community import Community, CommunityStore
 from .utilities import Utilities, _market_card
 from .market_prices import parse_asset_query
 from .personality import Mode, mode_for, response
+from .public_social import public_x_media
+from .settings_ui import SettingsUI
+from .groupstatus import GroupStatus, alias as group_stats_alias
 from .follow import (FollowService, FEATURES, Target, command_target, confirm_panel,
                      creator_from_post, profile_target, public_items,
                      resolve_creator_from_post, public_profile, settings_panel, SOCIAL_PLATFORMS)
@@ -202,6 +205,7 @@ class App:
         self._clear_interrupted_media()
         self.store.seed_access(settings.allowlist)
         self.store.seed_groups(settings.groups)
+        self.store.bootstrap_access(settings.owner_telegram_id)
         self.searcher = Searcher()
         # Public Bot API uploads can take longer than aiogram's 60-second default.
         session = AiohttpSession(timeout=300)
@@ -216,10 +220,16 @@ class App:
         )
         self.worker = Worker(settings, self.store, self.bot)
         self.follow = FollowService(self.store, self.bot, settings.private_chats_only)
+        self._check_all_tasks: dict[int, asyncio.Task[None]] = {}
         community_store = CommunityStore(self.store.db)
         community_store.seed_hafez(Path(__file__).parent / "content/hafez.json")
-        self.community = Community(self.bot, community_store, settings.owner_telegram_id)
+        self.community = Community(self.bot, community_store, settings.owner_telegram_id,
+                                   self.store.access_registry)
         self.utilities = Utilities(self.bot, settings, self.store.db)
+        assert self.store.access_registry is not None
+        self.settings_ui = SettingsUI(self.store.db, self.store.access_registry,
+                                      self.utilities.now)
+        self.group_status = GroupStatus(self.store.db, self.store.access_registry)
         self.router = Router()
         self.router.message.register(self.message)
         self.router.callback_query.register(self.callback)
@@ -244,19 +254,46 @@ class App:
                     shutil.rmtree(item)
 
     def authorized(self, user_id: int, chat_id: int, chat_type: str) -> bool:
+        if self.store.access_registry is not None:
+            return self.store.can_access(user_id, chat_id, chat_type)
         return allowed(
             user_id, chat_id, chat_type, self.store.allowlist(), self.settings.private_chats_only,
             self.store.groups()
         )
 
+    def module_enabled(self, domain: str, chat_id: int | None = None) -> bool:
+        access = self.store.access_registry
+        if access is not None and not access.module_enabled(domain):
+            return False
+        if chat_id is not None and chat_id < 0 and hasattr(self, "community"):
+            return self.community.store.enabled(chat_id, domain)
+        return True
+
     async def message(self, m: Message) -> None:
-        if getattr(m, "new_chat_members", None) and m.chat.id in self.store.groups():
+        if hasattr(self, "group_status"):
+            self.group_status.observe(m)
+        if (getattr(m, "new_chat_members", None) and m.chat.id in self.store.groups()
+                and self.module_enabled("community", m.chat.id)):
             await self.community.welcome(m, self.store.allowlist())
         if not m.from_user or not self.authorized(m.from_user.id, m.chat.id, m.chat.type):
             return
         if not m.text:
             return
         text = m.text.strip()
+        if hasattr(self, "settings_ui") and await self.settings_ui.reply(m):
+            return
+        stats_kind = group_stats_alias(text) if m.chat.type in {"group", "supergroup"} else None
+        if stats_kind and hasattr(self, "group_status"):
+            if not self.module_enabled("community", m.chat.id):
+                return
+            await self.group_status.show(m, stats_kind)
+            return
+        if (text in {"فال", "شعر"} and not self.module_enabled("community", m.chat.id) or
+                (text in {"ارز", "هواشناسی", "اکنون", "ترجمه انگلیسی", "ترجمه فارسی"} or
+                 parse_asset_query(text) is not None or
+                 text.startswith(("ارز ", "هواشناسی ", "اکنون ", "ترجمه "))) and
+                not self.module_enabled("utilities", m.chat.id)):
+            return
         if text.startswith("/") and "@" in text.split(" ", 1)[0]:
             target_bot = text.split(" ", 1)[0].split("@", 1)[1]
             if getattr(self, "bot_username", "") and target_bot.lower() != self.bot_username.lower():
@@ -272,7 +309,7 @@ class App:
                 "tiktok", "youtube", "settings", "queue", "status", "cancel", "admin",
                 "fal", "poem", "quote", "dice", "nickname", "rules", "setrules",
                 "note", "setnote", "delnote", "setcmd", "delcmd", "welcome", "del",
-                "mute", "modlog", "groupstats", "groupsettings", "qr", "scan", "ocr",
+                "mute", "modlog", "groupstats", "groupstatus", "groupsettings", "qr", "scan", "ocr",
                 "weather", "rate", "now", "apod", "translate"}
             custom = text.startswith("/") and self.community.store.item(
                 "group_commands", m.chat.id, command_name) is not None
@@ -335,6 +372,8 @@ class App:
             return
         urls, extra = links(text, self.settings.max_links_per_message)
         if urls:
+            if not self.module_enabled("downloader", m.chat.id):
+                return
             if m.chat.type in {"group", "supergroup"}:
                 self.community.store.use(m.chat.id, m.from_user.id, "request")
             if not self.store.rate(m.from_user.id, "links", 12):
@@ -377,6 +416,27 @@ class App:
         word, _, arg = raw.partition(" ")
         cmd = word.split("@")[0].lower()
         arg = arg.strip()
+        downloader_commands = {"/search", "/music", "/podcast", "/pod"}
+        follow_commands = {"/follow", "/following", "/twitter", "/instagram",
+                           "/tiktok", "/youtube"}
+        utility_commands = {"/qr", "/scan", "/ocr", "/weather", "/rate", "/now",
+                            "/apod", "/translate", "/image", "/sticker", "/stickerimage",
+                            "/gif", "/pack", "/convert"}
+        if (cmd in downloader_commands and not self.module_enabled("downloader", m.chat.id) or
+                cmd in follow_commands and not self.module_enabled("follow", m.chat.id) or
+                cmd in utility_commands and not self.module_enabled("utilities", m.chat.id) or
+                cmd not in downloader_commands | follow_commands | utility_commands |
+                    {"/help", "/settings", "/admin", "/queue", "/status", "/cancel"} and
+                    not self.module_enabled("community", m.chat.id)):
+            return
+        if cmd == "/admin" and m.chat.type != "private":
+            return
+        if cmd == "/settings" and hasattr(self, "settings_ui"):
+            await self.settings_ui.show(m)
+            return
+        if cmd == "/groupstatus" and hasattr(self, "group_status"):
+            await self.group_status.show(m)
+            return
         if await self.community.command(m, cmd, arg):
             return
         if (m.chat.type in {"group", "supergroup"} and
@@ -451,16 +511,6 @@ class App:
             await m.reply(
                 f"Jobs: {len(self.store.jobs(m.from_user.id))} recent · Active: {len(self.worker.tasks)}"
             )
-        elif cmd == "/settings":
-            pref = self.store.preferences(m.from_user.id)
-            body = ("⚙️ <b>Your settings</b>\n"
-                    "Search filters · change them in a result view\n"
-                    "Public audio · MP3")
-            if pref:
-                body += "\nTypes · " + html.escape(", ".join(sorted(pref[0])))
-                body += "\nSources · " + html.escape(", ".join(sorted(pref[1])))
-            body += "\nLocal time · /now\nQueue · /queue"
-            await m.reply(body)
         elif cmd == "/admin" and m.from_user.id == self.settings.owner_telegram_id:
             parts = arg.split()
             if len(parts) == 3 and parts[0] == "provider":
@@ -477,6 +527,10 @@ class App:
             user_change = (len(parts) == 2 and parts[0] in {"add", "remove"} and
                            parts[1].isdigit())
             if group_change or user_change:
+                if self.store.access_registry is not None:
+                    await m.reply("Use /settings → Access Control or Group Registry. "
+                                  "Registration requires an internal name and preview.")
+                    return
                 admin_target_id = int(parts[2] if group_change else parts[1])
                 action = "group_" + parts[1] if group_change else parts[0]
                 token = self.store.propose_access(
@@ -700,6 +754,8 @@ class App:
             body += "\nNo profiles yet. Use /follow to begin."
         buttons = [[(f"👤 {row['platform'].title()} · @{row['handle'][:28]}",
                      f"fm:{row['id']}:open")] for row in rows]
+        if rows:
+            buttons.append([("🔄 Check now · all", "fm:all:check")])
         buttons.append([("✖ Close", "fm:close:close")])
         if message_id is None:
             sent = await self.bot.send_message(chat, body, reply_markup=kb(buttons))
@@ -708,6 +764,42 @@ class App:
             await self.bot.edit_message_text(body, chat_id=chat, message_id=message_id,
                                              reply_markup=kb(buttons))
             self.follow.db.bind_menu(user, chat, message_id)
+
+    async def check_all_following(self, chat: int, user: int, chat_type: str) -> None:
+        rows = self.follow.db.db.execute(
+            "SELECT id FROM follows WHERE user_id=? "
+            + ("" if chat_type == "private" else "AND chat_id=? ")
+            + "ORDER BY next_check LIMIT 25",
+            (user,) if chat_type == "private" else (user, chat),
+        ).fetchall()
+        good = partial = unavailable = 0
+        for record in rows:
+            async with self.follow.check_lock:
+                row = self.follow.db.db.execute(
+                    "SELECT * FROM follows WHERE id=? AND user_id=?", (record["id"], user)
+                ).fetchone()
+                if row is None:
+                    continue
+                target_type = "private" if row["chat_id"] == user else "group"
+                if not self.authorized(user, row["chat_id"], target_type):
+                    continue
+                try:
+                    health = await self.follow.check(row)
+                except (ValueError, TimeoutError, OSError, httpx.HTTPError):
+                    unavailable += 1
+                    continue
+                if health and all(health.values()):
+                    good += 1
+                elif any(health.values()):
+                    partial += 1
+                else:
+                    unavailable += 1
+        if self.authorized(user, chat, chat_type):
+            await self.bot.send_message(chat,
+                f"🔄 Follow check complete\n"
+                f"✅ Accessible: {good}\n"
+                f"◐ Partly accessible: {partial}\n"
+                f"⚠️ Unavailable: {unavailable}")
 
     async def show_profile(self, chat: int, user: int, target: Target) -> None:
         token = self.follow.db.profile_panel(user, chat, target)
@@ -720,6 +812,7 @@ class App:
         if target.platform in {"instagram", "tiktok"}:
             rows.append([("👤 Photo & bio", f"p:{token}:card"),
                          ("⭕ Stories", f"p:{token}:stories")])
+            rows.append([("🖼 Original profile photo", f"p:{token}:original")])
         markup = kb(rows)
         markup.inline_keyboard.append([InlineKeyboardButton(text="🔗 Open profile", url=target.url)])
         body = (f"👤 <b>@{html.escape(target.handle)}</b> · {target.platform.title()}\n"
@@ -740,10 +833,12 @@ class App:
                            "avatar": parser.data.get("og:image", "")}
             except (ValueError, TimeoutError, OSError, httpx.HTTPError):
                 pass
-            if not details.get("avatar") and target.platform != "youtube":
+            if target.platform != "youtube":
                 try:
-                    details = await asyncio.wait_for(
+                    structured = await asyncio.wait_for(
                         public_profile(target, display_avatar=True), 7)
+                    details = {key: structured.get(key) or details.get(key, "")
+                               for key in ("name", "bio", "avatar")}
                 except (ValueError, TimeoutError, OSError, httpx.HTTPError):
                     pass
             try:
@@ -795,7 +890,7 @@ class App:
             return
         target = Target(row["platform"], row["handle"], row["url"])
         action = parts[2]
-        if action in {"card", "stories", "latest", "shorts"} and not self.store.rate(
+        if action in {"card", "stories", "latest", "shorts", "original"} and not self.store.rate(
                 q.from_user.id, "profile", 8):
             await acknowledge(q, "Please wait before checking more profiles")
             return
@@ -808,15 +903,41 @@ class App:
             self.store.bind_progress(jid, prompt.message_id)
         elif action == "stories" and target.platform in {"instagram", "tiktok"}:
             await self.show_stories(q.message.chat.id, q.from_user.id, target)
+        elif action == "original" and target.platform in {"instagram", "tiktok"}:
+            try:
+                details = await public_profile(target, display_avatar=True)
+                url = details.get("avatar")
+                if not url:
+                    raise ValueError("no public original avatar")
+                photo = await profile_photo(url)
+                await self.bot.send_document(q.message.chat.id, photo,
+                                             caption=f"👤 @{html.escape(target.handle)} · original photo")
+            except (ValueError, TimeoutError, OSError, httpx.HTTPError, TelegramBadRequest):
+                await self.bot.send_message(q.message.chat.id,
+                                            "Original profile photo is unavailable from public sources.")
         elif action in {"latest", "shorts"}:
             try:
                 items = await public_items(target, "shorts" if action == "shorts" else "posts")
             except (ValueError, TimeoutError, OSError):
-                items = []
+                await self.bot.send_message(
+                    q.message.chat.id, "Public posts could not be checked right now. Try again later.")
+                return
             if not items:
                 await self.bot.send_message(q.message.chat.id, "No accessible public posts found.")
                 return
             item_url = items[0][1]
+            if target.platform == "twitter":
+                try:
+                    if await public_x_media(item_url) is None:
+                        await self.bot.send_message(
+                            q.message.chat.id,
+                            f"📝 <b>Latest post · @{html.escape(target.handle)}</b>\n\n"
+                            f"{html.escape(items[0][2][:1000])}",
+                            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                [InlineKeyboardButton(text="🔗 Open post", url=item_url)]]))
+                        return
+                except (ValueError, TimeoutError, httpx.HTTPError):
+                    pass
             cid = self.store.confirm_create(q.message.chat.id, q.from_user.id,
                                             q.message.message_id, secrets.randbits(31), item_url,
                                             self.settings.confirmation_ttl_seconds)
@@ -914,6 +1035,24 @@ class App:
             await acknowledge(q)
             return
         data = q.data or ""
+        if hasattr(self, "group_status") and await self.group_status.callback(q, data):
+            return
+        if hasattr(self, "settings_ui") and await self.settings_ui.callback(q, data):
+            for job_id, active_task in list(self.worker.tasks.items()):
+                job = self.store.job(job_id)
+                if job:
+                    kind = "private" if job["chat_id"] == job["user_id"] else "group"
+                    if not self.authorized(job["user_id"], job["chat_id"], kind):
+                        active_task.cancel()
+            return
+        prefix = data.split(":", 1)[0]
+        domain = ({"c": "downloader", "s": "downloader", "b": "downloader",
+                   "f": "follow", "fm": "follow", "fu": "follow", "p": "follow",
+                   "fn": "follow", "fd": "follow", "u": "community", "g": "community",
+                   "gs": "community", "n": "utilities"}).get(prefix)
+        if domain and not self.module_enabled(domain, q.message.chat.id):
+            await acknowledge(q, "This module is currently unavailable")
+            return
         if hasattr(self, "utilities") and hasattr(self.utilities, "now") and \
                 await self.utilities.now.callback(q, data):
             return
@@ -945,6 +1084,26 @@ class App:
                 await acknowledge(q)
                 await self.show_following(q.message.chat.id, q.from_user.id,
                                           q.message.chat.type, q.message.message_id)
+                return
+            if follow_id == "all" and action == "check":
+                tasks = getattr(self, "_check_all_tasks", None)
+                if tasks is None:
+                    tasks = self._check_all_tasks = {}
+                existing = tasks.get(q.from_user.id)
+                if existing and not existing.done():
+                    await acknowledge(q, "A full check is already running")
+                    return
+                if not self.store.rate(q.from_user.id, "follow_check_all", 1):
+                    await acknowledge(q, "Check limit reached")
+                    return
+                await acknowledge(q, "Checking followed profiles…")
+                check_task = asyncio.create_task(self.check_all_following(
+                    q.message.chat.id, q.from_user.id, q.message.chat.type))
+                tasks[q.from_user.id] = check_task
+                checking_user = q.from_user.id
+                check_task.add_done_callback(
+                    lambda completed: tasks.pop(checking_user, None)
+                    if tasks.get(checking_user) is completed else None)
                 return
             row = self.follow.db.db.execute(
                 "SELECT * FROM follows WHERE id=? AND user_id=?", (follow_id, q.from_user.id)
@@ -1028,7 +1187,8 @@ class App:
             if parts[2] == "profile":
                 target = Target(notice["platform"], notice["handle"], notice["url"])
                 await self.show_profile(q.message.chat.id, q.from_user.id, target)
-            elif parts[2] == "fetch" and notice["kind"] == "avatar" and self.store.rate(
+            elif parts[2] == "fetch" and notice["kind"] == "avatar" and \
+                    self.module_enabled("downloader", q.message.chat.id) and self.store.rate(
                     q.from_user.id, "profile", 8):
                 target = Target(notice["platform"], notice["handle"], notice["url"])
                 jid = self.store.create_job(q.from_user.id, q.message.chat.id, target.url)
@@ -1052,7 +1212,8 @@ class App:
                 "AND f.chat_id=? AND d.expires>?",
                 (parts[2], parts[1], q.from_user.id, q.from_user.id, q.message.chat.id,
                  time.time())).fetchone()
-            if entry and self.store.rate(q.from_user.id, "links", 12):
+            if entry and self.module_enabled("downloader", q.message.chat.id) and \
+                    self.store.rate(q.from_user.id, "links", 12):
                 jid = self.store.create_job(q.from_user.id, q.message.chat.id, entry["url"])
                 await self.bot.send_message(q.message.chat.id, "⏳ Preparing your download…",
                     reply_markup=kb([[("Cancel ✕", f"j:{jid}:cancel")]]))
@@ -1064,6 +1225,10 @@ class App:
             await acknowledge(q)
             parts = data.split(":")
             if len(parts) != 3 or q.from_user.id != self.settings.owner_telegram_id:
+                return
+            if self.store.access_registry is not None:
+                self.store.db.execute("DELETE FROM admin_pending WHERE id=?", (parts[1],))
+                await q.message.edit_text("Use /settings to manage named people and groups.")
                 return
             if parts[2] == "yes":
                 access_pending = self.store.db.execute("SELECT action,target_id FROM admin_pending "
@@ -1092,7 +1257,8 @@ class App:
             return
         if data.startswith("c:"):
             parts = data.split(":")
-            if len(parts) != 3 or parts[2] not in {"y", "n", "p", "q", "480", "1080", "audio"}:
+            if len(parts) != 3 or parts[2] not in {
+                    "y", "n", "p", "q", "360", "480", "720", "1080", "audio"}:
                 await acknowledge(q)
                 return
             if parts[2] == "q":
@@ -1105,9 +1271,11 @@ class App:
                 if row and youtube_video_url(row["url"]):
                     await q.message.edit_text(
                         "🎛 <b>YouTube quality</b>\nChoose video quality or MP3.",
-                        reply_markup=kb([[("🎬 Best available · up to 1080p", f"c:{parts[1]}:1080")],
-                                         [("🎬 480p", f"c:{parts[1]}:480"),
-                                          ("🎵 MP3", f"c:{parts[1]}:audio")],
+                        reply_markup=kb([[("🎬 360p", f"c:{parts[1]}:360"),
+                                          ("🎬 480p", f"c:{parts[1]}:480")],
+                                         [("🎬 720p", f"c:{parts[1]}:720"),
+                                          ("🎬 Up to 1080p", f"c:{parts[1]}:1080")],
+                                         [("🎵 MP3", f"c:{parts[1]}:audio")],
                                          [("✖ Cancel", f"c:{parts[1]}:n")]]))
                 return
             if parts[2] == "p":
@@ -1132,7 +1300,7 @@ class App:
                     await self.bot.send_message(q.message.chat.id,
                         "Creator profile could not be identified from this public post.")
                 return
-            mode = parts[2] if parts[2] in {"480", "1080", "audio"} else "auto"
+            mode = parts[2] if parts[2] in {"360", "480", "720", "1080", "audio"} else "auto"
             state, decision_jid = self.store.decision(
                 parts[1], q.from_user.id, q.message.chat.id, q.message.message_id,
                 parts[2] != "n", mode,
@@ -1160,6 +1328,9 @@ class App:
             if len(parts) not in {4, 5}:
                 return
             cid, action, arg = parts[1:4]
+            if (action in {"q", "s"} and not self.module_enabled("downloader", q.message.chat.id)
+                    or action == "follow" and not self.module_enabled("follow", q.message.chat.id)):
+                return
             row = self.store.collection(cid, q.from_user.id, q.message.chat.id)
             if not row or row["message_id"] != q.message.message_id:
                 return
@@ -1210,8 +1381,9 @@ class App:
                 target = items[int(arg)] if arg.isdigit() else items[0]
                 is_video = provider == "youtube" or target.get("kind") == "video"
                 quality_choices = (
-                    [("🎬 Best · up to 1080p", "1080"),
-                     ("🎬 480p", "480"), ("🎵 MP3", "audio")]
+                    [("🎬 360p", "360"), ("🎬 480p", "480"),
+                     ("🎬 720p", "720"), ("🎬 Up to 1080p", "1080"),
+                     ("🎵 MP3", "audio")]
                     if is_video else
                     [("🎵 MP3", "audio")] if target.get("kind") in {"track", "episode"}
                     else [("⬇️ Download", "auto")]
@@ -1227,7 +1399,7 @@ class App:
                 )
             elif action == "s" and len(parts) == 5:
                 mode = parts[4]
-                if mode not in {"auto", "audio", "480", "720", "1080"}:
+                if mode not in {"auto", "audio", "360", "480", "720", "1080"}:
                     return
                 indexes = range(len(items)) if arg == "all" else ([int(arg)] if arg.isdigit() else [])
                 created_jobs = []
@@ -1617,6 +1789,7 @@ class App:
                     ("poem", "Poetry menu"),
                     ("dice", "Roll a Telegram die"),
                     ("rules", "Group rules"),
+                    ("groupstatus", "Observed group message statistics"),
                     ("note", "Group note"),
                     ("qr", "Create a QR image"),
                     ("scan", "Scan a replied QR or barcode"),
@@ -1635,8 +1808,12 @@ class App:
             await self.dp.start_polling(self.bot)
         finally:
             self.follow.running = False
+            for check_task in self._check_all_tasks.values():
+                check_task.cancel()
+            await asyncio.gather(*self._check_all_tasks.values(), return_exceptions=True)
             follow_task.cancel()
             await asyncio.gather(follow_task, return_exceptions=True)
             await self.worker.stop()
             task.cancel()
+            await self.utilities.close()
             await self.bot.session.close()

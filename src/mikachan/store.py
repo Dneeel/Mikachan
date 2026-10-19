@@ -7,6 +7,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .access import AccessRegistry
+
 SCHEMA = """
 PRAGMA journal_mode=WAL;
 CREATE TABLE IF NOT EXISTS confirmations (
@@ -79,6 +81,15 @@ class Store:
         self.db = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
+        self.access_registry: AccessRegistry | None = None
+
+    def bootstrap_access(self, primary_owner: int) -> None:
+        self.access_registry = AccessRegistry(self.db, primary_owner)
+
+    def can_access(self, user: int, chat: int, chat_type: str) -> bool:
+        if self.access_registry is None:
+            return False
+        return self.access_registry.can_access(user, chat, chat_type)
 
     def rate(self, user: int, action: str, per_minute: int) -> bool:
         window = int(time.time() // 60)
@@ -96,6 +107,8 @@ class Store:
             self.db.executemany("INSERT INTO access VALUES (?)", ((x,) for x in ids))
 
     def allowlist(self) -> set[int]:
+        if self.access_registry is not None:
+            return self.access_registry.allowlist()
         return {int(row[0]) for row in self.db.execute("SELECT user_id FROM access")}
 
     def seed_groups(self, ids: set[int]) -> None:
@@ -111,6 +124,8 @@ class Store:
             raise
 
     def groups(self) -> set[int]:
+        if self.access_registry is not None:
+            return self.access_registry.groups()
         return {int(row[0]) for row in self.db.execute("SELECT chat_id FROM allowed_groups")}
 
     def propose_access(self, owner: int, chat: int, target: int, action: str) -> str:
@@ -141,22 +156,38 @@ class Store:
                 result = "expired or unauthorized"
             elif row["action"] == "remove" and row["target_id"] == actual_owner:
                 result = "cannot remove owner"
-            elif row["action"] == "add" and len(self.allowlist()) >= 4:
+            elif row["action"] == "add" and self.access_registry is None and len(self.allowlist()) >= 4:
                 result = "maximum four users"
             else:
                 if row["action"] == "add":
                     self.db.execute("INSERT OR IGNORE INTO access VALUES (?)", (row["target_id"],))
+                    if self.access_registry is not None:
+                        now = time.time()
+                        self.db.execute("INSERT OR IGNORE INTO people VALUES "
+                            "(?,?,'USER','ACTIVE',NULL,'',?,?)",
+                            (row["target_id"], f"Legacy user {row['target_id']}", now, now))
                 elif row["action"] == "remove":
                     self.db.execute("DELETE FROM access WHERE user_id=?", (row["target_id"],))
+                    if self.access_registry is not None:
+                        self.db.execute("UPDATE people SET status='REVOKED',updated=? WHERE user_id=?",
+                                        (time.time(), row["target_id"]))
                     self.db.execute("UPDATE jobs SET state='CANCELLED', updated=? "
                         "WHERE user_id=? AND state IN ('QUEUED','RESOLVING','DOWNLOADING','VERIFYING')",
                         (time.time(), row["target_id"]))
                 elif row["action"] == "group_add":
                     self.db.execute("INSERT OR IGNORE INTO allowed_groups VALUES (?)",
                                     (row["target_id"],))
+                    if self.access_registry is not None:
+                        now = time.time()
+                        self.db.execute("INSERT OR IGNORE INTO group_registry VALUES "
+                            "(?,?,'ACTIVE',?,?)",
+                            (row["target_id"], f"Legacy group {row['target_id']}", now, now))
                 else:
                     self.db.execute("DELETE FROM allowed_groups WHERE chat_id=?",
                                     (row["target_id"],))
+                    if self.access_registry is not None:
+                        self.db.execute("UPDATE group_registry SET status='REVOKED',updated=? "
+                                        "WHERE chat_id=?", (time.time(), row["target_id"]))
                     self.db.execute("UPDATE jobs SET state='CANCELLED', updated=? "
                         "WHERE chat_id=? AND state IN ('QUEUED','RESOLVING','DOWNLOADING','VERIFYING')",
                         (time.time(), row["target_id"]))
@@ -212,7 +243,7 @@ class Store:
         self, cid: str, user: int, chat: int, prompt: int, yes: bool,
         mode: str = "auto",
     ) -> tuple[str, str | None]:
-        if mode not in {"auto", "audio", "480", "720", "1080"}:
+        if mode not in {"auto", "audio", "360", "480", "720", "1080"}:
             raise ValueError("invalid download mode")
         self.db.execute("BEGIN IMMEDIATE")
         try:

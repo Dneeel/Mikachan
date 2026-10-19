@@ -7,6 +7,7 @@ import sys
 import time
 import unicodedata
 from dataclasses import asdict, dataclass
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -70,7 +71,8 @@ class Searcher:
             self.health["spotify"] = "credentials required"
 
     async def search(
-        self, query: str, kinds: set[str], sources: set[str]
+        self, query: str, kinds: set[str], sources: set[str],
+        ready: Callable[[list[Hit]], bool] | None = None,
     ) -> tuple[list[Hit], dict[str, str]]:
         if not kinds or not sources:
             return [], {}
@@ -79,7 +81,25 @@ class Searcher:
         ]
         results: list[Hit] = []
         failures: dict[str, str] = {}
-        done, pending = await asyncio.wait([task for _, task in tasks], timeout=12)
+        pending: set[asyncio.Task[list[Hit]]] = {task for _, task in tasks}
+        done: set[asyncio.Task[list[Hit]]] = set()
+        deadline = time.monotonic() + 12
+        matched = False
+        while pending:
+            finished, pending = await asyncio.wait(
+                pending, timeout=max(0, deadline - time.monotonic()),
+                return_when=asyncio.FIRST_COMPLETED if ready else asyncio.ALL_COMPLETED)
+            done.update(finished)
+            if ready:
+                available = []
+                for task in done:
+                    if not task.cancelled() and task.exception() is None:
+                        available.extend(task.result())
+                if ready(available):
+                    matched = True
+                    break
+            if not finished or time.monotonic() >= deadline:
+                break
         for task in pending:
             task.cancel()
         if pending:
@@ -87,6 +107,8 @@ class Searcher:
         for source, task in tasks:
             try:
                 if task not in done:
+                    if matched:
+                        continue
                     raise TimeoutError()
                 hits = task.result()
                 results.extend(h for h in hits if h.source == source and h.kind in kinds)

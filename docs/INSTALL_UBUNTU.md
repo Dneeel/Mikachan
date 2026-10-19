@@ -49,10 +49,14 @@ The panel saves the SSH Git remote and reuses that SSH configuration for later u
 
 1. Select **Guided setup**. Enter the BotFather token. It identifies the bot and is hidden while typing.
 2. Enter the **numeric owner Telegram user ID**. This grants global owner controls; names and usernames are not accepted.
-3. Optionally enter additional numeric user IDs, comma separated. Press Enter for owner-only access. Maximum total: four.
+3. Optionally enter additional numeric user IDs, comma separated. Press Enter for owner-only access. This legacy setup seed accepts up to four IDs; the Owner can register more named people through private `/settings` later.
 4. Optionally enter negative numeric group IDs, comma separated. Press Enter for private chats only. Group membership never authorizes a user automatically.
 
 The manager validates the complete configuration, saves a SQLite/configuration snapshot, and starts the service. It reports a service-start failure without claiming Telegram live acceptance. Use **Live diagnostics** to check `getMe` separately. Re-entering Setup displays a warning and requires typed confirmation; it preserves database content and saves an undo snapshot. Use Settings for a single change instead.
+
+After startup, the protected Owner opens `/settings` in their private bot conversation to register people with required internal names, approve groups, assign Mikachan Admins to specific groups and set global module policy. ADMIN and USER may interact only in approved groups, even when Telegram has delivered them an outbound direct notice. Native Telegram administrator status alone does not grant Mikachan permissions. Editing the legacy allowlist/group ID fields in the VPS panel applies only the explicit difference from their previous values and preserves other people/groups registered inside the bot. Changing the primary Owner through the authenticated VPS panel updates the protected Owner registry with a snapshot.
+
+A protected primary Owner may request promotion or removal of an additional Owner in the private `/settings` registry. The request cannot approve itself inside Telegram. On the VPS, inspect **Configuration → Pending Owner requests** and use **Approve Owner request**, or run `sudo mikachan owner-approval list` followed by `sudo mikachan owner-approval approve TOKEN USER_ID`. The latter asks for a typed confirmation. Approval stops the service, saves a consistent database snapshot, checks the request and target again, applies the change and restarts the service. Never paste a bot token or user-session secret into these commands.
 
 ## Everyday controls
 
@@ -88,6 +92,8 @@ QR, sticker, image and table conversions use bounded memory. Downloader files ar
 ## Noninteractive and development use
 
 `mikachan status`, `mikachan preflight`, `mikachan queue`, `mikachan storage`, `mikachan diagnostics --live`, and `mikachan logs` work from the shell. `mikachan update` updates the active branch; `mikachan versions --refresh` lists remote major branches. Run `mikachan --help` for the complete CLI. Configuration values are never passed as CLI arguments by the panel. Avoid placing tokens directly in shell commands; use the masked panel input or a private `0600` config file.
+
+Optional CoinPJ Toman quotes require a separate Telegram **user account** session. In Configuration, set `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` for a Telegram app you control. Then run `cd /opt/Mikachan/current && ./.venv/bin/mikachan userbot-login` in your private SSH terminal. Complete the account login there and paste the resulting session secret into the panel's masked `COINPJ_SESSION` setting. This session lets the user account message `@CoinPJbot`; it is independent of the bot token and is never requested in a Telegram chat. A user session is not needed for the ordinary public Bot API. If the external bot is unavailable, Mikachan labels and attempts its public Toman estimate instead.
 
 For a development checkout, run `uv sync --locked --extra dev`, `uv run pytest -q`, `uv run ruff check .`, and `uv run mikachan doctor`. A local poller must not run alongside the managed service for the same bot token.
 

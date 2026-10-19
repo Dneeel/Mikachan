@@ -34,6 +34,7 @@ from .catalog import _Meta, recording_search_alias, resolve_collection, resolve_
 from .matching import match_score
 from .search import Searcher
 from .podcasts import apple_podcast_feed, episodes, is_feed_url, resolve_episode_link
+from .public_social import public_tiktok_sound, public_x_media
 
 MIME_EXT = {
     "image/jpeg": ".jpg",
@@ -46,6 +47,18 @@ MIME_EXT = {
     "application/pdf": ".pdf",
     "application/zip": ".zip",
 }
+
+
+def gallery_media_headers(meta: dict[str, object]) -> dict[str, str]:
+    supplied = meta.get("_http_headers")
+    headers: dict[str, str] = {}
+    if isinstance(supplied, dict):
+        for name in ("User-Agent", "Referer"):
+            value = supplied.get(name)
+            if isinstance(value, str) and len(value) <= 200 and "\n" not in value:
+                if name != "Referer" or value.startswith("https://www.instagram.com/"):
+                    headers[name] = value
+    return headers
 
 
 def invalid_cached_file_id(exc: TelegramBadRequest) -> bool:
@@ -72,7 +85,8 @@ def extractor_error(url: str, stderr: bytes) -> str:
         return "This type of source link is not supported"
     if "http error 403" in detail or "forbidden" in detail:
         return "This source denied anonymous access"
-    if any(x in detail for x in ("not available", "video unavailable", "deleted", "removed")):
+    if any(x in detail for x in ("not available", "video unavailable", "deleted", "removed",
+                                "disabled")):
         return "This public item is unavailable or has been removed"
     return "Source extractor could not access this public item"
 
@@ -253,6 +267,10 @@ class Worker:
                 source(url) == "soundcloud" or urlsplit(url).hostname == "music.youtube.com"
             ):
                 mode = "audio"
+            sound_match = (re.search(r"/music/(?:[^/]*-)?(\d{10,22})/?$", urlsplit(url).path)
+                           if source(url) == "tiktok" else None)
+            if sound_match:
+                mode = "audio"
             catalog_track = await resolve_track(url) if source(url) in {
                 "spotify", "deezer", "apple"
             } else None
@@ -376,7 +394,14 @@ class Worker:
             self.store.transition(jid, "RESOLVING", "DOWNLOADING")
             await self._progress(jid, chat, "Downloading")
             host = (urlsplit(url).hostname or "").lower()
-            if catalog_track is not None:
+            if sound_match:
+                audio_url, sound_title, sound_duration = await public_tiktok_sound(sound_match[1])
+                context.update({"kind": "track", "title": sound_title,
+                                "duration": sound_duration, "source_url": original_url})
+                self.store.set_job_context(jid, context)
+                mode = "audio"
+                paths = [await self._direct(audio_url, job_dir, max_bytes)]
+            elif catalog_track is not None:
                 paths = await self._catalog_audio(catalog_track, job_dir, max_bytes)
             elif source(url) == "mega":
                 raise ValueError("Public MEGA downloads need a supported adapter")
@@ -412,15 +437,34 @@ class Worker:
                     source(url) == "twitter" and "/status/" in urlsplit(url).path
                 )
                 paths = None
-                if prefer_gallery and mode != "audio":
+                if source(url) == "twitter" and "/status/" in urlsplit(url).path \
+                        and mode != "audio":
                     try:
-                        paths = await self._gallery_public(url, job_dir, max_bytes)
-                    except (ValueError, TimeoutError):
+                        media_urls = await public_x_media(url)
+                        if media_urls:
+                            remaining = gallery_budget(max_bytes)
+                            paths = []
+                            for index, media_url in enumerate(media_urls):
+                                path = await self._direct(media_url, job_dir,
+                                                          min(max_bytes, remaining),
+                                                          stem=f"{index:02d}")
+                                paths.append(path)
+                                remaining -= path.stat().st_size
+                    except (ValueError, TimeoutError, httpx.HTTPError):
                         paths = None
-                    if paths is None:
                         for artifact in job_dir.iterdir():
                             if artifact.is_file():
                                 artifact.unlink()
+                if prefer_gallery and mode != "audio":
+                    if paths is None:
+                        try:
+                            paths = await self._gallery_public(url, job_dir, max_bytes)
+                        except (ValueError, TimeoutError, httpx.HTTPError):
+                            paths = None
+                        if paths is None:
+                            for artifact in job_dir.iterdir():
+                                if artifact.is_file():
+                                    artifact.unlink()
                 try:
                     if paths is None:
                         download_limit = (
@@ -455,7 +499,10 @@ class Worker:
                         source(url) in {"instagram", "twitter", "reddit", "pinterest"}
                         and mode != "audio"
                     ):
-                        photos = await self._gallery_public(url, job_dir, max_bytes)
+                        try:
+                            photos = await self._gallery_public(url, job_dir, max_bytes)
+                        except (ValueError, TimeoutError, httpx.HTTPError):
+                            photos = None
                     if photos is None:
                         raise extraction_error
                     paths = photos
@@ -930,21 +977,28 @@ class Worker:
         tried: set[str] = set()
         available_hits = False
         unavailable_sources: set[str] = set()
+        def score_hit(hit: object) -> float:
+            from .search import Hit
+            assert isinstance(hit, Hit)
+            scores = [match_score(track.title, track.artist, hit.title, hit.creator,
+                                  track.duration, hit.duration)]
+            if alias:
+                scores.append(match_score(alias[0], alias[1], hit.title, hit.creator,
+                                          track.duration, hit.duration))
+                scores.append(match_score(search_core, alias[1], hit.title, hit.creator,
+                                          track.duration, hit.duration))
+            return max(scores)
         for text_query, providers in queries:
-            hits, failures = await searcher.search(text_query, {"track"}, providers)
+            hits, failures = await searcher.search(
+                text_query, {"track"}, providers,
+                ready=lambda candidates: any(
+                    score_hit(hit) >= 0.92 and
+                    (not track.duration or not hit.duration
+                     or abs(track.duration - hit.duration) <= 5)
+                    for hit in candidates),
+            )
             available_hits |= bool(hits)
             unavailable_sources.update(failures)
-            def score_hit(hit: object) -> float:
-                from .search import Hit
-                assert isinstance(hit, Hit)
-                scores = [match_score(track.title, track.artist, hit.title, hit.creator,
-                                      track.duration, hit.duration)]
-                if alias:
-                    scores.append(match_score(alias[0], alias[1], hit.title, hit.creator,
-                                              track.duration, hit.duration))
-                    scores.append(match_score(search_core, alias[1], hit.title, hit.creator,
-                                              track.duration, hit.duration))
-                return max(scores)
             ranked = sorted(hits, key=lambda h: score_hit(h) +
                             (0.03 if h.source == "ytmusic" else 0.0), reverse=True)
             for hit in ranked[:10]:
@@ -984,12 +1038,13 @@ class Worker:
         raise ValueError("No complete public recording matched this track")
 
     async def _direct(
-        self, url: str, directory: Path, max_bytes: int, stem: str = "artifact"
+        self, url: str, directory: Path, max_bytes: int, stem: str = "artifact",
+        headers: dict[str, str] | None = None,
     ) -> Path:
         async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
             for _ in range(5):
                 validate_dns(url)
-                async with client.stream("GET", url) as resp:
+                async with client.stream("GET", url, headers=headers) as resp:
                     if resp.status_code in (301, 302, 303, 307, 308):
                         target = resp.headers.get("location")
                         if not target:
@@ -1102,7 +1157,7 @@ class Worker:
         if video_rate < 350_000:
             raise ValueError("Video is too long to fit Telegram's upload limit at usable quality")
         target = path.with_name(path.stem + ".fitted.mp4")
-        height = 480 if mode == "480" else 720 if mode == "720" else 1080
+        height = 360 if mode == "360" else 480 if mode == "480" else 720 if mode == "720" else 1080
         if video_rate < 1_200_000:
             height = min(height, 480)
         elif video_rate < 2_500_000:
@@ -1396,21 +1451,23 @@ class Worker:
             messages = json.loads(stdout)
         except ValueError:
             return None
-        urls: list[str] = []
+        urls: list[tuple[str, dict[str, str]]] = []
         for message in messages:
             if not isinstance(message, list) or len(message) < 3 or message[0] != 3:
                 continue
             if not isinstance(message[1], str) or not message[1].startswith(("https://", "http://")):
                 continue
-            urls.append(message[1])
+            meta = message[2] if isinstance(message[2], dict) else {}
+            urls.append((message[1], gallery_media_headers(meta)))
             if len(urls) == 1 and isinstance(message[2], dict):
                 self._save_meta(directory, message[2])
         if not urls or len(urls) > 31:
             return None
         paths: list[Path] = []
         remaining = gallery_budget(max_bytes)
-        for index, item in enumerate(urls):
-            path = await self._direct(clean_url(item), directory, min(max_bytes, remaining), stem=f"{index:02d}")
+        for index, (item, headers) in enumerate(urls):
+            path = await self._direct(clean_url(item), directory, min(max_bytes, remaining),
+                                      stem=f"{index:02d}", headers=headers or None)
             paths.append(path)
             remaining -= path.stat().st_size
         return paths
@@ -1426,10 +1483,12 @@ class Worker:
             else []
         )
         quality_args: list[str] = []
-        if source(url) == "youtube" and mode in {"480", "720", "1080"}:
+        if source(url) == "youtube" and mode in {"360", "480", "720", "1080"}:
             quality_args = [
                 "-f",
-                (f"bv[height<={mode}][ext=mp4]+ba[ext=m4a]/"
+                (f"bv[height<={mode}][vcodec^=avc1][ext=mp4]+ba[ext=m4a]/"
+                 f"b[height<={mode}][vcodec^=avc1][ext=mp4]/"
+                 f"bv[height<={mode}][ext=mp4]+ba[ext=m4a]/"
                  f"b[height<={mode}][ext=mp4]/"
                  f"bv[height<={mode}]+ba/best[height<={mode}]"),
                 "--merge-output-format", "mp4",

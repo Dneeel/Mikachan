@@ -32,7 +32,7 @@ async def test_ganjoor_catalog_search_and_source_validation(monkeypatch):
     assert await provider.poets() == [(2, "حافظ"), (3, "سعدی")]
     assert get.await_count == 1
     poem = await provider.search("عشق")
-    assert "https://ganjoor.net/saadi/ghazal/sh1" in render_poem(poem)
+    assert render_poem(poem) == "📜 <b>سعدی » غزل</b>\n\nمتنی درباره عشق"
     with pytest.raises(ValueError):
         render_poem({"fullTitle": "bad", "plainText": "bad", "fullUrl": "//evil.test"})
 
@@ -122,6 +122,8 @@ async def test_follow_notification_owner_and_tiktok_avatar_stability(monkeypatch
 @pytest.mark.asyncio
 async def test_twitter_text_posts_enabled_and_empty_timeline_flagged(monkeypatch, tmp_path):
     monkeypatch.setattr("mikachan.follow.validate_dns", lambda _url: None)
+    monkeypatch.setattr("mikachan.follow.public_statuses", AsyncMock(
+        side_effect=ValueError("source unavailable")))
     extract = AsyncMock(return_value=[[2, {"tweet_id": "123", "content": "text-only update"}]])
     monkeypatch.setattr("mikachan.follow._extract", extract)
     target = command_target("twitter alice")
@@ -213,4 +215,14 @@ async def test_persian_weather_renders_air_and_three_days(tmp_path):
     card = message.reply.await_args.args[0]
     assert "Kyoto, Japan" in card and "18.8 °C" in card
     assert "Unhealthy for sensitive groups" in card
-    assert "20:30 local" in card and "2026/10/20" in card
+    assert "Local Asia/Tokyo\n📅 2026/10/18\n🕓 20:30" in card
+    assert "2026/10/20" in card
+    assert card == ("🌤 <b>Kyoto, Japan</b>\n\n"
+        "🌡 18.8 °C\n👀 18–25 °C\n🌤 Clear sky\n🌧 Rain 0.0 mm\n"
+        "🌪 Wind 3.3 km/h\n⚠️ AQI 125\n\n"
+        "Unhealthy for sensitive groups\n"
+        "children and people with heart or lung conditions should limit prolonged outdoor activity\n\n"
+        "Local Asia/Tokyo\n📅 2026/10/18\n🕓 20:30\n\n<b>Next 3 days</b>\n\n"
+        "☀️ <b>2026/10/18</b> × Clear sky\n🌡 18–25 °C\n🌧 Rain 0 mm\n\n"
+        "🌧 <b>2026/10/19</b> Rain\n🌡 17–24 °C\n🌧 Rain 2 mm\n\n"
+        "🌨 <b>2026/10/20</b> Snow\n🌡 16–23 °C\n🌧 Rain 3 mm")

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from html.parser import HTMLParser
 import json
 import re
+import time
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
@@ -23,6 +24,55 @@ class CatalogTrack:
     duration: int | None = None
     isrc: str | None = None
     cover: str = ""
+
+
+_musicbrainz_lock = asyncio.Lock()
+_musicbrainz_last = 0.0
+
+
+async def _deezer_musicbrainz(client: httpx.AsyncClient, identifier: str) -> CatalogTrack:
+    """Resolve a Deezer track ID through MusicBrainz's curated URL relation."""
+    global _musicbrainz_last
+    headers = {"User-Agent": "Mikachan/2.0 (https://github.com/Dneeel/Mikachan)"}
+
+    async def lookup(path: str, params: dict[str, str]) -> dict:
+        global _musicbrainz_last
+        async with _musicbrainz_lock:
+            await asyncio.sleep(max(0, 1.05 - (time.monotonic() - _musicbrainz_last)))
+            _musicbrainz_last = time.monotonic()
+            result = await client.get("https://musicbrainz.org/ws/2/" + path,
+                                      params=params, headers=headers)
+            result.raise_for_status()
+        if len(result.content) > 300_000:
+            raise ValueError("MusicBrainz metadata is too large")
+        value = result.json()
+        if not isinstance(value, dict):
+            raise ValueError("Invalid MusicBrainz metadata")
+        return value
+
+    resource = f"https://www.deezer.com/track/{identifier}"
+    relations = await lookup("url", {"resource": resource, "inc": "recording-rels", "fmt": "json"})
+    ids = {str(recording.get("id")) for relation in relations.get("relations", [])
+           if isinstance(relation, dict) and relation.get("target-type") == "recording"
+           and isinstance((recording := relation.get("recording")), dict)
+           and re.fullmatch(r"[a-f0-9-]{36}", str(recording.get("id") or ""))}
+    if len(ids) != 1:
+        raise ValueError("Deezer track identity is unavailable in MusicBrainz")
+    recording = await lookup(f"recording/{next(iter(ids))}",
+                             {"inc": "artist-credits+isrcs", "fmt": "json"})
+    title = recording.get("title")
+    credits = recording.get("artist-credit")
+    artists = [str(item.get("name") or "") for item in credits
+               if isinstance(item, dict) and isinstance(item.get("name"), str)] \
+        if isinstance(credits, list) else []
+    artist = ", ".join(name for name in artists if name)
+    if not isinstance(title, str) or not title or not artist:
+        raise ValueError("MusicBrainz Deezer metadata is incomplete")
+    length = recording.get("length")
+    isrcs = recording.get("isrcs")
+    return CatalogTrack(title[:180], artist[:150], resource,
+                        int(length) // 1000 if isinstance(length, int) and length > 0 else None,
+                        str(isrcs[0]) if isinstance(isrcs, list) and isrcs else None)
 
 
 async def recording_search_alias(track: CatalogTrack) -> tuple[str, str] | None:
@@ -257,7 +307,8 @@ async def resolve_track(url: str) -> CatalogTrack | None:
         return None
     if provider not in {"spotify", "deezer", "apple"}:
         return None
-    validate_dns(url)
+    if provider != "deezer":
+        validate_dns(url)
     async with httpx.AsyncClient(timeout=12, follow_redirects=False) as client:
         if provider == "apple":
             identifier = parse_qs(urlsplit(url).query)["i"][0]
@@ -282,19 +333,22 @@ async def resolve_track(url: str) -> CatalogTrack | None:
             identifier = path.rstrip("/").split("/")[-1]
             if not identifier.isdigit():
                 return None
-            response = await client.get(f"https://api.deezer.com/track/{identifier}")
-            response.raise_for_status()
-            data = response.json()
-            if data.get("error") or not data.get("title"):
-                raise ValueError("Deezer track metadata unavailable")
-            return CatalogTrack(
-                data["title"],
-                (data.get("artist") or {}).get("name", ""),
-                url,
-                data.get("duration"),
-                data.get("isrc"),
-                str((data.get("album") or {}).get("cover_medium") or ""),
-            )
+            try:
+                response = await client.get(f"https://api.deezer.com/track/{identifier}")
+                response.raise_for_status()
+                data = response.json()
+                if not isinstance(data, dict) or data.get("error") or not data.get("title"):
+                    raise ValueError("Deezer track metadata unavailable")
+                return CatalogTrack(
+                    data["title"],
+                    (data.get("artist") or {}).get("name", ""),
+                    url,
+                    data.get("duration"),
+                    data.get("isrc"),
+                    str((data.get("album") or {}).get("cover_medium") or ""),
+                )
+            except (httpx.HTTPError, ValueError, KeyError, TypeError):
+                return await _deezer_musicbrainz(client, identifier)
         identifier = path.strip("/").split("/")[1]
         embed = await client.get(
             f"https://open.spotify.com/embed/track/{identifier}",

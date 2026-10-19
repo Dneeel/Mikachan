@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     local_bot_api_url: str | None = None
     telegram_api_id: int | None = None
     telegram_api_hash: str | None = None
+    coinpj_session: str = ""
     data_dir: Path = Path("data")
     max_active_downloads: int = 3
     max_active_per_user: int = 3
@@ -68,6 +69,8 @@ class Settings(BaseSettings):
             parsed = urlsplit(self.local_bot_api_url)
             if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "::1", "localhost"}:
                 raise ValueError("local Bot API must bind to loopback HTTP")
+        if self.coinpj_session and not (self.telegram_api_id and self.telegram_api_hash):
+            raise ValueError("CoinPJ user session requires Telegram API ID and hash")
         if not 1 <= self.max_active_downloads <= 6 or not 1 <= self.max_active_per_user <= self.max_active_downloads:
             raise ValueError("download concurrency requires 1–6 global slots and a per-user limit within that range")
         if not 1 <= self.max_links_per_message <= 5 or not 1 <= self.search_page_size <= 10:

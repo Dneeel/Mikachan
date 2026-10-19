@@ -22,6 +22,7 @@ dependencies = [
   "lottie>=0.7,<1",
   "cairosvg>=2.7,<3",
   "hijridate==2.6.0",
+  "telethon==1.45.0",
 ]
 [project.optional-dependencies]
 dev = ["pytest==8.4.2", "pytest-asyncio==1.2.0", "ruff==0.13.2", "mypy==1.18.2"]

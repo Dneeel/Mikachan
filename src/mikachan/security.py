@@ -15,7 +15,7 @@ URL_RE = re.compile(r"https?://[^\s<>\"']+", re.I)
 def extractor_env() -> dict[str, str]:
     """Pass only network routing and trust settings to untrusted extractors."""
     keys = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
-            "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE")
+            "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "TMPDIR", "XDG_CACHE_HOME")
     result = {key: value for key in keys if (value := os.environ.get(key))}
     result["PATH"] = str(Path(sys.executable).parent) + os.pathsep + os.environ.get("PATH", "")
     return result
@@ -99,6 +99,7 @@ def source(url: str) -> str:
         "apple": ("music.apple.com", "podcasts.apple.com"),
         "deezer": ("deezer.com",),
         "castbox": ("castbox.fm",),
+        "pornhub": ("pornhub.com",),
     }
     for name, domains in mapping.items():
         if any(host == d or host.endswith("." + d) for d in domains):

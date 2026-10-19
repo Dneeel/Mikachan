@@ -8,7 +8,7 @@ This historical handoff describes the pre-integration downloader checkout. For t
 | --- | --- | --- |
 | `src/mikachan/__main__.py`, `cli.py` | One `mikachan` CLI; `run` starts the Telegram bot, `doctor` checks local dependencies/configuration. | Integration for future shared bootstrap; downloader for current defects by agreement. |
 | `src/mikachan/bot.py` | One aiogram `Dispatcher` and `Router`; command, eligible-link, session-text, and callback handling; starts one polling consumer and the downloader worker. | Shared routing/authorization changes require integration coordination; downloader retains its current handlers until a reviewed contract exists. |
-| `src/mikachan/security.py`, `config.py` | Numeric sender allowlist, private-chat policy, URL validation, runtime settings. | Integration for cross-domain auth/config; downloader for provider and URL-specific fixes by agreement. |
+| `src/mikachan/access.py`, `store.py`, `security.py`, `config.py` | Persisted numeric role and group authorization, legacy environment bootstrap, URL validation and runtime settings. | Shared integration; downloader provider and URL-specific fixes by agreement. |
 | `src/mikachan/store.py` | SQLite WAL access, confirmations, jobs, search sessions, collections, receipts, cache, preferences. | Shared schema/migration decisions require integration coordination; downloader owns existing job behavior. |
 | `src/mikachan/search.py`, `catalog.py`, `podcasts.py`, `matching.py`, `music_ui.py` | Federated discovery, catalog identity, podcast resolution, recording matching, lyrics and music UI metadata. | Downloader. |
 | `src/mikachan/jobs.py`, `media.py` | Bounded job scheduling, extraction/verification, Telegram media delivery and receipt recovery. | Downloader; future shared job/output contracts require integration review. |
@@ -21,7 +21,7 @@ There is no root `AGENTS.md`, `CONTRIBUTING` file, or tracked GitHub Actions wor
 
 ## Verified runtime behavior and boundaries
 
-- `App.message` and `App.callback` in `bot.py` check sender authorization before handling updates. `security.allowed` requires a numeric allowlist match and, by default, the sender's private chat. Enabling group context requires a separately reviewed policy; membership in an allowed group alone must never grant access.
+- `App.message` and `App.callback` in `bot.py` check persisted numeric sender role/status and approved group on each update. Only Owners have incoming private access. Group Admin controls require a separately persisted grant for that exact group; native Telegram admin status and group membership never grant access by themselves. `security.allowed` remains a compatibility helper for older tests and services without a bootstrapped registry.
 - Eligible links create an expiring Yes/No confirmation. `Store.decision` binds the decision to the initiating user, chat, prompt and pending state. No creates no job; the callback deletes the bot's confirmation message when Telegram permits. Other text is ignored unless it is a command or a short-lived search query reply.
 - `/twitter` is the supported help command; `/x` is not registered. Search type and source filters are independent. The downloader uses native Telegram messages and callbacks.
 - `App.run` calls `Dispatcher.start_polling` and starts one bounded downloader worker. Another agent must not start a second consumer for the same bot identity. No webhook or Discord adapter exists in this repository.

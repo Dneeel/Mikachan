@@ -51,7 +51,8 @@ async def test_youtube_quality_choice_is_bound_to_confirmed_job(tmp_path):
     app.store = store
     app.authorized = lambda *_args: True
     await app.callback(q)
-    assert "🎬 Best available · up to 1080p" in button_data(edits[0][1]["reply_markup"])
+    assert {"🎬 360p", "🎬 480p", "🎬 720p", "🎬 Up to 1080p", "🎵 MP3"} <= set(
+        button_data(edits[0][1]["reply_markup"]))
     q.data = f"c:{cid}:1080"
     await app.callback(q)
     jobs = store.jobs(42)
@@ -150,6 +151,28 @@ async def test_following_check_now_and_close_controls(tmp_path):
     q.data = "fm:close:close"
     await app.callback(q)
     assert edits[-1][0] == "Following menu closed."
+
+
+@pytest.mark.asyncio
+async def test_following_menu_checks_all_owned_profiles(tmp_path):
+    store = Store(tmp_path / "bot.sqlite")
+    bot = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=22)))
+    app = App.__new__(App)
+    app.store = store
+    app.bot = bot
+    app.follow = FollowService(store, bot)
+    app.authorized = lambda user, chat, _kind: user == 42 and chat == 42
+    for handle in ("alice", "bob"):
+        token = app.follow.db.session(42, 42, command_target(f"twitter {handle}"))
+        app.follow.db.bind(token, 11)
+        app.follow.db.save(app.follow.db.get_session(token, 42, 42, 11))
+    await app.show_following(42, 42, "private")
+    menu = button_data(bot.send_message.await_args.kwargs["reply_markup"])
+    assert menu["🔄 Check now · all"] == "fm:all:check"
+    app.follow.check = AsyncMock(return_value={"timeline": True})
+    await app.check_all_following(42, 42, "private")
+    assert app.follow.check.await_count == 2
+    assert "Accessible: 2" in bot.send_message.await_args.args[1]
 
 
 def test_tiktok_story_listing_uses_extractable_item_url():

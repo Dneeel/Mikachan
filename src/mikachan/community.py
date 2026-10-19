@@ -11,16 +11,17 @@ from pathlib import Path
 import httpx
 
 from aiogram import Bot
-from aiogram.enums import ChatMemberStatus
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from .ganjoor import Ganjoor, render_poem
+from .access import AccessRegistry
 
 PROTECTED = {"start", "help", "search", "music", "podcast", "pod", "twitter", "instagram",
              "tiktok", "youtube", "queue", "cancel", "status", "settings", "admin", "fal",
              "poem", "joke", "quote", "dice", "nickname", "rules", "setrules", "note",
-             "setnote", "delnote", "setcmd", "delcmd", "welcome", "del", "mute",
-             "modlog", "groupstats", "groupsettings", "qr", "scan", "ocr", "image",
+             "setnote", "delnote", "setcmd", "delcmd", "welcome", "del", "pin", "mute",
+             "unmute", "ban", "unban", "bans",
+             "modlog", "groupstats", "groupstatus", "groupsettings", "qr", "scan", "ocr", "image",
              "sticker", "stickerimage", "gif", "pack", "convert", "weather", "rate",
              "time", "apod", "translate"}
 NAME = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
@@ -52,6 +53,9 @@ CREATE TABLE IF NOT EXISTS community_sessions (
  id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, chat_id INTEGER NOT NULL,
  message_id INTEGER, kind TEXT NOT NULL, expires REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS cultural_seed (name TEXT PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS managed_bans (
+ chat_id INTEGER NOT NULL, user_id INTEGER NOT NULL, actor_id INTEGER NOT NULL,
+ created REAL NOT NULL, active INTEGER NOT NULL, PRIMARY KEY(chat_id,user_id));
 """
 
 
@@ -200,18 +204,14 @@ class CommunityStore:
 
 
 class Community:
-    def __init__(self, bot: Bot, store: CommunityStore, owner_id: int):
+    def __init__(self, bot: Bot, store: CommunityStore, owner_id: int,
+                 access: AccessRegistry | None = None):
         self.bot, self.store, self.owner_id = bot, store, owner_id
+        self.access = access
         self.ganjoor = Ganjoor()
 
     async def admin(self, chat: int, user: int) -> bool:
-        if user == self.owner_id:
-            return True
-        try:
-            member = await self.bot.get_chat_member(chat, user)
-            return member.status in {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR}
-        except Exception:
-            return False
+        return self.access.can_manage(user, chat) if self.access else user == self.owner_id
 
     async def welcome(self, m: Message, allowed_users: set[int]) -> None:
         if not m.new_chat_members or self.store.setting(m.chat.id, "welcome_enabled") != "1":
@@ -239,6 +239,7 @@ class Community:
                     [InlineKeyboardButton(text="Random poem", callback_data=f"u:{sid}:random")],
                     [InlineKeyboardButton(text="Choose poet", callback_data=f"u:{sid}:poets")],
                     [InlineKeyboardButton(text="Search poetry", callback_data=f"u:{sid}:search")],
+                    [InlineKeyboardButton(text="✖ Close", callback_data=f"u:{sid}:close")],
                 ])
                 sent = await m.reply("📜 <b>Poetry</b>\nBrowse Ganjoor's public catalog or search for a verse.",
                                      reply_markup=markup)
@@ -283,21 +284,26 @@ class Community:
                           "Button actions and ordinary conversation are not counted.")
             return True
         if cmd == "/groupsettings":
+            if not await self.admin(chat, user):
+                return True
             parts = arg.lower().split()
-            if len(parts) == 2 and parts[0] in {"culture", "notes", "utilities"} and parts[1] in {"on", "off"}:
+            if len(parts) == 2 and parts[0] in {"culture", "notes", "utilities",
+                                                  "downloader", "follow"} and parts[1] in {"on", "off"}:
                 if await self.admin(chat, user):
+                    ceiling = parts[0] if parts[0] in {"utilities", "downloader", "follow"} \
+                        else "community"
+                    if parts[1] == "on" and self.access and not self.access.module_enabled(ceiling):
+                        await m.reply("Global policy disables this module. The Owner must enable it first.")
+                        return True
                     self.store.set_setting(chat, "module_" + parts[0], "1" if parts[1] == "on" else "0")
                     self.store.audit(chat, user, "module_" + parts[0], None, parts[1])
                     await m.reply("Group module setting saved.")
                 return True
-            state = self.store.setting(chat, "welcome_enabled") == "1"
-            modules = ", ".join(f"{x}: {'on' if self.store.enabled(chat, x) else 'off'}"
-                                for x in ("culture", "notes", "utilities"))
-            await m.reply(f"Group settings: welcome {'on' if state else 'off'}; {modules}. "
-                          "Admins: /welcome on|off|TEXT; /groupsettings MODULE on|off.")
+            await self.group_panel(m)
             return True
         if cmd in {"/setrules", "/setnote", "/delnote", "/setcmd", "/delcmd", "/welcome",
-                   "/nickname", "/del", "/mute", "/modlog"}:
+                   "/nickname", "/del", "/pin", "/mute", "/unmute", "/ban",
+                   "/unban", "/bans", "/modlog"}:
             if not await self.admin(chat, user):
                 return True
             if cmd == "/setrules" and 0 < len(arg) <= 3500:
@@ -339,29 +345,112 @@ class Community:
                     self.store.set_nickname(chat, target.id, None)
                     self.store.audit(chat, user, "nickname", target.id, "removed")
                     await m.reply("Group nickname removed.")
-            elif cmd in {"/del", "/mute"}:
+            elif cmd == "/bans":
+                rows = self.store.db.execute("SELECT user_id,actor_id,created FROM managed_bans "
+                    "WHERE chat_id=? AND active=1 ORDER BY created DESC LIMIT 20", (chat,)).fetchall()
+                await m.reply("🚫 <b>Managed Bans</b>\n" + ("\n".join(
+                    f"<code>{r['user_id']}</code> · by {r['actor_id']} · "
+                    f"{time.strftime('%Y-%m-%d', time.gmtime(r['created']))}" for r in rows)
+                    or "No active bans recorded by Mikachan.") +
+                    "\nOnly bans managed by Mikachan are listed.")
+            elif cmd in {"/del", "/pin", "/mute", "/unmute", "/ban", "/unban"}:
                 target_msg = m.reply_to_message
                 target = target_msg.from_user if target_msg else None
-                if not target_msg or not target or target.id == self.owner_id or await self.admin(chat, target.id):
-                    await m.reply("Reply to a non-admin member's message.")
-                    return True
+                if cmd in {"/del", "/pin"}:
+                    if not target_msg:
+                        await m.reply(f"Reply to the message you want to {cmd[1:]}.")
+                        return True
+                    target_id = target.id if target else 0
+                    protected_person = self.access.person(target_id) if self.access else None
+                    if cmd == "/del" and (target_id == self.owner_id or
+                            protected_person is not None and
+                            protected_person["role"] in {"OWNER", "ADMIN"}):
+                        await m.reply("Protected Owner and Admin messages cannot be deleted here.")
+                        return True
+                else:
+                    args = arg.split()
+                    duration = 10
+                    if target_msg and target:
+                        target_id = target.id
+                        if cmd == "/mute" and args:
+                            if len(args) != 1 or not args[0].isdigit():
+                                await m.reply("Reply with /mute MINUTES, for example /mute 67.")
+                                return True
+                            duration = int(args[0])
+                        elif args:
+                            await m.reply(f"Reply with bare {cmd}.")
+                            return True
+                    else:
+                        if (not args or not args[0].isdigit() or
+                                cmd == "/mute" and (len(args) != 2 or not args[1].isdigit()) or
+                                cmd != "/mute" and len(args) != 1):
+                            await m.reply(f"Reply to a user or use {cmd} USER_ID" +
+                                          (" MINUTES." if cmd == "/mute" else "."))
+                            return True
+                        target_id = int(args[0])
+                        if cmd == "/mute":
+                            duration = int(args[1])
+                        known = self.store.db.execute("SELECT 1 FROM known_group_members "
+                            "WHERE chat_id=? AND user_id=?", (chat, target_id)).fetchone()
+                        registered = self.access.person(target_id) if self.access else None
+                        if not known and not registered and cmd != "/unban":
+                            await m.reply("Target ID has not been observed or registered.")
+                            return True
+                    if not 0 < target_id < 2**63 or cmd == "/mute" and not 1 <= duration <= 10080:
+                        await m.reply("Invalid target or duration; mute range is 1–10080 minutes.")
+                        return True
+                    protected_person = self.access.person(target_id) if self.access else None
+                    if (target_id == self.owner_id or protected_person is not None and
+                            protected_person["role"] in {"OWNER", "ADMIN"} or
+                            await self.admin(chat, target_id)):
+                        await m.reply("Protected Owner and Admin accounts cannot be moderated here.")
+                        return True
+                    if cmd == "/ban":
+                        sid = self.store.new_session(user, chat, f"ban:{target_id}")
+                        sent = await m.reply(f"Ban user <code>{target_id}</code> from this group?",
+                            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                                InlineKeyboardButton(text="✅ Ban", callback_data=f"g:{sid}:ban_confirm"),
+                                InlineKeyboardButton(text="❌ Cancel", callback_data=f"g:{sid}:ban_cancel")]]))
+                        self.store.db.execute("UPDATE community_sessions SET message_id=? WHERE id=?",
+                                              (sent.message_id, sid))
+                        return True
                 try:
                     if cmd == "/del":
+                        assert target_msg is not None
                         await self.bot.delete_message(chat, target_msg.message_id)
-                    else:
+                    elif cmd == "/pin":
+                        assert target_msg is not None
+                        await self.bot.pin_chat_message(chat, target_msg.message_id,
+                                                        disable_notification=True)
+                    elif cmd == "/mute":
                         from aiogram.types import ChatPermissions
-                        await self.bot.restrict_chat_member(chat, target.id,
-                            ChatPermissions(can_send_messages=False), until_date=int(time.time()) + 600)
+                        await self.bot.restrict_chat_member(chat, target_id,
+                            ChatPermissions(can_send_messages=False),
+                            until_date=int(time.time()) + duration * 60)
+                    elif cmd == "/unmute":
+                        from aiogram.types import ChatPermissions
+                        await self.bot.restrict_chat_member(chat, target_id,
+                            ChatPermissions(can_send_messages=True, can_send_audios=True,
+                                can_send_documents=True, can_send_photos=True,
+                                can_send_videos=True, can_send_video_notes=True,
+                                can_send_voice_notes=True, can_send_polls=True,
+                                can_send_other_messages=True,
+                                can_add_web_page_previews=True))
+                    elif cmd == "/unban":
+                        await self.bot.unban_chat_member(chat, target_id, only_if_banned=True)
+                        self.store.db.execute("UPDATE managed_bans SET active=0 WHERE chat_id=? "
+                                              "AND user_id=?", (chat, target_id))
                     result = "completed"
                 except Exception as exc:
                     result = f"failed: {type(exc).__name__}"
-                self.store.audit(chat, user, cmd[1:], target.id, result)
+                self.store.audit(chat, user, cmd[1:], target.id if cmd in {"/del", "/pin"}
+                                 and target else target_id, result)
                 await m.reply(html.escape(result))
             elif cmd == "/modlog":
-                rows = self.store.db.execute("SELECT actor_id,action,target_id,result,created "
+                audit_rows = self.store.db.execute("SELECT actor_id,action,target_id,result,created "
                     "FROM community_audit WHERE chat_id=? ORDER BY id DESC LIMIT 10", (chat,))
                 lines = [f"{time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(r[4]))} · "
-                         f"{r[0]} · {r[1]} · {r[2] or '-'} · {r[3]}" for r in rows]
+                         f"{r[0]} · {r[1]} · {r[2] or '-'} · {r[3]}" for r in audit_rows]
                 await m.reply(html.escape("\n".join(lines) or "No Mikachan actions recorded."))
             return True
         name = cmd.lstrip("/")
@@ -375,15 +464,143 @@ class Community:
 
     @staticmethod
     def render_content(row: sqlite3.Row) -> str:
-        source = str(row["source"])
-        name = "Wikisource" if source.startswith("https://fa.wikisource.org/wiki/") else source[:120]
-        attribution = (f'<a href="{html.escape(source, quote=True)}">{name}</a>'
-                       if source.startswith("https://") else html.escape(name))
         return ("📜 <b>" + html.escape(str(row["author"])) + "</b>\n\n" +
-                html.escape(str(row["body"])[:3400]) + "\n\nSource · " + attribution +
-                " · " + html.escape(str(row["rights"])[:80]))
+                html.escape(str(row["body"])[:3400]))
+
+    def _group_view(self, chat: int, sid: str, section: str) -> tuple[str, InlineKeyboardMarkup]:
+        def button(label: str, action: str) -> InlineKeyboardButton:
+            return InlineKeyboardButton(text=label, callback_data=f"g:{sid}:{action}")
+        if section == "modules":
+            rows = [[button(f"{'✅' if self.store.enabled(chat, key) else '⬜'} {key.title()}",
+                            f"toggle_{key}")]
+                    for key in ("downloader", "follow", "culture", "notes", "utilities")]
+            body = "🧩 <b>Group Modules</b>\nChoose a module to enable or disable in this group."
+        elif section == "welcome":
+            enabled = self.store.setting(chat, "welcome_enabled") == "1"
+            rows = [[button("Disable welcome" if enabled else "Enable welcome", "welcome_toggle")]]
+            body = (f"👋 <b>Welcome</b> · {'On' if enabled else 'Off'}\n"
+                    f"Current text · {html.escape(self.store.setting(chat, 'welcome_text', 'Welcome, {name}.')[:300])}\n"
+                    "Use /welcome TEXT to change it. Only approved people receive a welcome.")
+        elif section == "rules":
+            rows = []
+            body = ("📜 <b>Group Rules</b>\n" +
+                    html.escape(self.store.setting(chat, "rules")[:3000] or "No rules have been set.") +
+                    "\nUse /setrules TEXT to update.")
+        elif section == "stats":
+            enabled = self.store.setting(chat, "groupstatus_user_enabled", "1") == "1"
+            rows = [[button("Disable User view" if enabled else "Enable User view", "stats_toggle")]]
+            body = (f"📊 <b>Group Statistics</b> · User view {'On' if enabled else 'Off'}\n"
+                    "Owners and assigned Admins can always use /groupstatus. "
+                    "Only messages Telegram delivers to Mikachan are counted.")
+        elif section == "logs":
+            logs = self.store.db.execute("SELECT actor_id,action,target_id,result FROM community_audit "
+                "WHERE chat_id=? ORDER BY id DESC LIMIT 8", (chat,)).fetchall()
+            rows = []
+            body = "📋 <b>Group Activity</b>\n" + ("\n".join(html.escape(
+                f"{r['actor_id']} · {r['action']} · {r['target_id'] or '-'} · {r['result']}")
+                for r in logs) or "No Mikachan settings or moderation actions recorded.")
+        else:
+            rows = [[button("👋 Welcome Studio", "welcome")],
+                    [button("📜 Rules", "rules")],
+                    [button("🧩 Modules", "modules")],
+                    [button("📊 Group Statistics", "stats")],
+                    [button("📋 Activity & Logs", "logs")]]
+            body = "⚙️ <b>Group Settings</b>\nManage this approved group."
+        rows.append([button("◀ Back", "home")] if section != "home" else
+                    [button("✖ Close", "close")])
+        return body, InlineKeyboardMarkup(inline_keyboard=rows)
+
+    async def group_panel(self, m: Message) -> None:
+        if not m.from_user or not await self.admin(m.chat.id, m.from_user.id):
+            return
+        sid = self.store.new_session(m.from_user.id, m.chat.id, "group")
+        body, buttons = self._group_view(m.chat.id, sid, "home")
+        sent = await m.reply(body, reply_markup=buttons)
+        self.store.db.execute("UPDATE community_sessions SET message_id=? WHERE id=?",
+                              (sent.message_id, sid))
+
+    async def group_callback(self, q: CallbackQuery, data: str) -> bool:
+        if not data.startswith("g:") or not isinstance(q.message, Message) or not q.from_user:
+            return False
+        parts = data.split(":")
+        if len(parts) != 3:
+            await q.answer()
+            return True
+        sid, action = parts[1:]
+        session = self.store.session(sid, q.from_user.id, q.message.chat.id,
+                                     q.message.message_id)
+        if not session or not await self.admin(
+                q.message.chat.id, q.from_user.id):
+            await q.answer("Group control is unavailable")
+            return True
+        if str(session["kind"]).startswith("ban:"):
+            if action not in {"ban_confirm", "ban_cancel"}:
+                await q.answer()
+                return True
+            target_id = int(str(session["kind"]).split(":", 1)[1])
+            self.store.db.execute("DELETE FROM community_sessions WHERE id=?", (sid,))
+            await q.answer()
+            if action == "ban_cancel":
+                await q.message.edit_text("Ban cancelled.")
+                return True
+            protected = self.access.person(target_id) if self.access else None
+            if (target_id == self.owner_id or protected and protected["role"] in {"OWNER", "ADMIN"}):
+                await q.message.edit_text("Protected account; ban denied.")
+                return True
+            try:
+                await self.bot.ban_chat_member(q.message.chat.id, target_id)
+                self.store.db.execute("INSERT INTO managed_bans VALUES (?,?,?,?,1) "
+                    "ON CONFLICT(chat_id,user_id) DO UPDATE SET actor_id=excluded.actor_id,"
+                    "created=excluded.created,active=1", (q.message.chat.id, target_id,
+                    q.from_user.id, time.time()))
+                result = "completed"
+            except Exception as exc:
+                result = f"failed: {type(exc).__name__}"
+            self.store.audit(q.message.chat.id, q.from_user.id, "ban", target_id, result)
+            await q.message.edit_text(f"Ban {html.escape(result)}.")
+            return True
+        if session["kind"] != "group":
+            await q.answer("Group control is unavailable")
+            return True
+        await q.answer()
+        if action == "close":
+            self.store.db.execute("DELETE FROM community_sessions WHERE id=?", (sid,))
+            await q.message.edit_reply_markup(reply_markup=None)
+            return True
+        if action.startswith("toggle_") and action[7:] in {"downloader", "follow", "culture",
+                                                           "notes", "utilities"}:
+            domain = action[7:]
+            new = "0" if self.store.enabled(q.message.chat.id, domain) else "1"
+            ceiling = domain if domain in {"utilities", "downloader", "follow"} else "community"
+            if new == "1" and self.access and not self.access.module_enabled(ceiling):
+                await q.message.answer("The global Owner policy disables this module.")
+                return True
+            self.store.set_setting(q.message.chat.id, "module_" + domain, new)
+            self.store.audit(q.message.chat.id, q.from_user.id, "module_" + domain,
+                             None, "on" if new == "1" else "off")
+            action = "modules"
+        elif action == "welcome_toggle":
+            new = "0" if self.store.setting(q.message.chat.id, "welcome_enabled") == "1" else "1"
+            self.store.set_setting(q.message.chat.id, "welcome_enabled", new)
+            self.store.audit(q.message.chat.id, q.from_user.id, "welcome", None,
+                             "on" if new == "1" else "off")
+            action = "welcome"
+        elif action == "stats_toggle":
+            new = "0" if self.store.setting(q.message.chat.id,
+                "groupstatus_user_enabled", "1") == "1" else "1"
+            self.store.set_setting(q.message.chat.id, "groupstatus_user_enabled", new)
+            self.store.audit(q.message.chat.id, q.from_user.id, "groupstatus_user", None,
+                             "on" if new == "1" else "off")
+            action = "stats"
+        if action not in {"home", "modules", "welcome", "rules", "stats", "logs"}:
+            return True
+        body, buttons = self._group_view(q.message.chat.id, sid, action)
+        await q.message.edit_text(body, reply_markup=buttons)
+        return True
 
     async def callback(self, q: CallbackQuery, data: str) -> bool:
+        if data.startswith("g:"):
+            return await self.group_callback(q, data)
         if not data.startswith("u:") or not q.message or not q.from_user:
             return False
         parts = data.split(":")
@@ -394,7 +611,13 @@ class Community:
         if not session:
             await q.answer("This menu is unavailable.")
             return True
-        if action == "random":
+        if action == "close":
+            self.store.db.execute("DELETE FROM community_sessions WHERE id=?", (sid,))
+            await q.answer()
+            await self.bot.edit_message_text("Poetry menu closed.",
+                                             chat_id=q.message.chat.id,
+                                             message_id=q.message.message_id)
+        elif action == "random":
             await q.answer()
             try:
                 await q.message.answer(render_poem(await self.ganjoor.random()))
@@ -418,6 +641,7 @@ class Community:
                         for pid, name in poets[page*12:(page+1)*12]]
                 if controls:
                     rows.append(controls)
+                rows.append([InlineKeyboardButton(text="✖ Close", callback_data=f"u:{sid}:close")])
                 await self.bot.edit_message_text(f"📜 <b>Choose a poet</b> · {page+1}/{(len(poets)+11)//12}",
                     chat_id=q.message.chat.id, message_id=q.message.message_id,
                     reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))

@@ -17,14 +17,15 @@ from deploy.manager import EDITABLE, ENV_KEYS, PRIVATE_KEYS, Manager, ManagerErr
 SETTING_HELP = {
     "BOT_TOKEN": "Telegram BotFather token. Required to connect the bot. Changing it switches bot identity.",
     "OWNER_TELEGRAM_ID": "Your numeric Telegram user ID. Grants global owner controls.",
-    "ALLOWED_TELEGRAM_IDS": "Numeric user IDs, separated by commas; owner required. Up to four users.",
+    "ALLOWED_TELEGRAM_IDS": "Legacy numeric seed IDs, separated by commas; Owner required, up to four here. Register further named people in private /settings.",
     "ALLOWED_GROUP_IDS": "Negative numeric group IDs, separated by commas. Members still need user access.",
-    "PRIVATE_CHATS_ONLY": "true limits the bot to private chats; false permits approved groups.",
+    "PRIVATE_CHATS_ONLY": "Legacy setting retained for config compatibility. v2 permits only Owners privately; registered people may use approved groups.",
     "MOMMY_TELEGRAM_IDS": "Optional authorized numeric IDs for the separate fictional personality mode.",
     "BOT_API_MODE": "public is the default. local requires a separately installed Bot API server.",
     "LOCAL_BOT_API_URL": "Loopback URL for an explicitly configured local Bot API server.",
-    "TELEGRAM_API_ID": "Only required for a self-hosted local Telegram Bot API server.",
-    "TELEGRAM_API_HASH": "Only required for a self-hosted local Telegram Bot API server.",
+    "TELEGRAM_API_ID": "Telegram app ID for optional CoinPJ user session or a local Bot API server.",
+    "TELEGRAM_API_HASH": "Telegram app hash for optional CoinPJ user session or a local Bot API server.",
+    "COINPJ_SESSION": "Optional secret Telegram user session; create with the one-time userbot-login command.",
     "SPOTIFY_CLIENT_ID": "Optional Spotify catalog browsing credential.",
     "SPOTIFY_CLIENT_SECRET": "Optional Spotify catalog browsing secret.",
     "NASA_API_KEY": "Optional NASA APOD key; DEMO_KEY is used otherwise.",
@@ -43,7 +44,9 @@ SECTIONS = {
                    ("Preview release cleanup", "prune-preview"), ("Prune old releases", "prune")],
     "service": [("Start", "start"), ("Stop", "stop"), ("Restart", "restart"),
                 ("Queue activity", "queue"), ("Recent logs", "logs")],
-    "configuration": [("Refresh configuration", "config")],
+    "configuration": [("Refresh configuration", "config"),
+                      ("Pending Owner requests", "owner-requests"),
+                      ("Approve Owner request", "owner-approve")],
     "data": [("Storage overview", "storage"), ("Create backup", "backup"),
              ("List backups", "backups"), ("Restore backup", "restore"),
              ("Clear interrupted media", "cleanup")],
@@ -63,7 +66,7 @@ SETTING_GROUPS = {
                             "ALLOWED_GROUP_IDS", "PRIVATE_CHATS_ONLY", "MOMMY_TELEGRAM_IDS"),
     "Information and language": ("NASA_API_KEY", "NAVASAN_API_KEY",
                                  "NAVASAN_REFRESH_SECONDS", "TRANSLATION_API_URL",
-                                 "TRANSLATION_API_KEY"),
+                                 "TRANSLATION_API_KEY", "COINPJ_SESSION"),
     "Music catalog": ("SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET"),
     "Limits": ("MAX_ACTIVE_DOWNLOADS", "MAX_ACTIVE_PER_USER", "MAX_LINKS_PER_MESSAGE",
                "SEARCH_PAGE_SIZE", "SEARCH_SESSION_TTL_SECONDS", "CONFIRMATION_TTL_SECONDS"),
@@ -262,6 +265,11 @@ class MikachanPanel(App[None]):
             "restore": ("Restore snapshot", [("snapshot", "Snapshot ID", False),
                         ("confirmation", "Type RESTORE", False)],
                        "An undo snapshot is saved first."),
+            "owner-approve": ("Approve Owner request",
+                [("token", "Pending request token", False),
+                 ("target", "Target numeric user ID", False),
+                 ("confirmation", "Type APPROVE OWNER", False)],
+                "Independent VPS operator approval. A snapshot is saved before the role change."),
             "remove": ("Remove bot code", [("confirmation", "Type REMOVE MIKACHAN", False)],
                        "Keeps configuration, database and backups."),
             "purge": ("Delete managed project", [("confirmation", "Type PURGE MIKACHAN", False)],
@@ -357,7 +365,8 @@ class MikachanPanel(App[None]):
         if fields is None:
             return
         expected = {"rollback": "ROLLBACK", "restore": "RESTORE", "prune": "PRUNE",
-                    "remove": "REMOVE MIKACHAN", "purge": "PURGE MIKACHAN"}
+                    "remove": "REMOVE MIKACHAN", "purge": "PURGE MIKACHAN",
+                    "owner-approve": "APPROVE OWNER"}
         if action in expected and fields.get("confirmation") != expected[action]:
             self.query_one("#log", RichLog).write("Cancelled: confirmation text did not match.")
             return
@@ -423,6 +432,14 @@ class MikachanPanel(App[None]):
                 return manager.config()
             if action == "set":
                 return manager.set_config(fields["key"], fields["value"])
+            if action == "owner-requests":
+                return manager.owner_approvals()
+            if action == "owner-approve":
+                try:
+                    target_id = int(fields["target"])
+                except ValueError as exc:
+                    raise ManagerError("Target must be a numeric Telegram ID") from exc
+                return manager.approve_owner(fields["token"], target_id)
             if action in {"start", "stop", "restart"}:
                 return manager.service(action)
             if action == "logs":

@@ -45,6 +45,7 @@ EDITABLE = {
     "CONFIRMATION_TTL_SECONDS", "SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET",
     "NASA_API_KEY", "NAVASAN_API_KEY", "NAVASAN_REFRESH_SECONDS",
     "TRANSLATION_API_URL", "TRANSLATION_API_KEY",
+    "COINPJ_SESSION",
 }
 ENV_KEYS = EDITABLE | {
     "OWNER_TELEGRAM_ID", "BOT_API_MODE", "LOCAL_BOT_API_URL", "TELEGRAM_API_ID",
@@ -52,7 +53,7 @@ ENV_KEYS = EDITABLE | {
     "HTTPS_PROXY", "NO_PROXY", "SSL_CERT_FILE",
 }
 PRIVATE_KEYS = {"BOT_TOKEN", "SPOTIFY_CLIENT_SECRET", "NASA_API_KEY", "NAVASAN_API_KEY",
-                "TRANSLATION_API_KEY", "TELEGRAM_API_HASH"}
+                "TRANSLATION_API_KEY", "TELEGRAM_API_HASH", "COINPJ_SESSION"}
 
 
 class ManagerError(RuntimeError):
@@ -877,8 +878,11 @@ class Manager:
                 _atomic(self.paths.env, _render_env(values), 0o640)
                 self._set_file_group(self.paths.env)
                 if (self.paths.state / "mikachan.sqlite").exists():
-                    self._sync_access("ALLOWED_TELEGRAM_IDS", values)
-                    self._sync_access("ALLOWED_GROUP_IDS", values)
+                    if old.get("OWNER_TELEGRAM_ID") != values["OWNER_TELEGRAM_ID"]:
+                        self._sync_access("OWNER_TELEGRAM_ID", values, old)
+                    else:
+                        self._sync_access("ALLOWED_TELEGRAM_IDS", values, old)
+                    self._sync_access("ALLOWED_GROUP_IDS", values, old)
                 self._systemctl("enable")
                 self._systemctl("start")
                 if not self._healthy():
@@ -1055,6 +1059,7 @@ class Manager:
             if not self.paths.env.exists():
                 raise ManagerError("Run Setup before editing individual settings")
             values = _parse_env(self.paths.env)
+            previous = dict(values)
             if key == "OWNER_TELEGRAM_ID":
                 try:
                     users = _ids(values["ALLOWED_TELEGRAM_IDS"])
@@ -1075,8 +1080,7 @@ class Manager:
                 _atomic(self.paths.env, _render_env(values), 0o640)
                 self._set_file_group(self.paths.env)
                 if key in {"ALLOWED_TELEGRAM_IDS", "ALLOWED_GROUP_IDS", "OWNER_TELEGRAM_ID"}:
-                    self._sync_access("ALLOWED_TELEGRAM_IDS" if key == "OWNER_TELEGRAM_ID" else key,
-                                      values)
+                    self._sync_access(key, values, previous)
                 if was_active:
                     self._systemctl("start")
                 if was_active and not self._healthy():
@@ -1089,33 +1093,154 @@ class Manager:
                 raise
             return f"Updated {key}; previous configuration and database: {undo}"
 
-    def _sync_access(self, key: str, values: dict[str, str]) -> None:
+    def _sync_access(self, key: str, values: dict[str, str],
+                     previous: dict[str, str] | None = None) -> None:
         database = self.paths.state / "mikachan.sqlite"
         if not database.is_file():
             raise ManagerError("Bot database is missing; cannot synchronize authorization")
         users = _ids(values["ALLOWED_TELEGRAM_IDS"])
         groups = _ids(values.get("ALLOWED_GROUP_IDS", ""), negative=True)
         with sqlite3.connect(database) as db:
+            unified = bool(db.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                                      "AND name='access_bootstrap'").fetchone())
             existing_users = {row[0] for row in db.execute("SELECT user_id FROM access")}
             existing_groups = {row[0] for row in db.execute("SELECT chat_id FROM allowed_groups")}
             removed_users: set[int] = set()
             removed_groups: set[int] = set()
+            if key == "OWNER_TELEGRAM_ID" and unified:
+                protected = db.execute("SELECT primary_owner_id FROM access_bootstrap "
+                                       "WHERE singleton=1").fetchone()
+                if not protected:
+                    raise ManagerError("Protected Owner registry is inconsistent")
+                old_owner, new_owner = int(protected[0]), int(values["OWNER_TELEGRAM_ID"])
+                if old_owner != new_owner:
+                    now = time.time()
+                    db.execute("INSERT OR IGNORE INTO access VALUES (?)", (new_owner,))
+                    db.execute("INSERT INTO people VALUES (?,?,'OWNER','ACTIVE',NULL,'',?,?) "
+                        "ON CONFLICT(user_id) DO UPDATE SET role='OWNER',status='ACTIVE',"
+                        "suspended_until=NULL,reason='',updated=excluded.updated",
+                        (new_owner, f"Owner {new_owner}", now, now))
+                    db.execute("UPDATE people SET role='USER',status='REVOKED',updated=? "
+                               "WHERE user_id=?", (now, old_owner))
+                    db.execute("DELETE FROM access WHERE user_id=?", (old_owner,))
+                    db.execute("DELETE FROM admin_grants WHERE user_id=?", (old_owner,))
+                    db.execute("UPDATE access_bootstrap SET primary_owner_id=? WHERE singleton=1",
+                               (new_owner,))
+                    db.execute("INSERT INTO access_audit "
+                        "(created,actor_id,action,user_id,detail) VALUES (?,0,'operator_owner_change',?,?)",
+                        (now, new_owner, f"replaced {old_owner}"))
+                    removed_users.add(old_owner)
+                key = "ALLOWED_TELEGRAM_IDS"
+            elif key == "OWNER_TELEGRAM_ID":
+                key = "ALLOWED_TELEGRAM_IDS"
+            if unified and previous is not None:
+                prior_users = _ids(previous.get("ALLOWED_TELEGRAM_IDS", ""))
+                prior_groups = _ids(previous.get("ALLOWED_GROUP_IDS", ""), negative=True)
+            else:
+                prior_users, prior_groups = existing_users, existing_groups
             if key == "ALLOWED_TELEGRAM_IDS":
-                db.executemany("INSERT OR IGNORE INTO access VALUES (?)", ((x,) for x in users))
-                removed_users = existing_users - users
+                additions = users - prior_users
+                db.executemany("INSERT OR IGNORE INTO access VALUES (?)", ((x,) for x in additions))
+                removed_users |= prior_users - users
                 db.executemany("DELETE FROM access WHERE user_id=?",
                                ((x,) for x in removed_users))
+                if unified:
+                    now = time.time()
+                    db.executemany("INSERT OR IGNORE INTO people VALUES "
+                        "(?,?,'USER','ACTIVE',NULL,'',?,?)",
+                        ((x, f"Operator user {x}", now, now) for x in additions))
+                    db.executemany("UPDATE people SET status='REVOKED',updated=? "
+                                   "WHERE user_id=? AND role!='OWNER'",
+                                   ((now, x) for x in removed_users))
             if key == "ALLOWED_GROUP_IDS":
-                db.executemany("INSERT OR IGNORE INTO allowed_groups VALUES (?)", ((x,) for x in groups))
-                removed_groups = existing_groups - groups
+                additions = groups - prior_groups
+                db.executemany("INSERT OR IGNORE INTO allowed_groups VALUES (?)", ((x,) for x in additions))
+                removed_groups = prior_groups - groups
                 db.executemany("DELETE FROM allowed_groups WHERE chat_id=?",
                                ((x,) for x in removed_groups))
+                if unified:
+                    now = time.time()
+                    db.executemany("INSERT OR IGNORE INTO group_registry VALUES "
+                        "(?,?,'ACTIVE',?,?)", ((x, f"Operator group {x}", now, now)
+                                                for x in additions))
+                    db.executemany("UPDATE group_registry SET status='REVOKED',updated=? "
+                                   "WHERE chat_id=?", ((now, x) for x in removed_groups))
                 db.execute("INSERT OR IGNORE INTO group_access_seeded VALUES (1)")
             for column, removed in (("user_id", removed_users), ("chat_id", removed_groups)):
                 for ident in removed:
                     db.execute(f"UPDATE jobs SET state='CANCELLED', updated=? WHERE {column}=? "
                                "AND state IN ('QUEUED','RESOLVING','DOWNLOADING','VERIFYING')",
                                (time.time(), ident))
+
+    def owner_approvals(self) -> list[dict[str, Any]]:
+        """Read pending Telegram requests through the independent VPS operator channel."""
+        self._root()
+        database = self.paths.state / "mikachan.sqlite"
+        if not database.is_file():
+            return []
+        with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as db:
+            if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                              "AND name='owner_requests'").fetchone():
+                return []
+            rows = db.execute("SELECT token,requester_id,target_id,action,expires "
+                "FROM owner_requests WHERE status='PENDING' AND expires>? "
+                "ORDER BY created DESC LIMIT 20", (time.time(),)).fetchall()
+        return [dict(zip(("token", "requester_id", "target_id", "action", "expires"), row))
+                for row in rows]
+
+    def approve_owner(self, token: str, target: int) -> str:
+        """Apply a one-time Owner request after OS-root authentication and backup."""
+        if not re.fullmatch(r"[A-Za-z0-9_-]{20,40}", token) or not 0 < target < 2**63:
+            raise ManagerError("Invalid Owner approval token or target ID")
+        with self._lock():
+            self._ensure_consistent(self._manifest())
+            undo, was_active = self._stop_and_snapshot(reason="before Owner approval")
+            try:
+                database = self.paths.state / "mikachan.sqlite"
+                with sqlite3.connect(database) as db:
+                    db.execute("BEGIN IMMEDIATE")
+                    row = db.execute("SELECT requester_id,target_id,action FROM owner_requests "
+                        "WHERE token=? AND target_id=? AND status='PENDING' AND expires>?",
+                        (token, target, time.time())).fetchone()
+                    primary = db.execute("SELECT primary_owner_id FROM access_bootstrap "
+                                         "WHERE singleton=1").fetchone()
+                    person = db.execute("SELECT role,status FROM people WHERE user_id=?",
+                                        (target,)).fetchone()
+                    if not row or not primary or row[0] != primary[0] or not person or \
+                            person[1] != "ACTIVE" or target == primary[0]:
+                        raise ManagerError("Request expired, changed or not initiated by the primary Owner")
+                    if row[2] == "PROMOTE" and person[0] not in {"USER", "ADMIN"} or \
+                            row[2] == "REVOKE" and person[0] != "OWNER":
+                        raise ManagerError("Target role changed since the request")
+                    now = time.time()
+                    if row[2] == "PROMOTE":
+                        db.execute("UPDATE people SET role='OWNER',updated=? WHERE user_id=?",
+                                   (now, target))
+                        db.execute("INSERT OR IGNORE INTO access VALUES (?)", (target,))
+                    else:
+                        db.execute("UPDATE people SET role='USER',status='REVOKED',updated=? "
+                                   "WHERE user_id=?", (now, target))
+                        db.execute("DELETE FROM access WHERE user_id=?", (target,))
+                        db.execute("DELETE FROM admin_grants WHERE user_id=?", (target,))
+                        db.execute("UPDATE jobs SET state='CANCELLED',updated=? WHERE user_id=? "
+                                   "AND state IN ('QUEUED','RESOLVING','DOWNLOADING','VERIFYING')",
+                                   (now, target))
+                    db.execute("UPDATE owner_requests SET status='APPROVED' WHERE token=?", (token,))
+                    db.execute("INSERT INTO access_audit "
+                        "(created,actor_id,action,user_id,detail) VALUES (?,0,?,?,?)",
+                        (now, "operator_owner_" + row[2].lower(), target,
+                         f"primary requester {row[0]}"))
+                if was_active:
+                    self._systemctl("start")
+                    if not self._healthy():
+                        raise ManagerError("Service did not stay active after Owner approval")
+            except BaseException:
+                self._systemctl("stop", check=False)
+                self._restore_snapshot(undo)
+                if was_active:
+                    self._systemctl("start", check=False)
+                raise
+            return f"Owner {row[2].lower()} approved for {target}; prior state backup: {undo}"
 
     def service(self, action: str) -> str:
         if action not in {"start", "stop", "restart"}:
@@ -1269,6 +1394,10 @@ def _cli() -> None:
     diagnostics.add_argument("--live", action="store_true")
     setting = sub.add_parser("set")
     setting.add_argument("key")
+    owner_approval = sub.add_parser("owner-approval")
+    owner_approval.add_argument("action", choices=("list", "approve"))
+    owner_approval.add_argument("token", nargs="?")
+    owner_approval.add_argument("target_id", nargs="?", type=int)
     for action in ("start", "stop", "restart"):
         sub.add_parser(action)
     logs = sub.add_parser("logs")
@@ -1337,6 +1466,16 @@ def _cli() -> None:
         elif args.command == "set":
             value = getpass.getpass("New value: ") if args.key in PRIVATE_KEYS else input("New value: ")
             result = manager.set_config(args.key, value)
+        elif args.command == "owner-approval":
+            if args.action == "list":
+                result = manager.owner_approvals()
+            else:
+                if not args.token or args.target_id is None:
+                    raise ManagerError("Use owner-approval approve TOKEN TARGET_ID")
+                if input(f"Type APPROVE OWNER {args.target_id}: ") != \
+                        f"APPROVE OWNER {args.target_id}":
+                    raise ManagerError("Cancelled")
+                result = manager.approve_owner(args.token, args.target_id)
         elif args.command in {"start", "stop", "restart"}:
             result = manager.service(args.command)
         elif args.command == "abort-install":

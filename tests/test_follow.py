@@ -1,8 +1,10 @@
 import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
-from mikachan.follow import (FollowService, FollowStore, command_target,
+from mikachan.follow import (FollowService, FollowStore, _post_timestamp, command_target,
                                creator_from_post, profile_target, public_profile,
                                _gallery_items, public_items)
 from mikachan.store import Store
@@ -60,6 +62,8 @@ async def test_tiktok_timeline_uses_second_public_extractor(monkeypatch):
             raise ValueError("public source unavailable")
         return {"entries": [{"id": "1234567890123456789", "title": "new post"}]}
     monkeypatch.setattr("mikachan.follow.validate_dns", lambda _url: None)
+    monkeypatch.setattr("mikachan.follow.public_statuses", AsyncMock(
+        side_effect=ValueError("source unavailable")))
     monkeypatch.setattr("mikachan.follow._extract", extract)
     items = await public_items(command_target("tiktok alice"))
     assert calls == ["gallery-dl", "yt-dlp"]
@@ -141,6 +145,36 @@ async def test_media_mode_queues_public_post(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_media_follow_outbox_retries_only_proven_failure(tmp_path):
+    store = Store(tmp_path / "db.sqlite")
+    service = FollowService(store, SimpleNamespace())
+    target = command_target("tiktok alice")
+    token = service.db.session(42, 42, target)
+    service.db.bind(token, 9)
+    service.db.db.execute("UPDATE follow_sessions SET mode='media' WHERE id=?", (token,))
+    fid = service.db.save(service.db.get_session(token, 42, 42, 9))
+    row = service.db.db.execute("SELECT * FROM follows WHERE id=?", (fid,)).fetchone()
+    url = "https://www.tiktok.com/@alice/video/1234567890123456789"
+    key = f"posts:{url}"
+    await service.deliver(row, target, "posts", url, "new", key)
+    await service.deliver(row, target, "posts", url, "new", key)
+    assert not store.db.in_transaction
+    assert len(store.jobs(42)) == 1
+    first = store.jobs(42)[0]["id"]
+    assert store.transition(first, "QUEUED", "FAILED", error="network")
+    service.db.db.execute("UPDATE follow_media_jobs SET next_retry=0 WHERE follow_id=?", (fid,))
+    assert service.retry_failed_media()
+    assert not store.db.in_transaction
+    assert len(store.jobs(42)) == 2
+    second = store.jobs(42)[0]["id"]
+    assert second != first
+    assert store.transition(second, "QUEUED", "DELIVERY_UNCERTAIN")
+    service.db.db.execute("UPDATE follow_media_jobs SET next_retry=0 WHERE follow_id=?", (fid,))
+    assert not service.retry_failed_media()
+    assert len(store.jobs(42)) == 2
+
+
+@pytest.mark.asyncio
 async def test_profile_checks_survive_timeline_failure(monkeypatch, tmp_path):
     store = Store(tmp_path / "db.sqlite")
     class Bot:
@@ -162,6 +196,43 @@ async def test_profile_checks_survive_timeline_failure(monkeypatch, tmp_path):
     await service.check(row)
     assert {r[0] for r in service.db.db.execute(
         "SELECT category FROM follow_baselines WHERE follow_id=?", (fid,))} == {"bio"}
+
+
+@pytest.mark.asyncio
+async def test_posts_published_during_first_provider_failure_are_not_lost(monkeypatch, tmp_path):
+    store = Store(tmp_path / "db.sqlite")
+    bot = type("Bot", (), {"send_message": AsyncMock(
+        return_value=SimpleNamespace(message_id=7))})()
+    service = FollowService(store, bot)
+    token = service.db.session(42, 42, command_target("twitter alice"))
+    service.db.bind(token, 9)
+    fid = service.db.save(service.db.get_session(token, 42, 42, 9))
+    recent = ("tweets", "https://x.com/alice/status/2111998764345069830", "new")
+    assert _post_timestamp(recent[1]) == 1792374719.116
+    service.db.db.execute("UPDATE follow_start SET started=? WHERE follow_id=?",
+                          (1792374000, fid))
+    monkeypatch.setattr("mikachan.follow.public_items", AsyncMock(side_effect=ValueError("blocked")))
+    row = service.db.db.execute("SELECT * FROM follows WHERE id=?", (fid,)).fetchone()
+    with pytest.raises(ValueError, match="no public data"):
+        await service.check(row)
+    monkeypatch.setattr("mikachan.follow.public_items", AsyncMock(return_value=[recent]))
+    row = service.db.db.execute("SELECT * FROM follows WHERE id=?", (fid,)).fetchone()
+    await service.check(row)
+    assert bot.send_message.await_count == 1
+    row = service.db.db.execute("SELECT * FROM follows WHERE id=?", (fid,)).fetchone()
+    await service.check(row)
+    assert bot.send_message.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_follow_alert_is_cooled_down(monkeypatch, tmp_path):
+    store = Store(tmp_path / "db.sqlite")
+    bot = type("Bot", (), {"send_message": AsyncMock()})()
+    service = FollowService(store, bot)
+    row = {"id": "follow", "chat_id": 42, "handle": "alice", "failures": 2}
+    await service._failed(row)
+    await service._failed(row)
+    assert bot.send_message.await_count == 1
 
 
 @pytest.mark.asyncio
