@@ -333,7 +333,8 @@ class App:
                  text in {"هواشناسی", "اکنون"})):
             return
         userbot = getattr(self, "userbot", None)
-        if userbot and is_currency_query(text) and self.module_enabled("utilities", m.chat.id):
+        if userbot and (text == "ارز" or is_currency_query(text)) and self.module_enabled(
+                "utilities", m.chat.id):
             if not self.store.rate(m.from_user.id, "currency", 8):
                 return
             try:
@@ -466,13 +467,15 @@ class App:
             return
         if cmd == "/url":
             if not self.userbot:
-                await m.reply("File links are unavailable until the private userbot session is configured.")
+                await m.reply("File links need USERBOT_SESSION. Run the QR login command "
+                              "from private SSH and save the session in server configuration.")
             elif not m.reply_to_message:
                 await m.reply("Reply to a file, photo, video, or audio message with /url.")
             elif self.store.rate(m.from_user.id, "file_to_link", 5):
                 try:
                     link = await self.userbot.file_to_link(self.bot, m.chat.id,
-                                                           m.reply_to_message.message_id)
+                                                           m.reply_to_message.message_id,
+                                                           m.reply_to_message)
                     token = secrets.token_urlsafe(9)
                     buttons = InlineKeyboardMarkup(inline_keyboard=[[
                         InlineKeyboardButton(text="▣ QR", callback_data=f"url:{token}"),

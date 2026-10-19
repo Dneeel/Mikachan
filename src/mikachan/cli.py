@@ -1,12 +1,32 @@
 import argparse
 import asyncio
 import getpass
+import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 from typing import TextIO
 from .config import ProviderSettings, Settings
+
+
+def _save_managed_userbot_session(
+    session: str, *, root: Path = Path("/opt/Mikachan")
+) -> bool:
+    """Use the manager's validated, snapshotted config update on a managed VPS."""
+    current = root / "current"
+    if (os.geteuid() != 0 or not (root / ".managed-by-mikachan").is_file()
+            or not current.is_dir() or Path.cwd().resolve() != current.resolve()
+            or not (current / "deploy/manager.py").is_file()):
+        return False
+    sys.path.insert(0, str(current))
+    try:
+        from deploy.manager import Manager
+
+        Manager().set_config("USERBOT_SESSION", session)
+    finally:
+        sys.path.pop(0)
+    return True
 
 
 async def _login_with_qr(client: object, output: TextIO) -> None:
@@ -57,10 +77,23 @@ def main() -> None:
                 me = await client.get_me()
                 if not me or getattr(me, "bot", False):
                     raise ValueError("QR login must authorize a Telegram user account")
-                print("Paste this secret only into protected USERBOT_SESSION configuration:")
-                print(client.session.save())
+                session = client.session.save()
             finally:
                 await client.disconnect()
+
+            try:
+                saved = _save_managed_userbot_session(session)
+            except Exception:
+                print("Automatic registration failed. Save this secret in protected "
+                      "USERBOT_SESSION, then restart the bot:")
+                print(session)
+                raise
+            if saved:
+                print("Userbot session saved in protected configuration; service restarted.")
+            else:
+                print("Paste this secret only into protected USERBOT_SESSION configuration "
+                      "and restart the bot:")
+                print(session)
 
         asyncio.run(login())
         return

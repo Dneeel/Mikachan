@@ -2,12 +2,14 @@
 
 import asyncio
 import html
+import mimetypes
 import re
+import tempfile
 import time
 from pathlib import Path
 
 from aiogram import Bot
-from aiogram.types import InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardMarkup, Message
 
 from .security import clean_url
 
@@ -67,9 +69,10 @@ class UserbotBridge:
             self.file_peer = peer
         return self.file_peer
 
-    async def file_to_link(self, bot: Bot, source_chat: int, source_message: int) -> str:
-        if self.staging_chat_id >= 0:
-            raise ValueError("File links require a private staging chat")
+    async def file_to_link(self, bot: Bot, source_chat: int, source_message: int,
+                           message: Message | None = None) -> str:
+        if self.staging_chat_id >= 0 and message is None:
+            raise ValueError("Reply to a media message with /url")
         if source_chat == self.staging_chat_id:
             raise ValueError("Use a different source chat")
         staged = None
@@ -81,30 +84,38 @@ class UserbotBridge:
                     delay = self.last_request + 2 - time.monotonic()
                     if delay > 0:
                         await asyncio.sleep(delay)
-                    staged = await bot.copy_message(self.staging_chat_id, source_chat,
-                                                    source_message)
-                    source = None
-                    for _ in range(5):
-                        source = await self.client.get_messages(self.staging_chat_id,
-                                                                ids=staged.message_id)
-                        if source:
-                            break
-                        await asyncio.sleep(0.4)
-                    if not source or not source.media:
+                    if self.staging_chat_id < 0:
+                        staged = await bot.copy_message(self.staging_chat_id, source_chat,
+                                                        source_message)
+                        source = None
+                        for _ in range(5):
+                            source = await self.client.get_messages(self.staging_chat_id,
+                                                                    ids=staged.message_id)
+                            if source:
+                                break
+                            await asyncio.sleep(0.4)
+                        if not source or not source.media:
+                            raise ValueError("Reply to a file, photo, video, or audio message")
+                        return await self._request_file_link(peer, source=source)
+                    media = (message.document or message.video or message.audio or
+                             message.animation or message.voice or message.video_note or
+                             (message.photo[-1] if message.photo else None) or message.sticker)
+                    if media is None:
                         raise ValueError("Reply to a file, photo, video, or audio message")
-                    async with self.client.conversation(peer, timeout=55, exclusive=True) as chat:
-                        sent = await self.client.forward_messages(peer, source)
-                        self.last_request = time.monotonic()
-                        for _ in range(3):
-                            answer = await chat.get_response()
-                            if (getattr(answer, "sender_id", None) != peer.id or
-                                    getattr(answer, "id", 0) <= sent.id):
-                                continue
-                            try:
-                                return extract_download_url(str(answer.raw_text or ""))
-                            except ValueError:
-                                continue
-                    raise ValueError("File service returned no usable link")
+                    size = getattr(media, "file_size", None)
+                    if size is not None and size > 20_000_000:
+                        raise ValueError("This file needs a private staging chat: set "
+                                         "USERBOT_STAGING_CHAT_ID for files over 20 MB")
+                    filename = str(getattr(media, "file_name", "") or "")
+                    suffix = Path(filename).suffix[:10] or mimetypes.guess_extension(
+                        str(getattr(media, "mime_type", "") or "")) or ".jpg"
+                    with tempfile.TemporaryDirectory(prefix="mikachan-url-") as temp_dir:
+                        path = Path(temp_dir) / ("media" + suffix)
+                        await bot.download(media, destination=path, timeout=45)
+                        if path.stat().st_size > 20_000_000:
+                            raise ValueError("This file needs a private staging chat: set "
+                                             "USERBOT_STAGING_CHAT_ID for files over 20 MB")
+                        return await self._request_file_link(peer, path=path)
         except asyncio.TimeoutError as exc:
             self.cooldown_until = time.monotonic() + 30
             raise ValueError("File service timed out") from exc
@@ -119,6 +130,22 @@ class UserbotBridge:
                     await bot.delete_message(self.staging_chat_id, staged.message_id)
                 except Exception:
                     pass
+
+    async def _request_file_link(self, peer, *, source=None, path: Path | None = None) -> str:
+        async with self.client.conversation(peer, timeout=55, exclusive=True) as chat:
+            sent = (await self.client.forward_messages(peer, source) if source is not None
+                    else await chat.send_file(str(path)))
+            self.last_request = time.monotonic()
+            for _ in range(3):
+                answer = await chat.get_response()
+                if (getattr(answer, "sender_id", None) != peer.id or
+                        getattr(answer, "id", 0) <= sent.id):
+                    continue
+                try:
+                    return extract_download_url(str(answer.raw_text or ""))
+                except ValueError:
+                    continue
+        raise ValueError("File service returned no usable link")
 
     async def upload_and_copy(self, bot: Bot, path: Path, target_chat: int,
                               caption: str | None, buttons: InlineKeyboardMarkup | None,

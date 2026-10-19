@@ -1,11 +1,12 @@
 """The userbot account is authorized by a refreshable QR, not a phone-code flow."""
 
 import io
+from pathlib import Path
 
 import pytest
 from telethon.errors import SessionPasswordNeededError
 
-from mikachan.cli import _login_with_qr
+from mikachan.cli import _login_with_qr, _save_managed_userbot_session
 
 
 class FakeQR:
@@ -66,3 +67,20 @@ async def test_qr_login_stops_after_five_expirations():
     with pytest.raises(TimeoutError, match="five attempts"):
         await _login_with_qr(FakeClient(qr), io.StringIO())
     assert qr.refreshes == 4
+
+
+def test_managed_qr_login_registers_session_through_manager(tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1]))
+    from deploy import manager
+
+    current = tmp_path / "current"
+    (current / "deploy").mkdir(parents=True)
+    (current / "deploy/manager.py").touch()
+    (tmp_path / ".managed-by-mikachan").write_text("Mikachan manager schema 1\n")
+    monkeypatch.chdir(current)
+    monkeypatch.setattr("mikachan.cli.os.geteuid", lambda: 0)
+    saved = []
+    monkeypatch.setattr(manager.Manager, "set_config", lambda _self, key, value:
+                        saved.append((key, value)))
+    assert _save_managed_userbot_session("secret", root=tmp_path)
+    assert saved == [("USERBOT_SESSION", "secret")]

@@ -30,6 +30,21 @@ def test_coinpj_session_requires_telegram_app_credentials():
                  coinpj_session="secret")
 
 
+def test_userbot_session_also_enables_coinpj_quotes(tmp_path, monkeypatch):
+    created = []
+
+    def fake_coinpj(*args):
+        created.append(args)
+        return object()
+
+    monkeypatch.setattr("mikachan.utilities.CoinPJ", fake_coinpj)
+    settings = Settings(bot_token="123:fake", owner_telegram_id=1, allowed_telegram_ids="1",
+                        telegram_api_id=12345, telegram_api_hash="hash", userbot_session="session")
+    utility = Utilities(SimpleNamespace(), settings, Store(tmp_path / "db.sqlite").db)
+    assert created == [(12345, "hash", "session")]
+    assert utility.coinpj is not None
+
+
 @pytest.mark.asyncio
 async def test_toman_command_prefers_bound_userbot_quote(tmp_path):
     settings = Settings(bot_token="123:fake", owner_telegram_id=1, allowed_telegram_ids="1")

@@ -320,9 +320,10 @@ class Utilities:
         self.media_slots = asyncio.Semaphore(2)
         self.market_prices = MarketPrices(db, settings.navasan_api_key,
                                          settings.navasan_refresh_seconds)
+        coinpj_session = settings.coinpj_session or settings.userbot_session
         self.coinpj = (CoinPJ(settings.telegram_api_id, settings.telegram_api_hash,
-                              settings.coinpj_session)
-                       if settings.coinpj_session and settings.telegram_api_id
+                              coinpj_session)
+                       if coinpj_session and settings.telegram_api_id
                        and settings.telegram_api_hash else None)
         self.now = NowService(db)
         self._apod_cache: tuple[dict[str, Any], float] | None = None

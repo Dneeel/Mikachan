@@ -25,8 +25,8 @@ SETTING_HELP = {
     "LOCAL_BOT_API_URL": "Loopback URL for an explicitly configured local Bot API server.",
     "TELEGRAM_API_ID": "Numeric API ID from my.telegram.org for your Telegram user account.",
     "TELEGRAM_API_HASH": "Private API hash paired with that API ID. Never send it to the bot.",
-    "COINPJ_SESSION": "Optional secret Telegram user session; scan the QR from the private userbot-login command.",
-    "USERBOT_SESSION": "Secret user session from QR login for large uploads, /url and currency requests.",
+    "COINPJ_SESSION": "Optional separate user session; CoinPJ uses USERBOT_SESSION when this is blank.",
+    "USERBOT_SESSION": "Secret user session for /url, large uploads and currency; root QR login saves it automatically.",
     "USERBOT_STAGING_CHAT_ID": "Private channel/group ID accessible to both the bot and the user account. Never use a public chat.",
     "SPOTIFY_CLIENT_ID": "Optional Spotify catalog browsing credential.",
     "SPOTIFY_CLIENT_SECRET": "Optional Spotify catalog browsing secret.",
@@ -330,7 +330,7 @@ class MikachanPanel(App[None]):
              "not the BotFather token. Leave both API fields blank to skip userbot setup."),
             ("6 / 6  ·  Telegram user account", "api_hash", "Optional Telegram API Hash", True,
              "Paste the API Hash paired with your API ID. It is masked and stored privately. "
-             "After setup, scan the QR shown by /opt/Mikachan/current/.venv/bin/"
+             "After setup, scan the QR shown by sudo /opt/Mikachan/current/.venv/bin/"
              "mikachan userbot-login in private SSH."),
         ]
         if self.setup_step == len(steps):
