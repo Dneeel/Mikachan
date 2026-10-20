@@ -67,7 +67,7 @@ class GroupStatus:
         CREATE TABLE IF NOT EXISTS observed_group_messages (
           chat_id INTEGER NOT NULL, message_id INTEGER NOT NULL, observed REAL NOT NULL,
           category TEXT NOT NULL, forwarded INTEGER NOT NULL,
-          tehran_year INTEGER NOT NULL, tehran_month INTEGER NOT NULL,
+          tehran_year INTEGER NOT NULL, tehran_month INTEGER NOT NULL, user_id INTEGER,
           PRIMARY KEY(chat_id,message_id));
         CREATE INDEX IF NOT EXISTS observed_group_time ON observed_group_messages(chat_id,observed);
         CREATE TABLE IF NOT EXISTS group_stats_rollup (
@@ -87,6 +87,11 @@ class GroupStatus:
           token TEXT PRIMARY KEY, user_id INTEGER NOT NULL, chat_id INTEGER NOT NULL,
           message_id INTEGER, expires REAL NOT NULL);
         """)
+        columns = {str(row[1]) for row in db.execute("PRAGMA table_info(observed_group_messages)")}
+        if "user_id" not in columns:
+            db.execute("ALTER TABLE observed_group_messages ADD COLUMN user_id INTEGER")
+        db.execute("CREATE INDEX IF NOT EXISTS observed_group_user ON "
+                   "observed_group_messages(chat_id,user_id,observed)")
 
     def permitted(self, user: int, chat: int, chat_type: str) -> bool:
         if not self.access.can_access(user, chat, chat_type):
@@ -99,6 +104,35 @@ class GroupStatus:
         except sqlite3.OperationalError:
             row = None
         return row is None or row[0] == "1"
+
+    async def show_identity(self, m: Message) -> None:
+        """Only report authenticated Telegram fields and messages actually observed here."""
+        if m.chat.type not in {"group", "supergroup"} or not m.reply_to_message:
+            await m.reply("Reply to a group member's message with /id or آیدی.")
+            return
+        person = m.reply_to_message.from_user
+        if person is None:
+            await m.reply("This message has no identifiable Telegram user.")
+            return
+        count = int(self.db.execute("SELECT COUNT(*) FROM observed_group_messages "
+                                    "WHERE chat_id=? AND user_id=?", (m.chat.id, person.id)
+                                    ).fetchone()[0])
+        known = self.db.execute("SELECT last_observed FROM known_group_members "
+                                "WHERE chat_id=? AND user_id=?", (m.chat.id, person.id)).fetchone()
+        name = html.escape(str(getattr(person, "full_name", "") or "Unknown")[:80])
+        username = str(getattr(person, "username", "") or "")
+        role = (self.access.role(person.id) or "Authorized") if self.access.can_access(
+            person.id, m.chat.id, m.chat.type) else "Not authorized"
+        lines = ["👤 <b>Group member</b>", f"Name · {name}",
+                 f"Telegram ID · <code>{person.id}</code>",
+                 f"Username · {'@' + html.escape(username) if username else 'Not set'}",
+                 f"Mikachan access · {html.escape(role)}",
+                 f"Recent observed messages here · {count}"]
+        if known:
+            lines.append("Last observed here · " + time.strftime(
+                "%Y-%m-%d %H:%M UTC", time.gmtime(float(known[0]))))
+        lines.append("Counts cover retained observations in this group; older rollups are not per-user.")
+        await m.reply("\n".join(lines))
 
     def observe(self, m: Message) -> bool:
         if m.chat.type not in {"group", "supergroup"} or m.chat.id not in self.access.groups():
@@ -125,8 +159,10 @@ class GroupStatus:
                          getattr(m, "forward_date", None) or
                          getattr(m, "is_automatic_forward", False))
         inserted = bool(self.db.execute("INSERT OR IGNORE INTO observed_group_messages "
-            "VALUES (?,?,?,?,?,?,?)", (m.chat.id, m.message_id, when, kind, int(forwarded),
-                                       local.year, local.month)).rowcount)
+            "(chat_id,message_id,observed,category,forwarded,tehran_year,tehran_month,user_id) "
+            "VALUES (?,?,?,?,?,?,?,?)", (m.chat.id, m.message_id, when, kind, int(forwarded),
+                                       local.year, local.month,
+                                       m.from_user.id if m.from_user else None)).rowcount)
         last = self.db.execute("SELECT last_run FROM group_stats_maintenance WHERE chat_id=?",
                                (m.chat.id,)).fetchone()
         if last is None or now - float(last[0]) >= 3600:

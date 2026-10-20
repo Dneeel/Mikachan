@@ -1,0 +1,175 @@
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+from pathlib import Path
+import shutil
+import subprocess
+
+import pytest
+
+from mikachan.instagram_relay import (InstagramRelay, clean_instagram_caption,
+                                      instagram_media_link, _unsupported_response)
+from mikachan.config import Settings
+from mikachan.jobs import Worker
+from mikachan.store import Store
+
+
+def button(label, *, data=b"a"):
+    return SimpleNamespace(text=label, data=data)
+
+
+def card():
+    return SimpleNamespace(id=20, raw_text=(
+        "🆔 Username: cnn\n✏️ Biography:\n"
+        "Asking the hard questions and bringing unique perspective.\n\n"
+        "🧍‍♂️ Name: CNN\n👫 Followers: 23805906\n"
+        "👫 Following: 324\n🔔 Posts: 30548\n📋 Page status: Public"),
+        buttons=[[button("Download stories")],
+                 [button("Download highlights"), button("Download posts")],
+                 [button("Find the song")]], photo=object())
+
+
+def test_caption_and_source_link_are_cleaned_without_losing_post_text():
+    raw = ("📸 5/30548 · @cnn\n❤️ 4.1K   💬 977\nReal caption.\n"
+           "[🔗 Open post](https://www.instagram.com/p/DetFd25iKlc/)\n"
+           "🤖 Downloaded with @instaRoxinoBot")
+    cleaned, link = clean_instagram_caption(raw)
+    assert cleaned == "📸 5/30548 · @cnn\n❤️ 4.1K   💬 977\nReal caption."
+    assert link == "https://www.instagram.com/p/DetFd25iKlc/"
+    assert clean_instagram_caption("🤖 Downloaded with @instaRoxinoBot") == ("", None)
+
+
+def test_instagram_sound_link_is_not_supported():
+    assert instagram_media_link("https://www.instagram.com/reel/ABC123/")
+    assert instagram_media_link("https://www.instagram.com/stories/alice/123/")
+    assert instagram_media_link("https://www.instagram.com/reels/audio/123/") is None
+    assert instagram_media_link("https://elsewhere.example/p/ABC123/") is None
+    assert "slow down" in _unsupported_response([
+        SimpleNamespace(raw_text="Please slow down and try again later")]).lower()
+
+
+def test_profile_card_uses_only_selected_controls():
+    relay = InstagramRelay(None, None, None, None)
+    body = relay._profile_text(card(), "cnn")
+    assert "Asking the hard questions" in body
+    assert "Followers: <b>23805906</b>" in body
+    markup, actions = relay._menu_markup("token", card(), profile_handle="cnn")
+    labels = [item.text for row in markup.inline_keyboard for item in row]
+    assert labels == ["👀 Follow", "⭕ Stories", "🎞 Highlights", "📸 Posts", "🔗 Open profile"]
+    assert set(actions) == {"follow", "stories", "highlights", "posts"}
+
+
+def test_highlight_pages_and_next_five_keep_close_button():
+    relay = InstagramRelay(None, None, None, None)
+    highlights = SimpleNamespace(buttons=[
+        [button("Travel"), button("Family")],
+        [button("⬅ Previous"), button("Next ➡")],
+        [button("🎵 Find the song")],
+    ])
+    markup, actions = relay._menu_markup("t", highlights, highlight_list=True)
+    labels = [item.text for row in markup.inline_keyboard for item in row]
+    assert labels == ["Travel", "Family", "⬅ Previous", "Next ➡", "✖ Close"]
+    assert set(actions) == {"h0", "h1", "previous_page", "next_page"}
+    posts = SimpleNamespace(buttons=[[button("📥 Next 5 posts (30543 left)")]])
+    markup, actions = relay._menu_markup("t", posts)
+    assert [item.text for row in markup.inline_keyboard for item in row] == [
+        "📥 Next 5 posts (30543 left)", "✖ Close"]
+    assert "next_posts" in actions
+
+
+@pytest.mark.asyncio
+async def test_profile_menu_is_user_and_message_bound():
+    bridge = SimpleNamespace(instagram_click=AsyncMock())
+    relay = InstagramRelay(bridge, None, None, None)
+    markup, actions = relay._menu_markup("token", card())
+    relay._remember_menu("token", 7, 70, 100, "cnn", card(), actions)
+    query = SimpleNamespace(data=markup.inline_keyboard[0][0].callback_data,
+                            from_user=SimpleNamespace(id=8),
+                            message=SimpleNamespace(chat=SimpleNamespace(id=70),
+                                                    message_id=100, delete=AsyncMock()),
+                            answer=AsyncMock())
+    assert await relay.callback(query)
+    bridge.instagram_click.assert_not_awaited()
+    query.data = markup.inline_keyboard[-1][0].callback_data
+    query.from_user.id = 7
+    assert await relay.callback(query)
+    query.message.delete.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_highlights_open_as_separate_closable_menu():
+    highlights = SimpleNamespace(id=35, raw_text="🎞 Highlights of @cnn — page 2 of 2",
+                                 buttons=[[button("Travel")], [button("Next ➡")]],
+                                 photo=None, document=None, video=None)
+    bridge = SimpleNamespace(instagram_click=AsyncMock(return_value=[highlights]))
+    bot = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=200)))
+    relay = InstagramRelay(bridge, bot, None, None)
+    _markup, actions = relay._menu_markup("profile", card(), profile_handle="cnn")
+    relay._remember_menu("profile", 7, 70, 100, "cnn", card(), actions)
+    original = SimpleNamespace(chat=SimpleNamespace(id=70), message_id=100, photo=object(),
+                               edit_caption=AsyncMock(), answer=AsyncMock())
+    query = SimpleNamespace(data="ir:profile:highlights", from_user=SimpleNamespace(id=7),
+                            message=original, answer=AsyncMock())
+    assert await relay.callback(query)
+    bot.send_message.assert_awaited_once()
+    original.edit_caption.assert_not_awaited()
+    assert "profile" in relay.menus
+    listed = [m for m in relay.menus.values() if m.message == 200]
+    assert len(listed) == 1 and "h0" in listed[0].buttons
+
+
+@pytest.mark.asyncio
+async def test_story_photo_uses_clean_caption_and_temporary_storage(tmp_path):
+    story = SimpleNamespace(id=55, photo=object(), document=None, video=None,
+                            file=SimpleNamespace(size=5),
+                            raw_text="🤖 Downloaded with @instaRoxinoBot",
+                            buttons=[])
+    async def download(_message, destination, _max_bytes):
+        path = Path(str(destination) + ".jpg")
+        path.write_bytes(b"\xff\xd8\xffminimal")
+        return path
+    async def prepare(paths, _max_bytes):
+        return paths
+    bot = SimpleNamespace(send_photo=AsyncMock(return_value=SimpleNamespace(message_id=77)))
+    relay = InstagramRelay(SimpleNamespace(instagram_caption=AsyncMock(return_value=story),
+                                           instagram_download=download), bot,
+                           SimpleNamespace(data_dir=tmp_path),
+                           SimpleNamespace(_prepare_media=prepare))
+    assert await relay._send_media(70, 7, story,
+                                   "https://www.instagram.com/stories/alice/123/")
+    kwargs = bot.send_photo.await_args.kwargs
+    assert kwargs["caption"] is None
+    buttons = kwargs["reply_markup"].inline_keyboard[0]
+    assert len(buttons) == 1 and buttons[0].text == "🔗 Open stories"
+    assert list((tmp_path / "jobs").iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_confirmed_instagram_video_uses_relay_and_cleans_job_files(tmp_path):
+    fixture = tmp_path / "fixture.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                    "testsrc2=size=160x90:rate=12", "-t", "0.5", "-c:v", "libx264",
+                    str(fixture)], check=True)
+    settings = Settings(bot_token="123:abc", owner_telegram_id=42,
+                        allowed_telegram_ids="42", data_dir=tmp_path / "data")
+    store = Store(settings.data_dir / "bot.sqlite")
+    sent = SimpleNamespace(message_id=300, video=SimpleNamespace(file_id="video-id"),
+                           document=None, audio=None, photo=None)
+    bot = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=200)),
+                          edit_message_text=AsyncMock(), delete_message=AsyncMock(),
+                          send_video=AsyncMock(return_value=sent))
+    worker = Worker(settings, store, bot)
+    async def fetch(_url, directory, _max_bytes, *, audio_only):
+        assert not audio_only
+        target = directory / "01.mp4"
+        shutil.copyfile(fixture, target)
+        return [target], "Actual caption"
+    worker.instagram_relay = SimpleNamespace(fetch_url=AsyncMock(side_effect=fetch))
+    worker._ytdlp = AsyncMock(side_effect=AssertionError("legacy extractor used"))
+    url = "https://www.instagram.com/reel/ABC123/"
+    jid = store.create_job(42, 42, url)
+    assert store.transition(jid, "QUEUED", "RESOLVING")
+    await worker._run(jid)
+    assert store.job(jid)["state"] == "COMPLETED"
+    worker.instagram_relay.fetch_url.assert_awaited_once()
+    worker._ytdlp.assert_not_awaited()
+    assert not (settings.data_dir / "jobs" / jid).exists()

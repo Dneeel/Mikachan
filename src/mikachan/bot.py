@@ -39,6 +39,8 @@ from .community import Community, CommunityStore
 from .utilities import Utilities, _market_card, qr_png
 from .userbot import UserbotBridge, is_currency_query, send_currency_reply
 from .proxy_relay import ProxyRelay
+from .instagram_relay import InstagramRelay
+from .local_sources import LocalSources
 from .market_prices import parse_asset_query
 from .personality import Mode, mode_for, response
 from .public_social import public_x_media, public_x_post
@@ -185,11 +187,11 @@ def public_media_result(hit: dict[str, object]) -> bool:
 HELP_TEXT = (
     "◈ <b>Mikachan</b>\nChoose a command. Eligible links always ask before downloading.\n\n"
     "⬇️ <b>Media</b>\n"
-    "/search · /music · /podcast · /twitter\n"
+    "/search · /music · /podcast · /book · /twitter\n"
     "/follow · /following · /queue\n\n"
     "👥 <b>Community</b>\n"
     "/fal · /poem · /quote · /dice\n"
-    "Groups: /rules · /notes · /setnote · /groupstats · /groupsettings\n\n"
+    "Groups: /rules · /notes · /setnote · /groupstats · /groupsettings · /id (reply)\n\n"
     "🛠 <b>Utilities</b>\n"
     "/qr · /scan · /ocr · /url (reply to a file)\n"
     "/weather CITY · /now [CITY]\n"
@@ -231,6 +233,10 @@ class App:
         self.proxy_relay = ProxyRelay(self.userbot) if self.userbot else None
         self.worker = Worker(settings, self.store, self.bot)
         self.worker.userbot = self.userbot if settings.userbot_staging_chat_id else None
+        self.instagram_relay = (InstagramRelay(self.userbot, self.bot, settings,
+                                              self.worker, self.show_follow)
+                                if self.userbot else None)
+        self.worker.instagram_relay = self.instagram_relay
         self.store.db.execute("CREATE TABLE IF NOT EXISTS url_links ("
                               "token TEXT PRIMARY KEY,user_id INTEGER NOT NULL,"
                               "chat_id INTEGER NOT NULL,message_id INTEGER,"
@@ -242,9 +248,11 @@ class App:
         self.community = Community(self.bot, community_store, settings.owner_telegram_id,
                                    self.store.access_registry)
         self.utilities = Utilities(self.bot, settings, self.store.db)
+        self.local_sources = LocalSources(self.store.db, self.userbot, self.bot,
+                                          settings.data_dir)
         assert self.store.access_registry is not None
         self.settings_ui = SettingsUI(self.store.db, self.store.access_registry,
-                                      self.utilities.now, self.bot)
+                                      self.utilities.now, self.bot, self.local_sources)
         self.group_status = GroupStatus(self.store.db, self.store.access_registry)
         self.router = Router()
         self.router.message.register(self.message)
@@ -304,6 +312,10 @@ class App:
             return
         text = m.text.strip()
         normalized_text = " ".join(text.replace("ي", "ی").replace("ك", "ک").split())
+        if normalized_text in {"آیدی", "ایدی"} and m.chat.type in {"group", "supergroup"}:
+            if self.module_enabled("community", m.chat.id):
+                await self.group_status.show_identity(m)
+            return
         if normalized_text == "پروکسی":
             if self.module_enabled("utilities", m.chat.id):
                 await self.command(m, "/proxy")
@@ -342,7 +354,7 @@ class App:
                              text.startswith(("ارز ", "ترجمه ", "هواشناسی ", "اکنون ")) or
                              text in {"هواشناسی", "اکنون"})
             builtin = command_name in {
-                "help", "search", "music", "podcast", "pod", "twitter", "instagram",
+                "help", "search", "music", "podcast", "pod", "book", "id", "twitter", "instagram",
                 "follow", "following",
                 "tiktok", "youtube", "settings", "queue", "status",
                 "fal", "poem", "quote", "dice", "nickname", "rules", "setrules",
@@ -454,7 +466,13 @@ class App:
         if mode and 0 < len(text) <= 120:
             if m.chat.type in {"group", "supergroup"}:
                 self.community.store.use(m.chat.id, m.from_user.id, "request")
-            await self.begin_search(m, text, mode)
+            if mode == "book":
+                try:
+                    await self.local_sources.show_books(m.chat.id, m.from_user.id, text)
+                except ValueError as exc:
+                    await m.reply(html.escape(str(exc)))
+            else:
+                await self.begin_search(m, text, mode)
 
     async def command(self, m: Message, raw: str) -> None:
         if m.from_user is None:
@@ -462,7 +480,7 @@ class App:
         word, _, arg = raw.partition(" ")
         cmd = word.split("@")[0].lower()
         arg = arg.strip()
-        downloader_commands = {"/search", "/music", "/podcast", "/pod"}
+        downloader_commands = {"/search", "/music", "/podcast", "/pod", "/book"}
         follow_commands = {"/follow", "/following", "/twitter", "/instagram",
                            "/tiktok", "/youtube"}
         utility_commands = {"/qr", "/scan", "/ocr", "/st", "/xst", "/weather", "/now",
@@ -482,6 +500,9 @@ class App:
             return
         if cmd == "/groupstatus" and hasattr(self, "group_status"):
             await self.group_status.show(m)
+            return
+        if cmd == "/id" and m.chat.type in {"group", "supergroup"}:
+            await self.group_status.show_identity(m)
             return
         if await self.community.command(m, cmd, arg):
             return
@@ -523,6 +544,18 @@ class App:
                     await self.proxy_relay.open(m)
                 except ValueError as exc:
                     await m.reply(html.escape(str(exc)))
+            return
+        if cmd == "/book":
+            if arg:
+                if not self.store.rate(m.from_user.id, "book", 5):
+                    return
+                try:
+                    await self.local_sources.show_books(m.chat.id, m.from_user.id, arg)
+                except ValueError as exc:
+                    await m.reply(html.escape(str(exc)))
+            else:
+                self.store.prompt_query(m.from_user.id, m.chat.id, "book", 600)
+                await m.reply("📚 Send a book title or author in the next 10 minutes.")
             return
         if await self.utilities.command(m, cmd, arg):
             return
@@ -607,6 +640,12 @@ class App:
         msg = await m.reply("🔎 Searching…")
         self.store.set_search_message(sid, msg.message_id)
         await self.refresh_search(sid, m.from_user.id, m.chat.id)
+        if mode in {"music", "podcast"} and hasattr(self, "local_sources") and \
+                self.local_sources.has_active(mode):
+            try:
+                await self.local_sources.show_files(m.chat.id, m.from_user.id, query, mode)
+            except ValueError as exc:
+                await m.reply("⚠️ Local source search: " + html.escape(str(exc)))
 
     async def refresh_search(self, sid: str, user: int, chat: int) -> None:
         row = self.store.search(sid, user, chat)
@@ -829,6 +868,17 @@ class App:
                 f"⚠️ Unavailable: {unavailable}")
 
     async def show_profile(self, chat: int, user: int, target: Target) -> None:
+        if target.platform == "instagram":
+            relay = getattr(self, "instagram_relay", None)
+            if not relay:
+                await self.bot.send_message(chat, "Instagram profiles need a Telegram user "
+                                            "account session. Run userbot-login on the server.")
+                return
+            try:
+                await relay.show_profile(chat, user, target.handle)
+            except ValueError as exc:
+                await self.bot.send_message(chat, html.escape(str(exc)))
+            return
         token = self.follow.db.profile_panel(user, chat, target)
         rows = [
             [("👀 Follow", f"p:{token}:follow")],
@@ -885,6 +935,9 @@ class App:
         self.follow.db.bind_profile_panel(token, prompt.message_id)
 
     async def show_stories(self, chat: int, user: int, target: Target) -> None:
+        if target.platform == "instagram":
+            await self.show_profile(chat, user, target)
+            return
         try:
             stories = await public_items(target, "stories")
         except (ValueError, TimeoutError, OSError):
@@ -919,6 +972,10 @@ class App:
             return
         target = Target(row["platform"], row["handle"], row["url"])
         action = parts[2]
+        if target.platform == "instagram" and action != "follow":
+            await acknowledge(q)
+            await self.show_profile(q.message.chat.id, q.from_user.id, target)
+            return
         if action in {"card", "stories", "latest", "shorts", "reels", "original"} and not self.store.rate(
                 q.from_user.id, "profile", 8):
             await acknowledge(q, "Please wait before checking more profiles")
@@ -1105,12 +1162,15 @@ class App:
             return
         prefix = data.split(":", 1)[0]
         domain = ({"c": "downloader", "s": "downloader", "b": "downloader",
+                   "lb": "downloader",
                    "f": "follow", "fm": "follow", "fu": "follow", "p": "follow",
                    "fn": "follow", "fd": "follow", "u": "community", "g": "community",
                    "gs": "community", "gc": "community", "n": "utilities",
-                   "px": "utilities"}).get(prefix)
+                   "px": "utilities", "ir": "follow"}).get(prefix)
         if domain and not self.module_enabled(domain, q.message.chat.id):
             await acknowledge(q, "This module is currently unavailable")
+            return
+        if hasattr(self, "local_sources") and await self.local_sources.callback(q):
             return
         if data.startswith("px:"):
             if self.proxy_relay:
@@ -1120,6 +1180,18 @@ class App:
                     await self.bot.send_message(q.message.chat.id, html.escape(str(exc)))
             else:
                 await acknowledge(q, "Proxy session unavailable")
+            return
+        if data.startswith("ir:"):
+            if data.endswith(":mp3") and not self.store.rate(q.from_user.id, "instagram_mp3", 3):
+                await acknowledge(q, "MP3 limit reached; try again shortly")
+                return
+            if self.instagram_relay:
+                try:
+                    await self.instagram_relay.callback(q)
+                except ValueError as exc:
+                    await self.bot.send_message(q.message.chat.id, html.escape(str(exc)))
+            else:
+                await acknowledge(q, "Instagram session unavailable")
             return
         if hasattr(self, "utilities") and hasattr(self.utilities, "now") and \
                 await self.utilities.now.callback(q, data):
@@ -1872,6 +1944,7 @@ class App:
                     ("search", "Search music and podcasts"),
                     ("music", "Search music"),
                     ("podcast", "Search podcasts"),
+                    ("book", "Find books in local sources"),
                     ("twitter", "Twitter link help"),
                     ("instagram", "Instagram link help"),
                     ("tiktok", "TikTok link help"),
@@ -1886,6 +1959,7 @@ class App:
                     ("dice", "Roll a Telegram die"),
                     ("rules", "Group rules"),
                     ("groupstatus", "Observed group message statistics"),
+                    ("id", "Identify a replied group member"),
                     ("notes", "Manage group notes"),
                     ("qr", "Create a QR image"),
                     ("url", "Get a link for a replied file"),

@@ -161,6 +161,37 @@ def test_old_observations_roll_into_monthly_history(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_reply_id_uses_authentic_sender_and_group_scoped_observations(tmp_path):
+    store, access = registry(tmp_path)
+    access.add_group(1, -200, "Second")
+    stats = GroupStatus(store.db, access)
+    person = SimpleNamespace(id=2, full_name="Member <A>", username="member")
+    for chat_id, mid in [(-100, 10), (-100, 11), (-200, 12)]:
+        msg = message(chat_id, mid, text="hello", sender=2)
+        msg.from_user = person
+        assert stats.observe(msg)
+    reply = AsyncMock()
+    command = SimpleNamespace(chat=SimpleNamespace(id=-100, type="supergroup"),
+        reply_to_message=SimpleNamespace(from_user=person,
+            forward_origin=SimpleNamespace(sender_user=SimpleNamespace(id=999))),
+        reply=reply)
+    await stats.show_identity(command)
+    body = reply.await_args.args[0]
+    assert "<code>2</code>" in body and "Recent observed messages here · 2" in body
+    assert "999" not in body and "&lt;A&gt;" in body
+
+
+def test_observation_schema_migrates_existing_database(tmp_path):
+    store, access = registry(tmp_path)
+    store.db.execute("CREATE TABLE observed_group_messages (chat_id INTEGER, message_id INTEGER, "
+        "observed REAL, category TEXT, forwarded INTEGER, tehran_year INTEGER, "
+        "tehran_month INTEGER, PRIMARY KEY(chat_id,message_id))")
+    GroupStatus(store.db, access)
+    columns = [r[1] for r in store.db.execute("PRAGMA table_info(observed_group_messages)")]
+    assert "user_id" in columns
+
+
+@pytest.mark.asyncio
 async def test_personal_settings_identical_and_bound(tmp_path):
     store, access = registry(tmp_path)
     now = NowService(store.db)

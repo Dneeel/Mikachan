@@ -24,8 +24,9 @@ def markup(rows: list[list[tuple[str, str]]]) -> InlineKeyboardMarkup:
 
 class SettingsUI:
     def __init__(self, db: sqlite3.Connection, access: AccessRegistry, now: NowService,
-                 bot: Bot | None = None):
+                 bot: Bot | None = None, local_sources=None):
         self.db, self.access, self.now, self.bot = db, access, now, bot
+        self.local_sources = local_sources
         self.broadcast_tasks: dict[str, asyncio.Task[None]] = {}
         db.executescript("""
         CREATE TABLE IF NOT EXISTS settings_sessions (
@@ -71,14 +72,19 @@ class SettingsUI:
         def button(label: str, action: str) -> tuple[str, str]:
             return label, f"z:{token}:{action}"
         if page == "home":
-            return ("⚙️ <b>Mikachan · Owner Control</b>\nChoose a section.", markup([
+            sections = [
                 [button("👥 Access Control", "people")],
                 [button("🏘 Group Registry", "groups")],
+            ]
+            if self.local_sources is not None:
+                sections.append([button("📂 Local Sources", "locals")])
+            sections += [
                 [button("📝 Global Message Studio", "messages")],
                 [button("🎭 Personality & Identity", "identity")],
                 [button("🛠 System & Operations", "system")],
                 [button("👤 My Preferences", "personal")],
-                [button("✖ Close", "close")]]))
+                [button("✖ Close", "close")]]
+            return ("⚙️ <b>Mikachan · Owner Control</b>\nChoose a section.", markup(sections))
         if page == "personal":
             pref = self.now.preference(user)
             city = "Saved" if pref else "Not set"
@@ -116,6 +122,37 @@ class SettingsUI:
             return (f"📍 <b>My Location</b>\nHome city · {name}\n"
                     "A city saved here is used by /weather and /now. "
                     "Updates made in a group are visible there.", markup(location_rows))
+        if page == "locals" and self.local_sources is not None:
+            sources = self.db.execute("SELECT * FROM local_sources ORDER BY name LIMIT 50").fetchall()
+            lines = ["📂 <b>Local Sources</b>",
+                     "Telegram chats and channels joined by the user account.",
+                     "Books: PDF/EPUB. Music and podcasts: playable audio files. "
+                     "A connected user account is required."]
+            lines += [f"• {html.escape(str(r['name']))} · <code>{r['chat_id']}</code> "
+                      f"· {html.escape(str(r['categories']))} · {r['status']}" for r in sources]
+            local_controls = [[button("➕ Add source", "local_add")]]
+            local_controls += [[button(str(r["name"])[:50], f"local:{r['chat_id']}")]
+                         for r in sources]
+            local_controls.append([button("⌂ Home", "home")])
+            return "\n".join(lines), markup(local_controls)
+        if page.startswith("local:") and self.local_sources is not None:
+            try:
+                source_id = int(page.split(":", 1)[1])
+            except ValueError:
+                return self._render(token, user, chat, "locals")
+            source = self.db.execute("SELECT * FROM local_sources WHERE chat_id=?",
+                                     (source_id,)).fetchone()
+            if not source:
+                return self._render(token, user, chat, "locals")
+            return (f"📂 <b>{html.escape(str(source['name']))}</b>\n"
+                    f"ID · <code>{source_id}</code>\n"
+                    f"Categories · {html.escape(str(source['categories']))}\n"
+                    f"Status · {source['status']}", markup([
+                    [button("✏️ Edit", "local_edit")],
+                    [button("⏸ Suspend" if source["status"] == "ACTIVE" else "▶️ Resume",
+                            "local_suspend" if source["status"] == "ACTIVE" else "local_resume")],
+                    [button("🗑 Delete", "local_delete")],
+                    [button("◀ Sources", "locals")]]))
         if page == "people" or page.startswith("people@"):
             offset = int(page.split("@", 1)[1]) if "@" in page else 0
             offset = max(0, min(offset, 10000))
@@ -296,6 +333,34 @@ class SettingsUI:
             self.db.execute("DELETE FROM settings_sessions WHERE token=?", (token,))
             await q.message.edit_reply_markup(reply_markup=None)
             return True
+        if self.local_sources is not None and owner:
+            if action in {"local_add", "local_edit"} and (
+                    action == "local_add" or page.startswith("local:")):
+                prompt = ("Reply with: NEGATIVE_CHAT_ID | Name | book,music,podcast"
+                          if action == "local_add" else
+                          "Reply with: Name | book,music,podcast")
+                sent = await q.message.answer(prompt)
+                self.db.execute("INSERT INTO settings_captures VALUES (?,?,?,?,?,?) "
+                                "ON CONFLICT(user_id,chat_id) DO UPDATE SET "
+                                "prompt_id=excluded.prompt_id,token=excluded.token,"
+                                "kind=excluded.kind,expires=excluded.expires",
+                                (q.from_user.id, q.message.chat.id, sent.message_id,
+                                 token, action, time.time() + 300))
+                return True
+            if action in {"local_suspend", "local_resume", "local_delete"} and page.startswith("local:"):
+                source_id = int(page.split(":", 1)[1])
+                if action == "local_delete":
+                    self.db.execute("UPDATE settings_sessions SET pending=? WHERE token=?",
+                                    (json.dumps({"kind": "local_delete", "page": page}), token))
+                    await q.message.edit_text("Delete this local source? Search results from it expire.",
+                        reply_markup=markup([[('✅ Delete', f'z:{token}:confirm'),
+                                              ('❌ Cancel', f'z:{token}:cancel')]]))
+                    return True
+                self.local_sources.set_status(source_id, "SUSPENDED" if
+                    action == "local_suspend" else "ACTIVE")
+                body, buttons = self._render(token, q.from_user.id, q.message.chat.id, page)
+                await q.message.edit_text(body, reply_markup=buttons)
+                return True
         if action == "clearcity":
             self.db.execute("DELETE FROM now_preferences WHERE user_id=?", (q.from_user.id,))
             action = "location"
@@ -422,7 +487,11 @@ class SettingsUI:
                         token, q.from_user.id, q.message.chat.id, q.message.message_id,
                         body, recipients))
                     return True
-                if selected.startswith("person:"):
+                if kind == "local_delete" and selected.startswith("local:") and \
+                        self.local_sources is not None:
+                    self.local_sources.remove(int(selected.split(":", 1)[1]))
+                    action = "locals"
+                elif selected.startswith("person:"):
                     uid = int(selected.split(":")[1])
                     if kind == "register":
                         self.access.register(q.from_user.id, uid, str(pending["name"]))
@@ -474,7 +543,8 @@ class SettingsUI:
                         raise ValueError("Invalid action")
                 else:
                     raise ValueError("Invalid action")
-                action = selected
+                if action != "locals":
+                    action = selected
             except (ValueError, KeyError, TypeError) as exc:
                 await q.message.edit_text(html.escape(str(exc)[:200]))
                 return True
@@ -526,6 +596,25 @@ class SettingsUI:
             if m.chat.type != "private" or self.access.role(m.from_user.id) != "OWNER":
                 return True
             pending: dict[str, object]
+            if kind in {"local_add", "local_edit"} and self.local_sources is not None:
+                fields = [part.strip() for part in value.split("|")]
+                if kind == "local_add" and len(fields) == 3:
+                    source_id = int(fields[0])
+                    name, categories = fields[1:]
+                elif kind == "local_edit" and len(fields) == 2 and page.startswith("local:"):
+                    source_id = int(page.split(":", 1)[1])
+                    name, categories = fields
+                else:
+                    raise ValueError("Use CHAT_ID | Name | categories, or Name | categories")
+                await self.local_sources.upsert(source_id, name, categories)
+                target = f"local:{source_id}"
+                body, buttons = self._render(token, m.from_user.id, m.chat.id, target)
+                sent = await m.reply(body, reply_markup=buttons)
+                self.db.execute("UPDATE settings_sessions SET page=?,message_id=?,pending='{}' "
+                                "WHERE token=?", (target, sent.message_id, token))
+                self.db.execute("DELETE FROM settings_captures WHERE user_id=? AND chat_id=?",
+                                (m.from_user.id, m.chat.id))
+                return True
             if kind == "messagebody":
                 if not 1 <= len(value) <= 3000:
                     raise ValueError("Message must contain 1–3000 characters")

@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -77,6 +78,7 @@ def make_app(tmp_path):
 @pytest.mark.asyncio
 async def test_predownload_profile_callback_opens_panel_and_follow(monkeypatch, tmp_path):
     app = make_app(tmp_path)
+    app.instagram_relay = SimpleNamespace(show_profile=AsyncMock())
     url = "https://www.instagram.com/p/ABC123/"
     cid = app.store.confirm_create(42, 42, 100, 0, url, 900)
     assert app.store.claim_prompt(cid)
@@ -85,16 +87,8 @@ async def test_predownload_profile_callback_opens_panel_and_follow(monkeypatch, 
         return profile_target("https://www.instagram.com/alice/")
     monkeypatch.setattr("mikachan.bot.resolve_creator_from_post", resolve)
     await app.callback(query(f"c:{cid}:p", 101))
-    assert len(app.bot.sent) == 1
-    assert "👤 Profile" not in app.bot.sent[0][1]
-    panel_id = app.bot.sent[0][3]
-    markup = app.bot.sent[0][2]["reply_markup"]
-    assert "👀 Follow" in labels(markup)
-    follow_button = next(button for row in markup.inline_keyboard for button in row
-                         if button.text == "👀 Follow")
-    await app.callback(query(follow_button.callback_data, panel_id))
-    assert len(app.bot.sent) == 2
-    assert "Continue?" in app.bot.sent[1][1]
+    app.instagram_relay.show_profile.assert_awaited_once_with(42, 42, "alice")
+    assert app.bot.sent == []
     state = app.store.db.execute("SELECT state FROM confirmations WHERE id=?", (cid,)).fetchone()
     assert state["state"] == "PENDING"
 

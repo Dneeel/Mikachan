@@ -11,6 +11,7 @@ import shutil
 import sys
 from functools import partial
 from pathlib import Path
+from typing import Any
 from urllib.parse import urljoin, urlsplit
 
 import httpx
@@ -105,6 +106,7 @@ class Worker:
     def __init__(self, settings: Settings, store: Store, bot: Bot):
         self.settings, self.store, self.bot = settings, store, bot
         self.userbot = None
+        self.instagram_relay: Any = None
         self.tasks: dict[str, asyncio.Task[None]] = {}
         self.running_users: dict[int, int] = {}
         self.running = False
@@ -430,7 +432,7 @@ class Worker:
                     if not x_post[1]:
                         await self._deliver_text_post(jid, chat, original_url, context, x_post[0])
                         return
-            if await self._profile(jid, original_url, chat, job_dir):
+            if source(url) != "instagram" and await self._profile(jid, original_url, chat, job_dir):
                 return
             if collection(url):
                 items, title = await self._browse(url)
@@ -476,6 +478,16 @@ class Worker:
                     paths = await self._gallery_public(url, job_dir, max_bytes)
                     if not paths:
                         raise ValueError("This Danbooru post has no accessible public media") from None
+            elif source(url) == "instagram":
+                if self.instagram_relay is None:
+                    raise ValueError("Instagram downloads need a Telegram user account session")
+                paths, post_caption = await self.instagram_relay.fetch_url(
+                    url, job_dir, max_bytes, audio_only=mode == "audio")
+                if mode == "audio":
+                    paths = [await self._transcode_mp3(paths[0], max_bytes)]
+                elif post_caption:
+                    context["description"] = post_caption
+                    self.store.set_job_context(jid, context)
             elif source(url) == "direct":
                 input_limit = 300 * 1024 * 1024 if context.get("kind") == "episode" else max_bytes
                 try:

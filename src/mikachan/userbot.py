@@ -116,6 +116,13 @@ async def send_currency_reply(message: Message, query: str, result: CurrencyRepl
 
 
 class UserbotBridge:
+    @staticmethod
+    def _button_signature(message):
+        return tuple(tuple((getattr(button, "text", None),
+                            getattr(button, "url", None),
+                            getattr(button, "data", None)) for button in row)
+                     for row in (getattr(message, "buttons", None) or []))
+
     def __init__(self, api_id: int, api_hash: str, session: str, staging_chat_id: int):
         from telethon import TelegramClient  # type: ignore[import-untyped]
         from telethon.sessions import StringSession  # type: ignore[import-untyped]
@@ -127,6 +134,9 @@ class UserbotBridge:
         self.cooldown_until = 0.0
         self.file_peer = None
         self.proxy_peer = None
+        self.instagram_peer = None
+        self.instagram_last_sent = 0.0
+        self.instagram_last_click = 0.0
 
     async def _ready(self) -> None:
         if time.monotonic() < self.cooldown_until:
@@ -152,6 +162,158 @@ class UserbotBridge:
                 raise ValueError("Proxy provider identity could not be verified")
             self.proxy_peer = peer
         return self.proxy_peer
+
+    async def _instagram_peer(self):
+        if self.instagram_peer is None:
+            peer = await self.client.get_entity("instaRoxinoBot")
+            if (not getattr(peer, "bot", False)
+                    or str(getattr(peer, "username", "")).casefold() != "instaroxinobot"):
+                raise ValueError("Instagram provider identity could not be verified")
+            self.instagram_peer = peer
+        return self.instagram_peer
+
+    async def _instagram_collect(self, peer, after: int, *, settle: float,
+                                 limit: int = 110, watch_edit=None,
+                                 stop_on_highlight_done: bool = False) -> list:
+        """Collect only this verified bot's subsequent messages, in source order."""
+        found: dict[int, object] = {}
+        deadline = time.monotonic() + 180
+        quiet_until = time.monotonic() + 32
+        while time.monotonic() < deadline and len(found) < limit:
+            rows = await self.client.get_messages(peer, limit=min(120, limit + 10))
+            fresh = [item for item in rows if getattr(item, "sender_id", None) == peer.id
+                     and getattr(item, "id", 0) > after and item.id not in found]
+            if fresh:
+                for item in fresh:
+                    found[item.id] = item
+                quiet_until = time.monotonic() + settle
+                if stop_on_highlight_done and any(
+                        "highlight downloaded" in str(getattr(item, "raw_text", "") or "").casefold()
+                        for item in fresh):
+                    break
+                # A profile card or a highlight selection menu is complete as
+                # soon as its verified inline keyboard is available.
+                if any(getattr(item, "buttons", None) and not getattr(item, "media", None)
+                       for item in fresh) and not any(getattr(item, "media", None) for item in fresh):
+                    break
+                if settle <= 3 and any(getattr(item, "buttons", None) for item in fresh):
+                    break
+            if watch_edit is not None and not found:
+                edited = await self.client.get_messages(peer, ids=watch_edit.id)
+                if (edited and getattr(edited, "sender_id", None) == peer.id
+                        and (edited.raw_text != watch_edit.raw_text
+                             or self._button_signature(edited) != self._button_signature(watch_edit))):
+                    return [edited]
+            if found and time.monotonic() >= quiet_until:
+                break
+            await asyncio.sleep(0.75)
+        if not found:
+            raise ValueError("Instagram provider did not return a supported result")
+        return [found[key] for key in sorted(found)]
+
+    async def instagram_request(self, query: str, *, settle: float = 5) -> list:
+        """One query at a time; the upstream bot requires 29 seconds between links."""
+        try:
+            async with asyncio.timeout(230):
+                async with self.lock:
+                    await self._ready()
+                    peer = await self._instagram_peer()
+                    delay = self.instagram_last_sent + 30 - time.monotonic()
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    sent = await self.client.send_message(peer, query)
+                    self.instagram_last_sent = time.monotonic()
+                    return await self._instagram_collect(peer, sent.id, settle=settle)
+        except ValueError:
+            raise
+        except Exception as exc:
+            raise ValueError("Instagram provider is unavailable; try again later") from exc
+
+    async def instagram_click(self, message_id: int, row: int, column: int,
+                              expected_label: str, *, settle: float = 10,
+                              stop_on_highlight_done: bool = False) -> list:
+        try:
+            async with asyncio.timeout(230):
+                async with self.lock:
+                    await self._ready()
+                    peer = await self._instagram_peer()
+                    original = await self.client.get_messages(peer, ids=message_id)
+                    if (not original or getattr(original, "sender_id", None) != peer.id
+                            or not original.buttons or not 0 <= row < len(original.buttons)
+                            or not 0 <= column < len(original.buttons[row])):
+                        raise ValueError("Instagram menu expired; open the profile again")
+                    button = original.buttons[row][column]
+                    if (str(getattr(button, "text", "")).strip() != expected_label
+                            or getattr(button, "data", None) is None):
+                        raise ValueError("Instagram menu changed; open the profile again")
+                    delay = self.instagram_last_click + 2 - time.monotonic()
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    recent = await self.client.get_messages(peer, limit=1)
+                    after = max(message_id, recent[0].id if recent else message_id)
+                    await original.click(row, column)
+                    self.instagram_last_click = time.monotonic()
+                    try:
+                        watch = original if ("highlights" in expected_label.casefold()
+                                             or expected_label.casefold().startswith(
+                                                 ("next", "previous", "prev"))) else None
+                        return await self._instagram_collect(peer, after, settle=settle,
+                            watch_edit=watch, stop_on_highlight_done=stop_on_highlight_done)
+                    except ValueError:
+                        edited = await self.client.get_messages(peer, ids=message_id)
+                        if (edited and getattr(edited, "sender_id", None) == peer.id
+                                and (edited.raw_text != original.raw_text
+                                     or self._button_signature(edited) != self._button_signature(original))):
+                            return [edited]
+                        raise
+        except ValueError:
+            raise
+        except Exception as exc:
+            raise ValueError("Instagram provider did not answer; try again later") from exc
+
+    async def instagram_caption(self, message):
+        """Press Get the caption and return the edited media message when offered."""
+        for row_index, row in enumerate(getattr(message, "buttons", None) or []):
+            for column, button in enumerate(row):
+                if ("get the caption" in str(getattr(button, "text", "")).casefold()
+                        and getattr(button, "data", None) is not None):
+                    async with self.lock:
+                        await self._ready()
+                        peer = await self._instagram_peer()
+                        current = await self.client.get_messages(peer, ids=message.id)
+                        if not current or getattr(current, "sender_id", None) != peer.id:
+                            return message
+                        delay = self.instagram_last_click + 2 - time.monotonic()
+                        if delay > 0:
+                            await asyncio.sleep(delay)
+                        await current.click(row_index, column)
+                        self.instagram_last_click = time.monotonic()
+                        for _ in range(12):
+                            await asyncio.sleep(0.5)
+                            edited = await self.client.get_messages(peer, ids=message.id)
+                            if edited and edited.raw_text != message.raw_text:
+                                return edited
+                    return message
+        return message
+
+    async def instagram_download(self, message, destination: Path,
+                                 max_bytes: int) -> Path:
+        def bounded(received: int, total: int) -> None:
+            if received > max_bytes or total > max_bytes:
+                raise ValueError("Instagram media exceeds the temporary download limit")
+
+        async with asyncio.timeout(180):
+            async with self.lock:
+                await self._ready()
+                peer = await self._instagram_peer()
+                current = await self.client.get_messages(peer, ids=message.id)
+                if not current or getattr(current, "sender_id", None) != peer.id or not current.media:
+                    raise ValueError("Instagram media is no longer available")
+                result = await self.client.download_media(current, file=str(destination),
+                                                          progress_callback=bounded)
+        if not result or Path(result).stat().st_size > max_bytes:
+            raise ValueError("Instagram media download failed or exceeded the limit")
+        return Path(result)
 
     async def proxy_request(self):
         """Request the provider's own menu through the existing MTProto account."""

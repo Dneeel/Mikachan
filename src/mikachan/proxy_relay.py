@@ -65,11 +65,12 @@ class ProxyRelay:
         if not rows:
             raise ValueError("Proxy provider returned no usable proxy menu")
         source_text = str(getattr(upstream, "raw_text", "") or "").strip()[:3000]
-        body = "🛡 <b>Mikachan · Proxy</b>\nLive options from @Dnproxbot. Tap a location to connect."
+        body = "🛡 <b>Mikachan · Proxy</b>\nTap a location to connect."
         if note:
             body += "\n\n" + html.escape(note[:300])
         if source_text:
             body += "\n\n" + html.escape(source_text)
+        rows.append([InlineKeyboardButton(text="🙏 Thanks", callback_data="PLACEHOLDER:close")])
         return body, InlineKeyboardMarkup(inline_keyboard=rows), callbacks
 
     def _remember(self, token: str, user: int, chat: int, message: int,
@@ -103,17 +104,29 @@ class ProxyRelay:
         if not data.startswith("px:"):
             return False
         parts = data.split(":")
-        if len(parts) != 3 or not parts[2].isdigit():
+        if len(parts) != 3 or (not parts[2].isdigit() and parts[2] != "close"):
             await query.answer("Invalid proxy action")
             return True
-        token, index = parts[1], int(parts[2])
+        token = parts[1]
+        index = int(parts[2]) if parts[2].isdigit() else -1
         session = self.sessions.get(token)
         if (session is None or session.expires <= time.time()
                 or session.user_id != query.from_user.id
                 or session.chat_id != query.message.chat.id
                 or session.message_id != query.message.message_id
-                or index not in session.callbacks):
+                or (parts[2] != "close" and index not in session.callbacks)):
             await query.answer("Proxy menu expired or belongs to another user")
+            return True
+        if parts[2] == "close":
+            await query.answer()
+            self.sessions.pop(token, None)
+            try:
+                await query.message.delete()
+            except Exception:
+                try:
+                    await query.message.edit_reply_markup(reply_markup=None)
+                except Exception:
+                    pass
             return True
         await query.answer()
         row, column = session.callbacks[index]
