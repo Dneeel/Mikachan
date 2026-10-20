@@ -34,13 +34,13 @@ MAX_FOLLOWS = 25
 FEATURES = {
     "instagram": ("posts", "reels", "stories", "bio", "name", "avatar"),
     "twitter": ("tweets", "bio", "name", "avatar"),
-    "youtube": ("videos", "shorts"),
-    "tiktok": ("posts", "stories", "bio", "name", "avatar"),
+    "youtube": ("videos", "shorts", "live", "bio", "name", "avatar"),
+    "tiktok": ("posts", "stories", "live", "bio", "name", "avatar"),
 }
 SOCIAL_PLATFORMS = frozenset(FEATURES)
 LABELS = {
     "posts": "Posts", "reels": "Reels", "stories": "Stories (best effort)",
-    "tweets": "Tweets", "videos": "Videos", "shorts": "Shorts", "bio": "Bio changes",
+    "tweets": "Tweets", "videos": "Videos", "shorts": "Shorts", "live": "Live started", "bio": "Bio changes",
     "name": "Display name changes", "avatar": "Avatar changes",
 }
 
@@ -232,7 +232,8 @@ class FollowStore:
         CREATE INDEX IF NOT EXISTS follows_due ON follows(next_check);
         CREATE TABLE IF NOT EXISTS follow_downloads (
           token TEXT PRIMARY KEY, follow_id TEXT NOT NULL, user_id INTEGER NOT NULL,
-          url TEXT NOT NULL, expires REAL NOT NULL);
+          url TEXT NOT NULL, expires REAL NOT NULL,
+          kind TEXT NOT NULL DEFAULT 'post', value TEXT NOT NULL DEFAULT '');
         CREATE TABLE IF NOT EXISTS follow_notifications (
           token TEXT PRIMARY KEY, follow_id TEXT NOT NULL, user_id INTEGER NOT NULL,
           chat_id INTEGER NOT NULL, message_id INTEGER, kind TEXT NOT NULL,
@@ -240,12 +241,24 @@ class FollowStore:
         CREATE TABLE IF NOT EXISTS follow_menus (
           chat_id INTEGER NOT NULL, message_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
           expires REAL NOT NULL, PRIMARY KEY(chat_id,message_id));
+        CREATE TABLE IF NOT EXISTS follow_source_errors (
+          follow_id TEXT NOT NULL, category TEXT NOT NULL, reason TEXT NOT NULL,
+          checked_at REAL NOT NULL, PRIMARY KEY(follow_id, category));
         """)
+        # Upgrade an existing SQLite database without losing follows or buttons.
+        columns = {r[1] for r in db.execute("PRAGMA table_info(follow_downloads)")}
+        if "kind" not in columns:
+            db.execute("ALTER TABLE follow_downloads ADD COLUMN kind TEXT NOT NULL DEFAULT 'post'")
+        if "value" not in columns:
+            db.execute("ALTER TABLE follow_downloads ADD COLUMN value TEXT NOT NULL DEFAULT ''")
+        db.execute("UPDATE follows SET mode='notice' WHERE mode='media'")
 
     def session(self, user: int, chat: int, target: Target) -> str:
         self.db.execute("DELETE FROM follow_sessions WHERE expires<?", (time.time(),))
         token = secrets.token_urlsafe(8)
-        defaults = [x for x in FEATURES[target.platform] if x not in {"stories", "bio", "name", "avatar"}]
+        # Follow defaults to all *implemented* events. Unsupported provider access
+        # is shown as unavailable, never quietly presented as monitored.
+        defaults = list(FEATURES[target.platform])
         self.db.execute("INSERT INTO follow_sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                         (token, user, chat, None, target.platform, target.handle,
                          target.url, "confirm", json.dumps(defaults), "notice", "dm", time.time() + 1800))
@@ -294,7 +307,7 @@ class FollowStore:
             updated = self.db.execute(
                 "UPDATE follows SET features=?,mode=? WHERE id=? AND user_id=? AND url=? "
                 "RETURNING id",
-                (session["features"], session["mode"], follow_id,
+                (session["features"], "notice", follow_id,
                  session["user_id"], target)).fetchone()
             if not updated:
                 raise ValueError("Follow no longer exists")
@@ -311,7 +324,7 @@ class FollowStore:
                         "VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id,url) DO UPDATE SET "
                         "features=excluded.features,mode=excluded.mode,chat_id=excluded.chat_id",
                         (token, session["user_id"], destination_chat, session["platform"],
-                         session["handle"], target, session["features"], session["mode"], time.time()))
+                         session["handle"], target, session["features"], "notice", time.time()))
         if not existing:
             self.db.execute("INSERT INTO follow_start VALUES (?,?)", (token, time.time()))
         self.db.execute("DELETE FROM follow_sessions WHERE id=?", (session["id"],))
@@ -327,6 +340,9 @@ class FollowStore:
             self.db.execute("DELETE FROM follow_health WHERE follow_id=?", (token,))
             self.db.execute("DELETE FROM follow_start WHERE follow_id=?", (token,))
             self.db.execute("DELETE FROM follow_alerts WHERE follow_id=?", (token,))
+            self.db.execute("DELETE FROM follow_source_errors WHERE follow_id=?", (token,))
+            self.db.execute("DELETE FROM follow_downloads WHERE follow_id=?", (token,))
+            self.db.execute("DELETE FROM follow_notifications WHERE follow_id=?", (token,))
         return bool(row)
 
     def notification(self, token: str, user: int, chat: int, message: int):
@@ -351,10 +367,10 @@ class FollowStore:
 
 def confirm_panel(target: Target, token: str) -> tuple[str, InlineKeyboardMarkup]:
     notes = {
-        "instagram": "Public posts and reels; stories are best effort. Live alerts are unavailable.",
+        "instagram": "Public posts, reels and best-effort stories. Live and handle-change alerts are unavailable.",
         "twitter": "Public tweets and visible profile changes. X may block anonymous access.",
-            "youtube": "Public channel videos and Shorts. Live start alerts are unavailable.",
-        "tiktok": "Public posts; stories are best effort. Live alerts are unavailable.",
+        "youtube": "Videos, Shorts, live detection and public profile changes (best effort).",
+        "tiktok": "Public posts, stories and live detection (best effort).",
     }
     body = (f"👀 <b>Follow @{html.escape(target.handle)}</b> · {target.platform.title()}\n\n"
             f"{notes[target.platform]}\nChecks run about every 15 minutes. "
@@ -373,10 +389,8 @@ def settings_panel(session) -> tuple[str, InlineKeyboardMarkup]:
     rows = [[InlineKeyboardButton(text=f"{'✅' if key in selected else '⬜'} {LABELS[key]}",
                                  callback_data=f"f:{token}:t:{key}")]
             for key in FEATURES[session["platform"]]]
-    rows.append([InlineKeyboardButton(text=f"{'✅' if session['mode'] == 'media' else '⬜'} Send media",
-                                    callback_data=f"f:{token}:m:media"),
-                 InlineKeyboardButton(text=f"{'✅' if session['mode'] == 'notice' else '⬜'} Notify + link",
-                                    callback_data=f"f:{token}:m:notice")])
+    # All new events are notifications with two controls. Auto-download is
+    # intentionally retired: the operator explicitly requests each payload.
     editing = session["stage"].startswith("edit:")
     if not editing and session["chat_id"] != session["user_id"]:
         rows.append([InlineKeyboardButton(text=f"{'✅' if session['destination'] == 'dm' else '⬜'} Private chat",
@@ -387,10 +401,10 @@ def settings_panel(session) -> tuple[str, InlineKeyboardMarkup]:
                                     callback_data=f"f:{token}:save")])
     rows.append([InlineKeyboardButton(text="Cancel", callback_data=f"f:{token}:no")])
     body = (f"👀 <b>Follow @{html.escape(session['handle'])}</b>\n"
-            "Choose what to watch and how to receive it. Tap a category to toggle it.\n\n"
-            "Stories depend on public extractor access. Username changes and live starts "
-            "cannot be monitored reliably without account access.\n"
-            "Media mode queues public posts for download; profile changes always arrive as text."
+            "Choose monitored events and delivery. All supported events are selected by default.\n\n"
+            "Stories, lives and profile details are best effort: some platforms block "
+            "public requests. Handle changes are not supported without stable account IDs.\n"
+            "Every event sends two buttons: Get it and View original (on demand)."
             + ("\nYour existing notification destination stays the same." if editing else ""))
     return body, InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -414,13 +428,24 @@ async def _extract(command: list[str], timeout: int) -> object:
         *command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
         start_new_session=True, env=network_env)
     try:
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout)
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout)
     except (TimeoutError, asyncio.CancelledError):
         os.killpg(proc.pid, signal.SIGTERM)
         await proc.wait()
         raise
-    if proc.returncode or len(stdout) > 3_000_000:
-        raise ValueError("public source unavailable")
+    if proc.returncode:
+        # Only emit a small sanitized classification, never raw stderr URLs,
+        # authentication headers, cookies, or remote profile values.
+        diagnostic = stderr[:8192].lower()
+        if b"403" in diagnostic or b"forbidden" in diagnostic:
+            raise ValueError("provider refused access (HTTP 403)")
+        if b"429" in diagnostic or b"rate limit" in diagnostic:
+            raise ValueError("provider rate limit (HTTP 429)")
+        if b"login" in diagnostic or b"cookies" in diagnostic or b"sign in" in diagnostic:
+            raise ValueError("provider needs an authorized login session")
+        raise ValueError("public extractor failed (unknown provider error)")
+    if len(stdout) > 3_000_000:
+        raise ValueError("public source metadata exceeded the size limit")
     return json.loads(stdout)
 
 
@@ -435,9 +460,10 @@ def _gallery_items(data: object, target: Target, kind: str) -> list[tuple[str, s
             continue
         meta = message[-1]
         if target.platform == "instagram":
-            item_id = (meta.get("post_id") if kind == "stories" else meta.get("post_shortcode"))
+            item_id = ((meta.get("story_media_id") or meta.get("id") or meta.get("post_id"))
+                       if kind == "stories" else meta.get("post_shortcode"))
             event_kind = "stories" if kind == "stories" else (
-                "reels" if meta.get("type") == "reel" else "posts")
+                "reels" if kind == "reels" or meta.get("type") == "reel" else "posts")
             url = (f"https://www.instagram.com/stories/{target.handle}/{item_id}/" if kind == "stories"
                    else f"https://www.instagram.com/{'reel' if event_kind == 'reels' else 'p'}/{item_id}/")
         elif target.platform == "twitter":
@@ -511,6 +537,42 @@ async def public_items(target: Target, kind: str = "posts") -> list[tuple[str, s
                 return items
         except (ValueError, TimeoutError, httpx.HTTPError):
             primary_failed = True
+    if kind == "live" and target.platform in {"youtube", "tiktok"}:
+        if target.platform == "youtube":
+            endpoint = target.url.rstrip("/") + "/streams"
+            data = await _extract([
+                "yt-dlp", "--flat-playlist", "--playlist-end", "12",
+                "--dump-single-json", "--skip-download", "--no-warnings", endpoint,
+            ], 35)
+            if not isinstance(data, dict) or not isinstance(data.get("entries"), list):
+                raise ValueError("live source returned no valid listing")
+            items = []
+            entries = [e for e in data["entries"][:12] if isinstance(e, dict)]
+            if entries and all(e.get("live_status") is None and e.get("is_live") is None
+                               for e in entries):
+                raise ValueError("live source does not expose trustworthy live status")
+            for entry in entries:
+                ident = str(entry.get("id") or "")
+                if (re.fullmatch(r"[\w-]{11}", ident) and
+                        (entry.get("live_status") == "is_live" or entry.get("is_live") is True)):
+                    items.append(("live", f"https://www.youtube.com/watch?v={ident}",
+                                  str(entry.get("title") or "Live started")[:300]))
+            return items
+        data = await _extract([
+            "yt-dlp", "--no-playlist", "--skip-download", "--dump-single-json",
+            "--no-warnings", target.url.rstrip("/") + "/live",
+        ], 25)
+        if not isinstance(data, dict) or not (data.get("live_status") == "is_live"
+                                              or data.get("is_live") is True):
+            return []
+        creator = str(data.get("uploader_id") or data.get("channel_id") or "").lstrip("@")
+        if not creator or creator.casefold() != target.handle.casefold():
+            raise ValueError("live stream owner identity mismatch")
+        ident = str(data.get("id") or "")
+        if not re.fullmatch(r"\d{10,22}", ident):
+            raise ValueError("live stream ID is unavailable")
+        return [("live", f"https://www.tiktok.com/@{target.handle}/live?room_id={ident}",
+                 str(data.get("title") or "Live started")[:300])]
     if target.platform == "youtube":
         if kind != "shorts":
             try:
@@ -531,7 +593,7 @@ async def public_items(target: Target, kind: str = "posts") -> list[tuple[str, s
         return items
     if target.platform == "instagram":
         url = (f"https://www.instagram.com/stories/{target.handle}/" if kind == "stories"
-               else target.url)
+               else target.url.rstrip("/") + ("/reels/" if kind == "reels" else "/posts/"))
     elif target.platform == "tiktok":
         url = target.url.rstrip("/") + ("/stories" if kind == "stories" else "")
     else:
@@ -620,6 +682,27 @@ async def public_profile(target: Target, *, display_avatar: bool = False) -> dic
                         return _stable_profile(result, display_avatar=display_avatar)
         except (ValueError, TimeoutError, OSError, json.JSONDecodeError):
             pass
+    if target.platform == "youtube":
+        data = await _extract([
+            "yt-dlp", "--flat-playlist", "--playlist-end", "1",
+            "--dump-single-json", "--skip-download", "--no-warnings", target.url,
+        ], 25)
+        if isinstance(data, dict):
+            name = str(data.get("channel") or data.get("uploader") or "")
+            bio = str(data.get("description") or "")
+            thumbnails = data.get("thumbnails")
+            avatar = str(data.get("channel_thumbnail") or "")
+            if not avatar and isinstance(thumbnails, list):
+                pictures = [t.get("url") for t in thumbnails if isinstance(t, dict)
+                            and isinstance(t.get("url"), str)]
+                avatar = pictures[-1] if pictures else ""
+            result = {"name": name} if name else {}
+            if "description" in data:
+                result["bio"] = bio
+            if avatar.startswith("https://"):
+                result["avatar"] = avatar
+            if result:
+                return _stable_profile(result, display_avatar=display_avatar)
     raise ValueError("structured public profile data unavailable")
 
 
@@ -687,7 +770,11 @@ class FollowService:
                             row["user_id"], row["chat_id"], chat_type,
                             self.store.allowlist(), self.private_chats_only,
                             self.store.groups())):
-                    self.db.remove(row["id"], row["user_id"])
+                    # Access changes are reversible. Do not destroy the owner's
+                    # subscription or baseline on a temporary permission failure.
+                    self.db.db.execute("UPDATE follows SET next_check=? WHERE id=?",
+                                       (time.time() + INTERVAL, row["id"]))
+                    await asyncio.sleep(0)
                     continue
                 try:
                     async with self.check_lock:
@@ -794,61 +881,94 @@ class FollowService:
         baselines = {r[0] for r in self.db.db.execute(
             "SELECT category FROM follow_baselines WHERE follow_id=?", (row["id"],))}
         batches: list[tuple[str, str, str]] = []
-        main_ok = False
-        story_ok = False
-        if selected & {"posts", "reels", "tweets", "videos"}:
-            try:
-                items = await public_items(target)
-                previously_seen = self.db.db.execute(
-                    "SELECT 1 FROM follow_seen WHERE follow_id=? LIMIT 1", (row["id"],)).fetchone()
-                if not items and previously_seen:
-                    raise ValueError("timeline unexpectedly empty")
-                batches.extend(items)
-                main_ok = True
-            except (ValueError, TimeoutError, OSError, json.JSONDecodeError):
-                pass
-        shorts_ok = False
-        if "shorts" in selected:
-            try:
-                items = await public_items(target, "shorts")
-                previously_seen = self.db.db.execute(
-                    "SELECT 1 FROM follow_seen WHERE follow_id=? AND event_key LIKE 'shorts:%' LIMIT 1",
-                    (row["id"],)).fetchone()
-                if not items and previously_seen:
-                    raise ValueError("shorts timeline unexpectedly empty")
-                batches.extend(items)
-                shorts_ok = True
-            except (ValueError, TimeoutError, OSError, json.JSONDecodeError):
-                pass
-        if "stories" in selected:
-            try:
-                batches.extend(await public_items(target, "stories"))
-                story_ok = True
-            except (ValueError, TimeoutError, OSError, json.JSONDecodeError):
-                pass
-        if shorts_ok and main_ok:
+        health: dict[str, bool] = {}
+        errors: dict[str, str] = {}
+        content_categories = [key for key in ("posts", "reels", "tweets", "videos", "shorts", "stories", "live")
+                              if key in selected]
+        # Treat Instagram Posts and Reels as separate sources; all others use
+        # their own platform-specific listing. A failed source does not erase
+        # another category's baseline.
+        fetch_categories = []
+        for key in content_categories:
+            query = "reels" if key == "reels" else (
+                "posts" if key in {"posts", "tweets", "videos"} else key)
+            if query not in fetch_categories:
+                fetch_categories.append(query)
+        fetched_ok: dict[str, bool] = {}
+        # Source discovery runs concurrently within a small, fixed budget.
+        # One blocked Stories endpoint no longer delays checking fresh Posts.
+        gate = asyncio.Semaphore(3)
+
+        async def fetch_content(kind: str):
+            async with gate:
+                try:
+                    return kind, await public_items(target, kind), None
+                except (ValueError, TimeoutError, OSError, json.JSONDecodeError,
+                        httpx.HTTPError) as exc:
+                    return kind, None, exc
+
+        async def fetch_profile():
+            async with gate:
+                try:
+                    return "profile", await public_profile(target), None
+                except (ValueError, TimeoutError, OSError, httpx.HTTPError) as exc:
+                    return "profile", None, exc
+
+        operations = [fetch_content(kind) for kind in fetch_categories]
+        if selected & {"bio", "name", "avatar"}:
+            operations.append(fetch_profile())
+        # asyncio.gather cancels all outstanding requests if this check is
+        # cancelled by shutdown; all subprocess extractors have TERM handling.
+        outcomes = await asyncio.gather(*operations)
+        profile: dict[str, str] = {}
+        for kind, payload, exc in outcomes:
+            if exc is not None:
+                if kind == "profile":
+                    health["profile"] = False
+                else:
+                    fetched_ok[kind] = False
+                errors[kind] = str(exc)[:160] if isinstance(exc, ValueError) else type(exc).__name__
+                continue
+            if kind == "profile":
+                profile = payload
+                health["profile"] = bool(profile)
+                continue
+            items = payload
+            previously_seen = kind != "live" and any(
+                self.db.db.execute(
+                    "SELECT 1 FROM follow_seen WHERE follow_id=? AND event_key LIKE ? LIMIT 1",
+                    (row["id"], f"{event_kind}:%")).fetchone()
+                for event_kind in content_categories if (
+                    kind == event_kind or kind == "posts" and
+                    event_kind in {"posts", "reels", "tweets", "videos"}))
+            if not items and previously_seen:
+                fetched_ok[kind] = False
+                errors[kind] = "previously populated timeline unexpectedly empty"
+                continue
+            batches.extend(e for e in items if e[0] in selected)
+            fetched_ok[kind] = True
+        for kind in content_categories:
+            source_kind = "reels" if kind == "reels" else (
+                "posts" if kind in {"posts", "tweets", "videos"} else kind)
+            health[kind] = fetched_ok.get(source_kind, False)
+        if health.get("shorts") and health.get("videos"):
             short_urls = {url for event_kind, url, _ in batches if event_kind == "shorts"}
             batches = [event for event in batches
                        if event[0] != "videos" or event[1] not in short_urls]
-        profile = {}
-        if selected & {"bio", "name", "avatar"}:
-            try:
-                profile = await public_profile(target)
-            except (ValueError, TimeoutError, httpx.HTTPError):
-                pass
-        if not main_ok and not shorts_ok and not story_ok and not profile:
-            raise ValueError("no public data")
-        health = {}
-        if selected & {"posts", "reels", "tweets", "videos"}:
-            health["timeline"] = main_ok
-        if "shorts" in selected:
-            health["shorts"] = shorts_ok
-        if "stories" in selected:
-            health["stories"] = story_ok
-        if selected & {"bio", "name", "avatar"}:
-            health["profile"] = bool(profile)
         for category, healthy in health.items():
+            if healthy:
+                self.db.db.execute("DELETE FROM follow_source_errors WHERE follow_id=? AND category=?",
+                                   (row["id"], category))
+            else:
+                mapped_category = "posts" if category in {"tweets", "videos"} else category
+                reason = errors.get(mapped_category, "provider unavailable")
+                self.db.db.execute("INSERT INTO follow_source_errors VALUES (?,?,?,?) "
+                                   "ON CONFLICT(follow_id,category) DO UPDATE SET "
+                                   "reason=excluded.reason,checked_at=excluded.checked_at",
+                                   (row["id"], category, reason, time.time()))
             await self._source_health(row, category, healthy)
+        if not any(health.values()):
+            raise ValueError("no public source accessible")
         old_profile = json.loads(row["profile_data"])
         started_row = self.db.db.execute(
             "SELECT started FROM follow_start WHERE follow_id=?", (row["id"],)
@@ -864,11 +984,6 @@ class FollowService:
             new_since_follow = (event_kind not in baselines and started > 0
                                 and (posted := _post_timestamp(url)) is not None
                                 and started <= posted <= time.time() + 300)
-            if (event_kind in baselines or new_since_follow) and row["mode"] == "media":
-                await self.deliver(row, target, event_kind, url, title, key)
-                self.db.db.execute("INSERT OR IGNORE INTO follow_seen VALUES (?,?)",
-                                   (row["id"], key))
-                continue
             if event_kind in baselines or new_since_follow:
                 await self.deliver(row, target, event_kind, url, title)
             self.db.db.execute("INSERT OR IGNORE INTO follow_seen VALUES (?,?)", (row["id"], key))
@@ -881,28 +996,20 @@ class FollowService:
                     continue
                 value = "Avatar updated" if key == "avatar" else html.escape(profile[key][:500])
                 token = secrets.token_urlsafe(8)
-                buttons = [[InlineKeyboardButton(text="🔗 Link", url=target.url)],
-                           [InlineKeyboardButton(text="👤 Profile panel", callback_data=f"fn:{token}:profile")]]
-                if key == "avatar":
-                    buttons.append([InlineKeyboardButton(text="⬇️ Fetch profile photo",
-                                                         callback_data=f"fn:{token}:fetch")])
-                buttons.append([InlineKeyboardButton(text="✅ Thank you",
-                                                     callback_data=f"fn:{token}:thanks")])
+                get_token = secrets.token_urlsafe(7)
+                buttons = [[InlineKeyboardButton(text="⬇️ Get it", callback_data=f"fd:{row['id']}:{get_token}"),
+                            InlineKeyboardButton(text="🔗 View original", url=target.url)]]
                 sent = await self.bot.send_message(row["chat_id"],
                     f"👀 <b>{target.platform.title()} · @{html.escape(target.handle)}</b>\n"
                     f"{LABELS[key]}\n\n{value}",
                     reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
-                self.db.db.execute("INSERT INTO follow_notifications VALUES (?,?,?,?,?,?,?)",
-                    (token, row["id"], row["user_id"], row["chat_id"],
-                     getattr(sent, "message_id", None), key, time.time() + 86400))
-        categories: list[str] = []
-        if main_ok:
-            categories.extend(selected & {"posts", "reels", "tweets", "videos"})
-        if story_ok:
-            categories.append("stories")
-        if shorts_ok:
-            categories.append("shorts")
-        categories.extend(key for key in selected & {"bio", "name", "avatar"} if key in profile)
+                self.db.db.execute("INSERT INTO follow_downloads "
+                    "(token,follow_id,user_id,url,expires,kind,value) VALUES (?,?,?,?,?,?,?)",
+                    (get_token, row["id"], row["user_id"], target.url,
+                     time.time() + 7 * 86400, key, str(profile[key])[:500]))
+        categories = [key for key in selected if key in health and health[key] and key != "profile"]
+        if health.get("profile"):
+            categories.extend(key for key in selected & {"bio", "name", "avatar"} if key in profile)
         self.db.db.executemany("INSERT OR IGNORE INTO follow_baselines VALUES (?,?)",
                                ((row["id"], key) for key in categories))
         old_profile.update(profile)
@@ -921,51 +1028,18 @@ class FollowService:
             chat_type = "private" if row["chat_id"] == row["user_id"] else "group"
             if not self.store.can_access(row["user_id"], row["chat_id"], chat_type):
                 return
-        text_only = False
-        if (row["mode"] == "media" and target.platform == "twitter" and kind == "tweets"
-                and _post_timestamp(url) is not None):
-            try:
-                text_only = await public_x_media(url) is None
-            except (ValueError, TimeoutError, httpx.HTTPError):
-                pass
-        if row["mode"] == "media" and not text_only:
-            if event_key is not None:
-                self.db.db.execute("BEGIN IMMEDIATE")
-            try:
-                exists = (self.db.db.execute("SELECT 1 FROM follow_media_jobs "
-                    "WHERE follow_id=? AND event_key=?", (row["id"], event_key)).fetchone()
-                    if event_key is not None else None)
-                if not exists:
-                    jid = self.store.create_job(row["user_id"], row["chat_id"], url, "auto",
-                        {"kind": "post", "source_url": url,
-                         "profile_url": target.url, "follow_event": kind})
-                    if event_key is not None:
-                        self.db.db.execute("INSERT INTO follow_media_jobs VALUES (?,?,?,?,?,?)",
-                            (row["id"], event_key, url, jid, 1, time.time() + 600))
-                if event_key is not None:
-                    self.db.db.execute("COMMIT")
-            except BaseException:
-                if event_key is not None:
-                    self.db.db.execute("ROLLBACK")
-                raise
-            return
         notice_token = secrets.token_urlsafe(8)
-        markup = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔗 Link", url=url),
-             InlineKeyboardButton(text="⬇️ Download", callback_data=f"fd:{row['id']}:{secrets.token_urlsafe(5)}")],
-            [InlineKeyboardButton(text="👤 Profile panel", callback_data=f"fn:{notice_token}:profile")],
-            [InlineKeyboardButton(text="✅ Thank you", callback_data=f"fn:{notice_token}:thanks")]])
-        # A short token maps to a validated URL; callback data never contains URLs.
-        callback = markup.inline_keyboard[0][1].callback_data
-        assert callback is not None
-        token = callback.split(":")[-1]
-        self.db.db.execute("DELETE FROM follow_downloads WHERE expires<?", (time.time(),))
-        self.db.db.execute("INSERT INTO follow_downloads VALUES (?,?,?,?,?)",
-                           (token, row["id"], row["user_id"], url, time.time() + 86400))
+        get_token = secrets.token_urlsafe(7)
+        markup = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="⬇️ Get it", callback_data=f"fd:{row['id']}:{get_token}"),
+            InlineKeyboardButton(text="🔗 View original", url=url),
+        ]])
         sent = await self.bot.send_message(row["chat_id"],
             f"👀 <b>{target.platform.title()} · @{html.escape(target.handle)}</b>\n"
             f"New {html.escape(kind)}{': ' + html.escape(title[:200]) if title else ''}",
             reply_markup=markup)
-        self.db.db.execute("INSERT INTO follow_notifications VALUES (?,?,?,?,?,?,?)",
-            (notice_token, row["id"], row["user_id"], row["chat_id"],
-             getattr(sent, "message_id", None), kind, time.time() + 86400))
+        self.db.db.execute("DELETE FROM follow_downloads WHERE expires<?", (time.time(),))
+        self.db.db.execute("INSERT INTO follow_downloads "
+            "(token,follow_id,user_id,url,expires,kind,value) VALUES (?,?,?,?,?,?,?)",
+            (get_token, row["id"], row["user_id"], url, time.time() + 7 * 86400,
+             kind, title[:2000]))

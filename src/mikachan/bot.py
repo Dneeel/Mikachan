@@ -40,7 +40,7 @@ from .utilities import Utilities, _market_card, qr_png
 from .userbot import UserbotBridge, is_currency_query
 from .market_prices import parse_asset_query
 from .personality import Mode, mode_for, response
-from .public_social import public_x_media
+from .public_social import public_x_media, public_x_post
 from .settings_ui import SettingsUI
 from .groupstatus import GroupStatus, alias as group_stats_alias
 from .follow import (FollowService, FEATURES, Target, command_target, confirm_panel,
@@ -775,7 +775,7 @@ class App:
     async def show_following(self, chat: int, user: int, chat_type: str,
                              message_id: int | None = None) -> None:
         rows = self.follow.db.db.execute(
-            "SELECT id,platform,handle,chat_id FROM follows WHERE user_id=? "
+            "SELECT id,platform,handle,chat_id,failures FROM follows WHERE user_id=? "
             + ("" if chat_type == "private" else "AND chat_id=? ")
             + "ORDER BY platform,handle",
             (user,) if chat_type == "private" else (user, chat),
@@ -783,7 +783,7 @@ class App:
         body = "👀 <b>Following</b>\nChoose a profile to manage."
         if not rows:
             body += "\nNo profiles yet. Use /follow to begin."
-        buttons = [[(f"👤 {row['platform'].title()} · @{row['handle'][:28]}",
+        buttons = [[(f"{'⚠️' if row['failures'] else '👤'} {row['platform'].title()} · @{row['handle'][:28]}",
                      f"fm:{row['id']}:open")] for row in rows]
         if rows:
             buttons.append([("🔄 Check now · all", "fm:all:check")])
@@ -843,6 +843,8 @@ class App:
         if target.platform in {"instagram", "tiktok"}:
             rows.append([("👤 Photo & bio", f"p:{token}:card"),
                          ("⭕ Stories", f"p:{token}:stories")])
+            if target.platform == "instagram":
+                rows.append([("🎞 Latest Reel", f"p:{token}:reels")])
             rows.append([("🖼 Original profile photo", f"p:{token}:original")])
         markup = kb(rows)
         markup.inline_keyboard.append([InlineKeyboardButton(text="🔗 Open profile", url=target.url)])
@@ -921,7 +923,7 @@ class App:
             return
         target = Target(row["platform"], row["handle"], row["url"])
         action = parts[2]
-        if action in {"card", "stories", "latest", "shorts", "original"} and not self.store.rate(
+        if action in {"card", "stories", "latest", "shorts", "reels", "original"} and not self.store.rate(
                 q.from_user.id, "profile", 8):
             await acknowledge(q, "Please wait before checking more profiles")
             return
@@ -929,9 +931,24 @@ class App:
         if action == "follow":
             await self.show_follow(q.message.chat.id, q.from_user.id, target)
         elif action == "card" and target.platform in {"instagram", "tiktok"}:
-            jid = self.store.create_job(q.from_user.id, q.message.chat.id, target.url)
-            prompt = await self.bot.send_message(q.message.chat.id, "⏳ Checking public profile…")
-            self.store.bind_progress(jid, prompt.message_id)
+            try:
+                details = await asyncio.wait_for(public_profile(target, display_avatar=True), 30)
+                body = (f"👤 <b>{html.escape(details.get('name') or target.handle)}</b>\n"
+                        f"@{html.escape(target.handle)} · {target.platform.title()}\n\n"
+                        f"{html.escape(details.get('bio', ''))}")
+                avatar_url = details.get("avatar")
+                if avatar_url:
+                    try:
+                        photo = await profile_photo(avatar_url)
+                        await self.bot.send_photo(q.message.chat.id, photo, caption=body[:1024])
+                        return
+                    except (ValueError, TimeoutError, OSError, httpx.HTTPError):
+                        pass
+                await self.bot.send_message(q.message.chat.id, body)
+            except (ValueError, TimeoutError, OSError, httpx.HTTPError):
+                await self.bot.send_message(q.message.chat.id,
+                    "⚠️ This public profile is not accessible from the server. "
+                    "Instagram may require a permitted login session.")
         elif action == "stories" and target.platform in {"instagram", "tiktok"}:
             await self.show_stories(q.message.chat.id, q.from_user.id, target)
         elif action == "original" and target.platform in {"instagram", "tiktok"}:
@@ -946,9 +963,10 @@ class App:
             except (ValueError, TimeoutError, OSError, httpx.HTTPError, TelegramBadRequest):
                 await self.bot.send_message(q.message.chat.id,
                                             "Original profile photo is unavailable from public sources.")
-        elif action in {"latest", "shorts"}:
+        elif action in {"latest", "shorts", "reels"}:
             try:
-                items = await public_items(target, "shorts" if action == "shorts" else "posts")
+                items = await public_items(target, "shorts" if action == "shorts" else
+                                           "reels" if action == "reels" else "posts")
             except (ValueError, TimeoutError, OSError):
                 await self.bot.send_message(
                     q.message.chat.id, "Public posts could not be checked right now. Try again later.")
@@ -1197,6 +1215,12 @@ class App:
                     status = f"🔄 Follow check complete. Accessible: {available}."
                     if blocked:
                         status += f"\nUnavailable from public sources: {blocked}."
+                        failures = self.follow.db.db.execute(
+                            "SELECT category,reason FROM follow_source_errors WHERE follow_id=?",
+                            (follow_id,)).fetchall()
+                        details = [f"{e['category']}: {html.escape(e['reason'])}" for e in failures]
+                        if details:
+                            status += "\n" + "\n".join(details[:7])
                 except (ValueError, TimeoutError, OSError, httpx.HTTPError):
                     status = "⚠️ Public follow sources could not be checked right now. No change was inferred."
                 await self.bot.send_message(q.message.chat.id, status)
@@ -1251,16 +1275,70 @@ class App:
             if len(parts) != 3:
                 return
             entry = self.follow.db.db.execute(
-                "SELECT d.url FROM follow_downloads d JOIN follows f ON f.id=d.follow_id "
+                "SELECT d.url,d.kind,d.value,f.platform,f.handle FROM follow_downloads d JOIN follows f ON f.id=d.follow_id "
                 "WHERE d.token=? AND d.follow_id=? AND d.user_id=? AND f.user_id=? "
                 "AND f.chat_id=? AND d.expires>?",
                 (parts[2], parts[1], q.from_user.id, q.from_user.id, q.message.chat.id,
                  time.time())).fetchone()
-            if entry and self.module_enabled("downloader", q.message.chat.id) and \
-                    self.store.rate(q.from_user.id, "links", 12):
-                jid = self.store.create_job(q.from_user.id, q.message.chat.id, entry["url"])
-                await self.bot.send_message(q.message.chat.id, "⏳ Preparing your download…",
-                    reply_markup=kb([[("Cancel ✕", f"j:{jid}:cancel")]]))
+            if not entry or not self.module_enabled("downloader", q.message.chat.id):
+                await self.bot.send_message(q.message.chat.id, "⚠️ This follow item is unavailable.")
+                return
+            if not self.store.rate(q.from_user.id, "links", 12):
+                await self.bot.send_message(q.message.chat.id, "⚠️ Please try again shortly.")
+                return
+            kind = str(entry["kind"])
+            if kind in {"bio", "name"}:
+                label = "Bio" if kind == "bio" else "Display name"
+                await self.bot.send_message(q.message.chat.id,
+                    f"👤 <b>@{html.escape(entry['handle'])}</b> · {label} snapshot\n\n"
+                    f"{html.escape(str(entry['value']))}",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                        InlineKeyboardButton(text="🔗 View profile", url=entry["url"])
+                    ]]))
+                return
+            if kind == "avatar":
+                try:
+                    target = Target(entry["platform"], entry["handle"], entry["url"])
+                    snapshot = await asyncio.wait_for(public_profile(target, display_avatar=True), 25)
+                    raw = snapshot.get("avatar")
+                    if not raw:
+                        raise ValueError("no public avatar URL")
+                    photo = await profile_photo(raw)
+                    await self.bot.send_document(q.message.chat.id, photo,
+                        caption=f"👤 @{html.escape(entry['handle'])} · current profile photo")
+                except (ValueError, TimeoutError, OSError, httpx.HTTPError, TelegramBadRequest):
+                    await self.bot.send_message(q.message.chat.id,
+                        "⚠️ The current profile photo is inaccessible. It may require login or have changed.")
+                return
+            if kind == "live":
+                await self.bot.send_message(q.message.chat.id,
+                    "🔴 This is a live stream. A complete video file may not exist until the "
+                    "stream ends. Watch it on the original platform:",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                        InlineKeyboardButton(text="🔗 Open live", url=entry["url"])
+                    ]]))
+                return
+            if kind == "tweets":
+                try:
+                    post = await public_x_post(entry["url"])
+                    if post and not post[1]:
+                        text = f"📝 @{entry['handle']}\n\n{post[0]}"
+                        for offset in range(0, len(text), 3900):
+                            await self.bot.send_message(q.message.chat.id,
+                                text[offset:offset + 3900], parse_mode=None)
+                        return
+                except (ValueError, TimeoutError, httpx.HTTPError):
+                    post = None
+                if post is None and entry["value"]:
+                    # This excerpt was verified when the Follow event was seen.
+                    # It is not advertised as the complete original tweet.
+                    await self.bot.send_message(q.message.chat.id,
+                        f"📝 <b>@{html.escape(entry['handle'])}</b> · saved text excerpt\n\n"
+                        f"{html.escape(str(entry['value']))}\n\n"
+                        "Attempting to fetch original media if available…")
+            jid = self.store.create_job(q.from_user.id, q.message.chat.id, entry["url"])
+            await self.bot.send_message(q.message.chat.id, "⏳ Preparing your download…",
+                reply_markup=kb([[('Cancel ✕', f'j:{jid}:cancel')]]))
             return
         if data.startswith("m:"):
             await acknowledge(q)

@@ -111,7 +111,7 @@ def test_existing_follow_can_change_categories_without_moving_destination(tmp_pa
     saved = follows.db.execute("SELECT * FROM follows WHERE id=?", (follow_id,)).fetchone()
     assert saved["chat_id"] == -100
     assert json.loads(saved["features"]) == ["stories", "bio"]
-    assert saved["mode"] == "media"
+    assert saved["mode"] == "notice"
 
 
 @pytest.mark.asyncio

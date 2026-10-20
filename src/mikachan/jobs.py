@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import html
+import importlib.util
 import json
 import os
 import re
@@ -28,7 +29,7 @@ from aiogram.types import (
 
 from .config import Settings
 from .security import (source, validate_dns, collection, clean_url, extractor_env,
-                       instagram_cookie_args)
+                       site_cookie_args)
 from .store import Store
 from .media import gallery_budget, groups, media_kind, verify
 from .catalog import _Meta, recording_search_alias, resolve_collection, resolve_track
@@ -74,8 +75,16 @@ def extractor_error(url: str, stderr: bytes) -> str:
     """Summarize extractor failures without forwarding untrusted output or URLs."""
     detail = stderr.decode(errors="replace").lower()
     provider = source(url)
-    if any(term in detail for term in ("cookies", "login", "authentication required")):
-        return "This source requires login; anonymous download is unavailable"
+    if any(term in detail for term in ("cookies", "login", "authentication required",
+                                        "sign in", "redirect to login page")):
+        return ("Instagram requires an authorized public session; configure a private "
+                "MIKACHAN_INSTAGRAM_COOKIES_FILE on the VPS" if provider == "instagram"
+                else "This source requires login or verification; anonymous access is unavailable")
+    if provider == "pornhub" and "http error 410" in detail:
+        return "Pornhub rejected the request (HTTP 410); check availability and extractor version"
+    if provider == "pornhub" and ("http error 403" in detail or "forbidden" in detail):
+        return ("Pornhub returned HTTP 403 to this server; check region, account access, "
+                "and the optional private cookie file")
     if provider == "twitter" and "no video could be found" in detail:
         return "This X post contains no downloadable video"
     if provider == "instagram" and "no video formats found" in detail:
@@ -406,9 +415,13 @@ class Worker:
                     x_post = await public_x_post(url)
                 except (ValueError, TimeoutError, httpx.HTTPError):
                     pass
-                if x_post and x_post[0].strip() and not x_post[1]:
-                    await self._deliver_text_post(jid, chat, original_url, context, x_post[0])
-                    return
+                if x_post and x_post[0].strip():
+                    # Attach the original post text to a photo/video tweet too.
+                    context["description"] = x_post[0][:12000]
+                    self.store.set_job_context(jid, context)
+                    if not x_post[1]:
+                        await self._deliver_text_post(jid, chat, original_url, context, x_post[0])
+                        return
             if await self._profile(jid, original_url, chat, job_dir):
                 return
             if collection(url):
@@ -479,12 +492,15 @@ class Worker:
                         paths = [await self._compress_mp3(paths[0], max_bytes)]
             else:
                 instagram_gallery = source(url) == "instagram" and any(
-                    marker in urlsplit(url).path for marker in ("/p/", "/stories/")
+                    marker in urlsplit(url).path for marker in (
+                        "/p/", "/reel/", "/reels/", "/tv/", "/stories/"
+                    )
                 )
                 prefer_gallery = instagram_gallery or (
                     source(url) == "twitter" and "/status/" in urlsplit(url).path
                 )
                 paths = None
+                gallery_problem: str | None = None
                 if source(url) == "instagram" and mode == "audio":
                     try:
                         paths = await self._gallery_public(
@@ -518,7 +534,9 @@ class Worker:
                     if paths is None:
                         try:
                             paths = await self._gallery_public(url, job_dir, max_bytes)
-                        except (ValueError, TimeoutError, httpx.HTTPError):
+                        except (ValueError, TimeoutError, httpx.HTTPError) as gallery_exc:
+                            gallery_problem = (str(gallery_exc) if isinstance(gallery_exc, ValueError)
+                                               else type(gallery_exc).__name__)
                             paths = None
                         if paths is None:
                             for artifact in job_dir.iterdir():
@@ -528,8 +546,9 @@ class Worker:
                     if paths is None:
                         download_limit = (
                             min(240 * 1024 * 1024, max_bytes * 5)
-                            if mode == "audio" or source(url) == "youtube" and mode != "document"
-                            else max_bytes
+                            if mode == "audio" or mode != "document" and source(url) in {
+                                "youtube", "pornhub", "instagram", "twitter", "tiktok"
+                            } else max_bytes
                         )
                         paths = await self._ytdlp(url, job_dir, download_limit, mode)
                 except ValueError as extraction_error:
@@ -563,6 +582,8 @@ class Worker:
                         except (ValueError, TimeoutError, httpx.HTTPError):
                             photos = None
                     if photos is None:
+                        if source(url) == "instagram" and gallery_problem:
+                            raise ValueError(gallery_problem) from extraction_error
                         raise extraction_error
                     paths = photos
             if paths is None:
@@ -574,8 +595,10 @@ class Worker:
             await self._progress(jid, chat, "Processing")
             if mode == "audio" and len(paths) == 1 and paths[0].stat().st_size > max_bytes:
                 paths = [await self._compress_mp3(paths[0], max_bytes)]
-            if source(original_url) == "youtube" and mode != "audio" and len(paths) == 1 \
+            if mode not in {"audio", "document"} and len(paths) == 1 \
                     and paths[0].stat().st_size > max_bytes:
+                if paths[0].suffix.lower() not in {".mp4", ".mkv", ".webm", ".mov"}:
+                    raise ValueError("Media exceeds Telegram's single-file limit")
                 paths = [await self._fit_video(paths[0], max_bytes, mode)]
             if sum(p.stat().st_size for p in paths) > gallery_budget(max_bytes):
                 raise ValueError("gallery exceeds Bot API mode limit")
@@ -781,7 +804,7 @@ class Worker:
         proc = await asyncio.create_subprocess_exec(
             "yt-dlp",
             "--ignore-config",
-            *instagram_cookie_args(url),
+            *site_cookie_args(url),
             *([] if source(url) == "soundcloud" else ["--flat-playlist"]),
             "--playlist-end",
             "300",
@@ -880,7 +903,7 @@ class Worker:
         proc = await asyncio.create_subprocess_exec(
             "gallery-dl",
             "--config-ignore", "--cache-file", ":memory:",
-            *instagram_cookie_args(url),
+            *site_cookie_args(url),
             "-J",
             "--range",
             "1-30",
@@ -966,7 +989,7 @@ class Worker:
             try:
                 proc = await asyncio.create_subprocess_exec(
                     "gallery-dl", "--config-ignore", "--cache-file", ":memory:",
-                    *instagram_cookie_args(url),
+                    *site_cookie_args(url),
                     "-j", "--range", "1-1", avatar_target,
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
                     start_new_session=True, env=extractor_env(),
@@ -1241,7 +1264,7 @@ class Worker:
         return target
 
     async def _fit_video(self, path: Path, max_bytes: int, mode: str) -> Path:
-        """Fit a YouTube video to the selected Bot API upload budget."""
+        """Fit a single video from any supported platform into the Bot API budget."""
         probe = await asyncio.create_subprocess_exec(
             "ffprobe", "-v", "error", "-show_entries", "format=duration",
             "-of", "json", str(path), stdout=asyncio.subprocess.PIPE,
@@ -1420,7 +1443,7 @@ class Worker:
         proc = await asyncio.create_subprocess_exec(
             "gallery-dl",
             "--config-ignore", "--cache-file", ":memory:",
-            *instagram_cookie_args(url),
+            *site_cookie_args(url),
             "-g",
             target,
             stdout=asyncio.subprocess.PIPE,
@@ -1530,19 +1553,19 @@ class Worker:
         proc = await asyncio.create_subprocess_exec(
             "gallery-dl",
             "--config-ignore", "--cache-file", ":memory:",
-            *instagram_cookie_args(url),
+            *site_cookie_args(url),
             *(["-o", "extractor.instagram.audio=merged"] if audio_only else []),
             "-j",
             "--range",
             "1-31",
             url,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
             env=extractor_env(),
         )
         try:
-            stdout, _ = await asyncio.wait_for(proc.communicate(), 45)
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), 45)
         except (TimeoutError, asyncio.CancelledError) as exc:
             import signal
 
@@ -1554,6 +1577,9 @@ class Worker:
                 ) from None
             raise
         if proc.returncode:
+            # Never expose raw extractor stderr, which may include private URLs.
+            if source(url) == "instagram":
+                raise ValueError(extractor_error(url, stderr))
             return None
         try:
             messages = json.loads(stdout)
@@ -1610,7 +1636,10 @@ class Worker:
             sys.executable,
             "-m", "yt_dlp",
             "--ignore-config",
-            *instagram_cookie_args(url),
+            *site_cookie_args(url),
+            # Impersonation needs the optional curl_cffi package to be installed.
+            *(["--impersonate", "chrome"] if source(url) == "pornhub" and
+              importlib.util.find_spec("curl_cffi") is not None else []),
             "--playlist-end",
             "10",
             *(["--concurrent-fragments", "4"] if source(url) == "youtube" else []),

@@ -1,0 +1,7 @@
+MIKACHAN V2 FOLLOW + DOWNLOADER REPAIR
+Base snapshot: Dneeel-Mikachan-06eed20 (user-supplied 2026-10-20)
+Modified by assistant in an isolated working copy, not pushed to GitHub or deployed.
+Review docs/FOLLOW_DOWNLOADER_REPAIR_FA.md before use.
+WARNING: E2E access to Telegram/social sites remains UNVERIFIED.
+All cookies/session data must remain outside the source repository.
+

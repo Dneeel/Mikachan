@@ -53,7 +53,7 @@ async def public_statuses(platform: str, handle: str) -> list[tuple[str, str, st
                else f"https://www.tiktok.com/@{handle}/video/{ident}")
         stamp = item.get("created_timestamp")
         posts.append((int(stamp) if isinstance(stamp, (int, float)) else 0,
-                      kind, url, str(item.get("text") or "")[:300]))
+                      kind, url, str(item.get("text") or "")[:2000]))
     posts.sort(key=lambda item: (item[0], item[2]), reverse=True)
     return [(kind, url, title) for _, kind, url, title in posts[:15]]
 

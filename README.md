@@ -1,8 +1,19 @@
 # Mikachan
 
-**A private Telegram bot with three integrated domains:** Downloader, Community, and Utilities. One aiogram dispatcher, one SQLite database, one bot identity. Access is denied by default: a registered numeric user ID and an approved group are required for group use. Only Owners can interact in a private bot chat.
+**A private Telegram bot with Downloader, Follow, Community, and Utilities.** One aiogram dispatcher, one SQLite database, one bot identity. Access is denied by default: a registered numeric user ID and an approved group are required for group use. Only Owners can interact in a private bot chat.
 
 The active development generation is **`v2`**. The `v1` branch preserves the earlier downloader generation. This repository does not run a general chatbot or respond to ordinary conversation.
+
+## Follow + social repair (local source patch)
+
+This source package contains the Follow repair described in
+[`docs/FOLLOW_DOWNLOADER_REPAIR_FA.md`](docs/FOLLOW_DOWNLOADER_REPAIR_FA.md).
+Announcements have two controls: **Get it** (on-demand fetch, subject to
+source access) and **View original** (direct platform link). Instagram Reels
+are queried separately from Posts; YouTube/TikTok Live checks are experimental.
+Some public providers disallow anonymous access; no source can guarantee
+all stories, live events, handle changes, or public profile data. A successful
+local unit test is not evidence of working live Telegram delivery.
 
 ## Install on a server
 

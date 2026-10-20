@@ -39,7 +39,7 @@ def test_session_binding_and_destination(tmp_path):
     follow_id = follows.save(session)
     row = follows.db.execute("SELECT * FROM follows WHERE id=?", (follow_id,)).fetchone()
     assert row["chat_id"] == -100
-    assert set(json.loads(row["features"])) == {"posts"}
+    assert set(json.loads(row["features"])) == {"posts", "stories", "live", "bio", "name", "avatar"}
     assert follows.remove(follow_id, 43) is False
     assert follows.remove(follow_id, 42) is True
 
@@ -98,11 +98,13 @@ async def test_first_poll_baselines_each_category_and_new_post_notifies(monkeypa
     service = FollowService(store, bot)
     token = service.db.session(42, 42, command_target("instagram alice"))
     service.db.bind(token, 9)
+    service.db.db.execute("UPDATE follow_sessions SET features=? WHERE id=?",
+                          (json.dumps(["posts", "reels"]), token))
     row = service.db.get_session(token, 42, 42, 9)
     fid = service.db.save(row)
     current = [("posts", "https://www.instagram.com/p/old/", "old")]
     async def items(_target, kind="posts"):
-        return list(current)
+        return list(current) if kind == "posts" else []
     monkeypatch.setattr("mikachan.follow.public_items", items)
     row = service.db.db.execute("SELECT * FROM follows WHERE id=?", (fid,)).fetchone()
     await service.check(row)
@@ -120,16 +122,17 @@ async def test_first_poll_baselines_each_category_and_new_post_notifies(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_media_mode_queues_public_post(monkeypatch, tmp_path):
+async def test_media_mode_now_sends_two_button_notice(monkeypatch, tmp_path):
     store = Store(tmp_path / "db.sqlite")
-    class Bot:
-        async def send_message(self, *_args, **_kwargs):
-            raise AssertionError("media mode should queue a job")
-    service = FollowService(store, Bot())
+    bot = type("Bot", (), {"send_message": AsyncMock(
+        return_value=SimpleNamespace(message_id=7))})()
+    service = FollowService(store, bot)
     token = service.db.session(42, 42, command_target("twitter alice"))
     service.db.bind(token, 9)
-    service.db.db.execute("UPDATE follow_sessions SET mode='media' WHERE id=?", (token,))
+    service.db.db.execute("UPDATE follow_sessions SET features=?,mode=? WHERE id=?",
+        (json.dumps(["tweets"]), "media", token))
     fid = service.db.save(service.db.get_session(token, 42, 42, 9))
+    assert service.db.db.execute("SELECT mode FROM follows WHERE id=?", (fid,)).fetchone()[0] == "notice"
     current = [("tweets", "https://x.com/alice/status/1", "hello")]
     async def items(_target, kind="posts"):
         return list(current)
@@ -139,9 +142,9 @@ async def test_media_mode_queues_public_post(monkeypatch, tmp_path):
     current.insert(0, ("tweets", "https://x.com/alice/status/2", "next"))
     row = service.db.db.execute("SELECT * FROM follows WHERE id=?", (fid,)).fetchone()
     await service.check(row)
-    jobs = store.jobs(42)
-    assert len(jobs) == 1
-    assert jobs[0]["url"] == "https://x.com/alice/status/2"
+    assert store.jobs(42) == []
+    assert bot.send_message.await_count == 1
+    assert len(bot.send_message.await_args.kwargs["reply_markup"].inline_keyboard[0]) == 2
 
 
 @pytest.mark.asyncio
@@ -153,11 +156,12 @@ async def test_media_follow_outbox_retries_only_proven_failure(tmp_path):
     service.db.bind(token, 9)
     service.db.db.execute("UPDATE follow_sessions SET mode='media' WHERE id=?", (token,))
     fid = service.db.save(service.db.get_session(token, 42, 42, 9))
-    row = service.db.db.execute("SELECT * FROM follows WHERE id=?", (fid,)).fetchone()
     url = "https://www.tiktok.com/@alice/video/1234567890123456789"
     key = f"posts:{url}"
-    await service.deliver(row, target, "posts", url, "new", key)
-    await service.deliver(row, target, "posts", url, "new", key)
+    # Legacy queued jobs from an older release must still be retried safely.
+    first = store.create_job(42, 42, url)
+    service.db.db.execute("INSERT INTO follow_media_jobs VALUES (?,?,?,?,?,?)",
+                          (fid, key, url, first, 1, 0))
     assert not store.db.in_transaction
     assert len(store.jobs(42)) == 1
     first = store.jobs(42)[0]["id"]
@@ -206,6 +210,8 @@ async def test_posts_published_during_first_provider_failure_are_not_lost(monkey
     service = FollowService(store, bot)
     token = service.db.session(42, 42, command_target("twitter alice"))
     service.db.bind(token, 9)
+    service.db.db.execute("UPDATE follow_sessions SET features=? WHERE id=?",
+                          (json.dumps(["tweets"]), token))
     fid = service.db.save(service.db.get_session(token, 42, 42, 9))
     recent = ("tweets", "https://x.com/alice/status/2111998764345069830", "new")
     assert _post_timestamp(recent[1]) == 1792374719.116
@@ -213,7 +219,7 @@ async def test_posts_published_during_first_provider_failure_are_not_lost(monkey
                           (1792374000, fid))
     monkeypatch.setattr("mikachan.follow.public_items", AsyncMock(side_effect=ValueError("blocked")))
     row = service.db.db.execute("SELECT * FROM follows WHERE id=?", (fid,)).fetchone()
-    with pytest.raises(ValueError, match="no public data"):
+    with pytest.raises(ValueError, match="no public source accessible"):
         await service.check(row)
     monkeypatch.setattr("mikachan.follow.public_items", AsyncMock(return_value=[recent]))
     row = service.db.db.execute("SELECT * FROM follows WHERE id=?", (fid,)).fetchone()

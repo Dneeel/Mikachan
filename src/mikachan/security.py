@@ -21,22 +21,34 @@ def extractor_env() -> dict[str, str]:
     return result
 
 
-def instagram_cookie_args(url: str) -> list[str]:
-    """Opt-in Instagram cookies for extractors; never load ambient browser state."""
-    if source(url) != "instagram":
+def site_cookie_args(url: str) -> list[str]:
+    """Use only explicitly configured, private operator-owned Netscape cookies.
+
+    Never load cookies from installed browsers or pass a cookie jar to a different
+    provider. The bot runs without cookies when this is not configured.
+    """
+    provider = source(url)
+    setting = {"instagram": "MIKACHAN_INSTAGRAM_COOKIES_FILE",
+               "pornhub": "MIKACHAN_PORNHUB_COOKIES_FILE"}.get(provider)
+    if not setting:
         return []
-    raw = os.environ.get("MIKACHAN_INSTAGRAM_COOKIES_FILE", "").strip()
+    raw = os.environ.get(setting, "").strip()
     if not raw:
         return []
     path = Path(raw).expanduser()
     try:
         info = path.stat()
     except OSError:
-        raise ValueError("Instagram cookie file is unavailable") from None
+        raise ValueError(f"{provider} cookie file is unavailable") from None
     if (not path.is_file() or path.is_symlink() or info.st_uid != os.geteuid()
             or info.st_mode & 0o077 or not info.st_mode & 0o400):
-        raise ValueError("Instagram cookie file must be a private regular file owned by the bot")
+        raise ValueError(f"{provider} cookie file must be private and owned by the bot user")
     return ["--cookies", str(path.resolve())]
+
+
+def instagram_cookie_args(url: str) -> list[str]:
+    """Backward-compatible name used by public metadata extractors."""
+    return site_cookie_args(url)
 
 
 def allowed(user_id: int, chat_id: int, chat_type: str, ids: set[int], private_only: bool,
