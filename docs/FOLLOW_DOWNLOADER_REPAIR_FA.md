@@ -64,4 +64,3 @@
 - gallery-dl: https://github.com/mikf/gallery-dl
 - yt-dlp FAQ: https://github.com/yt-dlp/yt-dlp/wiki/FAQ
 - Pornhub 403/410 reports: https://github.com/yt-dlp/yt-dlp/issues/16860 و https://github.com/yt-dlp/yt-dlp/issues/16729
-

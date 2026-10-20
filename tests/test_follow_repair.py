@@ -165,4 +165,3 @@ async def test_revoked_private_delivery_does_not_erase_follow(tmp_path):
         service.running = False
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
-

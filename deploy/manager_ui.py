@@ -1,537 +1,644 @@
-"""Keyboard-friendly Mikachan server dashboard and guided first-run setup."""
+"""Minimal, keyboard-only Mikachan terminal control panel.
+
+Only uses Python's standard-library curses module. The independent deployment
+manager remains operational from CLI if the screen or bot runtime is broken.
+"""
 
 from __future__ import annotations
 
-import asyncio
+import collections
+import curses
 import json
-from typing import Any
+import os
+import queue
+import re
+import textwrap
+import threading
+from dataclasses import dataclass
+from typing import Any, Callable
 
-from textual.app import App, ComposeResult
-from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.screen import ModalScreen
-from textual.widgets import Button, Footer, Header, Input, RichLog, Static
+from deploy.manager import BRANCH, EDITABLE, PRIVATE_KEYS, Manager, ManagerError
 
-from deploy.manager import EDITABLE, ENV_KEYS, PRIVATE_KEYS, Manager, ManagerError
+BANNER = '    ...     ..      ..        .          ..                                                                                               \n  x*8888x.:*8888: -"888:     @88>  < .z@8"`                              .uef^"                                              .x~~"*Weu.   \n X   48888X `8888H  8888     %8P    !@88E                              :d88E                      u.    u.                  d8Nu.  9888c  \nX8x.  8888X  8888X  !888>     .     \'888E   u          u           .   `888E             u      x@88k u@88c.                88888  98888  \nX8888 X8888  88888   "*8%-  .@88u    888E u@8NL     us888u.   .udR88N   888E .z8k     us888u.  ^"8888""8888"          .o@8  "***"  9888%  \n\'*888!X8888> X8888  xH8>   \'\'888E`   888E`"88*"  .@88 "8888" <888\'888k  888E~?888L .@88 "8888"   8888  888R       .o@8888%       ..@8*"   \n  `?8 `8888  X888X X888>     888E    888E .dN.   9888  9888  9888 \'Y"   888E  888E 9888  9888    8888  888R   .o@8888%"       ````"8Weu   \n  -^  \'888"  X888  8888>     888E    888E~8888   9888  9888  9888       888E  888E 9888  9888    8888  888R  8888R"          ..    ?8888L \n   dx \'88~x. !88~  8888>     888E    888E \'888&  9888  9888  9888       888E  888E 9888  9888    8888  888R  "*8888bu.     :@88N   \'8888N \n .8888Xf.888x:!    X888X.:   888&    888E  9888. 9888  9888  ?8888u../  888E  888E 9888  9888   "*88*" 8888"    ^"*8888bu. *8888~  \'8888F \n:""888":~"888"     `888*"    R888" \'"888*" 4888" "888*""888"  "8888P\'  m888N= 888> "888*""888"    ""   \'Y"          ^%*888 \'*8"`   9888%  \n    "~\'    "~        ""       ""      ""    ""    ^Y"   ^Y\'     "P\'     `Y"   888   ^Y"   ^Y\'                           ^%   `~===*%"`    \n                                                                             J88"                                                         \n                                                                             @%                                                           \n                                                                           :"                                                             '
+COMPACT_BANNER = (
+    ' __  __ ___ _  __    _    ____ _   _    _    _   _',
+    '|  \\/  |_ _| |/ /   / \\  / ___| | | |  / \\  | \\ | |',
+    "| |\\/| || || ' /   / _ \\| |   | |_| | / _ \\ |  \\| |",
+    '| |  | || || . \\  / ___ \\ |___|  _  |/ ___ \\| |\\  |',
+    '|_|  |_|___|_|\\_\\/_/   \\_\\____|_| |_/_/   \\_\\_| \\_|',
+)
+# Used for extremely narrow or shallow SSH terminals; never crop mid-character.
+TINY_BANNER = ("[ M I K A C H A N ]",)
 
-
-SETTING_HELP = {
-    "BOT_TOKEN": "Telegram BotFather token. Required to connect the bot. Changing it switches bot identity.",
-    "OWNER_TELEGRAM_ID": "Your numeric Telegram user ID. Grants global owner controls.",
-    "ALLOWED_TELEGRAM_IDS": "Legacy numeric seed IDs, separated by commas; Owner required, up to four here. Register further named people in private /settings.",
-    "ALLOWED_GROUP_IDS": "Negative numeric group IDs, separated by commas. Members still need user access.",
-    "PRIVATE_CHATS_ONLY": "Legacy setting retained for config compatibility. v2 permits only Owners privately; registered people may use approved groups.",
-    "MOMMY_TELEGRAM_IDS": "Optional authorized numeric IDs for the separate fictional personality mode.",
-    "BOT_API_MODE": "public is the default. local requires a separately installed Bot API server.",
-    "LOCAL_BOT_API_URL": "Loopback URL for an explicitly configured local Bot API server.",
-    "TELEGRAM_API_ID": "Numeric API ID from my.telegram.org for your Telegram user account.",
-    "TELEGRAM_API_HASH": "Private API hash paired with that API ID. Never send it to the bot.",
-    "COINPJ_SESSION": "Optional separate user session; CoinPJ uses USERBOT_SESSION when this is blank.",
-    "USERBOT_SESSION": "Secret user session for /url, large uploads and currency; root QR login saves it automatically.",
-    "USERBOT_STAGING_CHAT_ID": "Private channel/group ID accessible to both the bot and the user account. Never use a public chat.",
-    "SPOTIFY_CLIENT_ID": "Optional Spotify catalog browsing credential.",
-    "SPOTIFY_CLIENT_SECRET": "Optional Spotify catalog browsing secret.",
-    "NASA_API_KEY": "Optional NASA APOD key; DEMO_KEY is used otherwise.",
-    "NAVASAN_API_KEY": "Optional direct Iranian market feed credential.",
-    "NAVASAN_REFRESH_SECONDS": "Market refresh interval; default 28800 seconds.",
-    "TRANSLATION_API_URL": "Optional owner-chosen translation provider URL.",
-    "TRANSLATION_API_KEY": "Optional translation provider secret.",
+SETTING_GROUPS: dict[str, tuple[str, ...]] = {
+    "Identity & Access": ("BOT_TOKEN", "OWNER_TELEGRAM_ID", "ALLOWED_TELEGRAM_IDS",
+                          "ALLOWED_GROUP_IDS", "PRIVATE_CHATS_ONLY", "MOMMY_TELEGRAM_IDS"),
+    "Telegram Userbot": ("TELEGRAM_API_ID", "TELEGRAM_API_HASH", "USERBOT_SESSION",
+                         "COINPJ_SESSION", "USERBOT_STAGING_CHAT_ID"),
+    "Translation & Data": ("TRANSLATION_API_URL", "TRANSLATION_API_KEY", "NASA_API_KEY",
+                           "NAVASAN_API_KEY", "NAVASAN_REFRESH_SECONDS"),
+    "Music": ("SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET"),
+    "Download & Limits": ("MAX_ACTIVE_DOWNLOADS", "MAX_ACTIVE_PER_USER", "MAX_LINKS_PER_MESSAGE",
+                          "SEARCH_PAGE_SIZE", "SEARCH_SESSION_TTL_SECONDS", "CONFIRMATION_TTL_SECONDS",
+                          "MIKACHAN_INSTAGRAM_COOKIES_FILE", "MIKACHAN_PORNHUB_COOKIES_FILE"),
+    "Bot API": ("BOT_API_MODE", "LOCAL_BOT_API_URL"),
 }
 
-SECTIONS = {
-    "overview": [("Refresh dashboard", "status"), ("Guided setup", "setup"),
-                 ("Live diagnostics", "diagnostics")],
-    "deployment": [("Install or reinstall v2", "install"), ("Available versions", "versions"),
-                   ("Update active branch", "update"),
-                   ("Switch version or commit", "switch"), ("Rollback code and data", "rollback"),
-                   ("Preview release cleanup", "prune-preview"), ("Prune old releases", "prune")],
-    "service": [("Start", "start"), ("Stop", "stop"), ("Restart", "restart"),
-                ("Queue activity", "queue"), ("Recent logs", "logs")],
-    "configuration": [("Refresh configuration", "config"),
-                      ("Pending Owner requests", "owner-requests"),
-                      ("Approve Owner request", "owner-approve")],
-    "data": [("Storage overview", "storage"), ("Create backup", "backup"),
-             ("List backups", "backups"), ("Restore backup", "restore"),
-             ("Clear interrupted media", "cleanup")],
-    "maintenance": [("Host preflight", "preflight"), ("Install host tools", "deps"),
-                    ("Live diagnostics", "diagnostics"), ("Recover interrupted update", "recover"),
-                    ("Remove bot code", "remove"), ("Delete managed project", "purge")],
-}
-
-SECTION_LABELS = {
-    "overview": "01  Overview", "deployment": "02  Deployment",
-    "service": "03  Service", "configuration": "04  Configuration",
-    "data": "05  Data & Storage", "maintenance": "06  Maintenance",
-}
-
-SETTING_GROUPS = {
-    "Identity and access": ("BOT_TOKEN", "OWNER_TELEGRAM_ID", "ALLOWED_TELEGRAM_IDS",
-                            "ALLOWED_GROUP_IDS", "PRIVATE_CHATS_ONLY", "MOMMY_TELEGRAM_IDS"),
-    "Telegram user account · userbot": ("TELEGRAM_API_ID", "TELEGRAM_API_HASH",
-                                        "USERBOT_SESSION", "USERBOT_STAGING_CHAT_ID",
-                                        "COINPJ_SESSION"),
-    "Information and language": ("NASA_API_KEY", "NAVASAN_API_KEY",
-                                 "NAVASAN_REFRESH_SECONDS", "TRANSLATION_API_URL",
-                                 "TRANSLATION_API_KEY"),
-    "Music catalog": ("SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET"),
-    "Limits": ("MAX_ACTIVE_DOWNLOADS", "MAX_ACTIVE_PER_USER", "MAX_LINKS_PER_MESSAGE",
-               "SEARCH_PAGE_SIZE", "SEARCH_SESSION_TTL_SECONDS", "CONFIRMATION_TTL_SECONDS"),
-    "Advanced Bot API": ("BOT_API_MODE", "LOCAL_BOT_API_URL"),
-    "Network and storage": ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "SSL_CERT_FILE",
-                            "DATA_DIR", "FREESTYLE_API_KEY"),
-}
+SENSITIVE_WORDS = ("TOKEN", "SECRET", "HASH", "SESSION", "KEY", "COOKIE", "PASSWORD")
 
 
-class Fields(ModalScreen[dict[str, str] | None]):
-    DEFAULT_CSS = """
-    Fields { align: center middle; background: #080e19 85%; }
-    #dialog { width: 70; max-width: 95%; height: auto; max-height: 90%;
-              background: #1b293d; border: round #55d6c2; padding: 1 2; }
-    #dialog-title { text-style: bold; color: #f3f6fb; margin-bottom: 1; }
-    #guidance { color: #b9cee2; margin-bottom: 1; }
-    .field-label { color: #d4e0ec; margin-top: 1; }
-    Input { margin-bottom: 1; }
-    #dialog-buttons { height: 3; margin-top: 1; }
-    #dialog-buttons Button { margin-right: 1; }
-    """
-
-    def __init__(self, title: str, fields: list[tuple[str, str, bool]],
-                 guidance: str = "", defaults: dict[str, str] | None = None) -> None:
-        super().__init__()
-        self.title_text = title
-        self.fields = fields
-        self.guidance = guidance
-        self.defaults = defaults or {}
-
-    def compose(self) -> ComposeResult:
-        with VerticalScroll(id="dialog"):
-            yield Static(self.title_text, id="dialog-title")
-            if self.guidance:
-                yield Static(self.guidance, id="guidance")
-            for name, label, secret in self.fields:
-                yield Static(label, classes="field-label")
-                yield Input(value=self.defaults.get(name, ""), id=f"field-{name}",
-                            password=secret, placeholder="Optional — press Enter to skip" if
-                            "optional" in label.lower() else "")
-            with Horizontal(id="dialog-buttons"):
-                yield Button("Continue", id="confirm", variant="primary")
-                yield Button("Cancel", id="cancel")
-
-    def on_mount(self) -> None:
-        if self.fields:
-            self.query_one(f"#field-{self.fields[0][0]}", Input).focus()
-
-    def on_input_submitted(self, _: Input.Submitted) -> None:
-        self.submit()
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "cancel":
-            self.dismiss(None)
-        elif event.button.id == "confirm":
-            self.submit()
-
-    def submit(self) -> None:
-        self.dismiss({name: self.query_one(f"#field-{name}", Input).value.strip()
-                      for name, _, _ in self.fields})
+def is_secret(key: str) -> bool:
+    return key in PRIVATE_KEYS or any(word in key.upper() for word in SENSITIVE_WORDS)
 
 
-class MikachanPanel(App[None]):
-    TITLE = "MIKACHAN  /  CONTROL"
-    SUB_TITLE = "One installation · one bot"
-    BINDINGS = [("q", "quit", "Quit"), ("r", "refresh", "Refresh"),
-                ("1", "section('overview')", "Overview"),
-                ("2", "section('deployment')", "Deploy"),
-                ("3", "section('service')", "Service"),
-                ("4", "section('configuration')", "Config"),
-                ("5", "section('data')", "Data"),
-                ("6", "section('maintenance')", "Maintain")]
-    CSS = """
-    Screen { background: #0b111c; color: #e7edf5; }
-    Header { background: #152334; color: #edf4fa; }
-    #body { height: 1fr; }
-    #nav { width: 27; min-width: 23; background: #111e2d; padding: 1;
-           border-right: solid #28445a; }
-    #brand { text-style: bold; color: #67dec5; margin-bottom: 1; }
-    #nav-hint { color: #819db1; margin-bottom: 2; }
-    #nav Button { width: 100%; margin-bottom: 1; background: #1a3044;
-                  color: #d4e6ee; border: none; text-align: left; }
-    #nav Button.-active { background: #225564; color: #f5fffc; text-style: bold; }
-    #nav Button:hover { background: #2b6571; }
-    #main { padding: 1 2; }
-    #section-title { height: 2; text-style: bold; color: #67dec5; }
-    #status { height: 10; border: round #345b6e; padding: 0 2;
-              background: #15283b; color: #edf4fb; }
-    #actions { height: 1fr; margin-top: 1; }
-    #actions .action-row { height: 4; }
-    #actions .action-row Button { width: 1fr; margin-right: 1; margin-bottom: 1;
-                                  background: #203d52; color: #e7f1f7; border: none;
-                                  content-align: left middle; }
-    #actions Button { width: 100%; margin-bottom: 1;
-                      background: #203d52; color: #e7f1f7; border: none;
-                      content-align: left middle; }
-    #actions Button:hover { background: #2e6570; }
-    #actions .field-label { color: #67dec5; text-style: bold; margin-top: 1; }
-    #activity { height: 1; color: #a5c8d6; }
-    #log { height: 6; border: round #2c4d5e; padding: 0 1;
-           background: #0e1b2a; color: #d4e2ee; }
-    Footer { background: #152334; }
-    """
+def safe_setting_value(key: str, value: str) -> str:
+    if is_secret(key):
+        return "configured" if value and value != "(set)" else "not configured" if not value else "configured"
+    return value if value else "not set"
 
-    def __init__(self) -> None:
-        super().__init__()
-        self.busy = False
-        self.section = "overview"
-        self.setup_data: dict[str, str] = {}
-        self.setup_step = 0
-        self.setup_existing = False
-        self.current_config: dict[str, str] = {}
 
-    def compose(self) -> ComposeResult:
-        yield Header(show_clock=True)
-        with Horizontal(id="body"):
-            with Vertical(id="nav"):
-                yield Static("◈  MIKACHAN", id="brand")
-                yield Static("SERVER CONTROL  ·  v2+", id="nav-hint")
-                for key, label in SECTION_LABELS.items():
-                    yield Button(label, id=f"nav-{key}")
-            with Vertical(id="main"):
-                yield Static("OVERVIEW", id="section-title")
-                yield Static("Checking installation…", id="status")
-                yield VerticalScroll(id="actions")
-                yield Static("Ready", id="activity")
-                yield RichLog(id="log", highlight=True, markup=False, auto_scroll=True)
-        yield Footer()
+def banner_lines(width: int, height: int) -> tuple[str, ...]:
+    """Prefer the exact supplied art; preserve navigation in small terminals."""
+    original = tuple(BANNER.splitlines())
+    if width >= max(map(len, original)) + 2 and height >= len(original) + 11:
+        return original
+    if width >= max(map(len, COMPACT_BANNER)) + 2 and height >= 22:
+        return COMPACT_BANNER
+    return TINY_BANNER
 
-    def on_mount(self) -> None:
-        self.show_section("overview")
-        self._launch("status")
 
-    def action_refresh(self) -> None:
-        self._launch("status")
+def clip(value: Any, width: int) -> str:
+    if width <= 0:
+        return ""
+    s = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", str(value))
+    s = s.replace("\n", " ").replace("\r", " ").replace("\x1b", "")
+    return s if len(s) <= width else s[:max(0, width - 1)] + "…"
 
-    def action_section(self, section: str) -> None:
-        if section in SECTIONS and not self.busy:
-            self.show_section(section)
 
-    def show_section(self, section: str, *, refresh: bool = True) -> None:
-        self.section = section
-        self.query_one("#section-title", Static).update(SECTION_LABELS[section].upper())
-        for key in SECTIONS:
-            self.query_one(f"#nav-{key}", Button).set_class(key == section, "-active")
-        actions = self.query_one("#actions", VerticalScroll)
-        actions.remove_children()
-        section_actions = SECTIONS[section]
-        for index in range(0, len(section_actions), 2):
-            actions.mount(Horizontal(*(
-                Button(label, id=f"action-{action}")
-                for label, action in section_actions[index:index + 2]), classes="action-row"))
-        if section == "configuration":
-            for group, keys in SETTING_GROUPS.items():
-                actions.mount(Static(group.upper(), classes="field-label"))
-                for key in keys:
-                    if key not in ENV_KEYS:
-                        continue
-                    value = self.current_config.get(key, "")
-                    if key in EDITABLE:
-                        actions.mount(Button(f"{key}   {value or '—'}", id=f"setting-{key}"))
-                    else:
-                        actions.mount(Static(f"{key}   {value or '—'}"))
-            if refresh:
-                self._launch("config")
+def format_result(result: Any) -> list[str]:
+    if isinstance(result, (dict, list)):
+        return json.dumps(result, ensure_ascii=False, indent=2, default=str).splitlines()
+    return str(result).splitlines() or ["(no result)"]
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if self.busy or not event.button.id:
-            return
-        if event.button.id.startswith("nav-"):
-            self.show_section(event.button.id[4:])
-            return
-        if event.button.id.startswith("setting-"):
-            self._setting_selected({"key": event.button.id.removeprefix("setting-")})
-            return
-        if not event.button.id.startswith("action-"):
-            return
-        action = event.button.id[7:]
-        if action == "setup":
-            self.begin_setup()
-            return
-        if action == "set":
-            self.push_screen(Fields("Change one setting", [("key", "Setting name", False)],
-                                    "Enter the name shown in View all settings."),
-                             callback=self._setting_selected)
-            return
-        forms: dict[str, tuple[str, list[tuple[str, str, bool]], str]] = {
-            "switch": ("Switch release", [("branch", "Major branch (for example v2)", False),
-                        ("commit", "Optional full commit SHA", False)],
-                       "A snapshot is saved before activation."),
-            "rollback": ("Rollback code and data", [("confirmation", "Type ROLLBACK", False)],
-                         "Restores the previous database snapshot. Later changes are lost."),
-            "prune": ("Remove old releases", [("confirmation", "Type PRUNE", False)],
-                      "Keeps at least the three most recent release commits."),
-            "restore": ("Restore snapshot", [("snapshot", "Snapshot ID", False),
-                        ("confirmation", "Type RESTORE", False)],
-                       "An undo snapshot is saved first."),
-            "owner-approve": ("Approve Owner request",
-                [("token", "Pending request token", False),
-                 ("target", "Target numeric user ID", False),
-                 ("confirmation", "Type APPROVE OWNER", False)],
-                "Independent VPS operator approval. A snapshot is saved before the role change."),
-            "remove": ("Remove bot code", [("confirmation", "Type REMOVE MIKACHAN", False)],
-                       "Keeps configuration, database and backups."),
-            "purge": ("Delete managed project", [("confirmation", "Type PURGE MIKACHAN", False)],
-                      "Deletes bot code, configuration, database and backups permanently."),
+
+@dataclass(frozen=True)
+class Entry:
+    label: str
+    action: str
+    payload: Any = None
+
+
+@dataclass
+class Page:
+    title: str
+    entries: list[Entry]
+    selected: int = 0
+    offset: int = 0
+    kind: str = "menu"
+    text: list[str] | None = None
+
+
+class MikachanMenu:
+    """A self-contained up/down/enter navigator around the existing Manager."""
+
+    def __init__(self, manager_factory: Callable[..., Manager] = Manager):
+        self.manager_factory = manager_factory
+        self.pages = [self._root_page()]
+        self.notifications: collections.deque[str] = collections.deque(maxlen=8)
+        self.events: queue.SimpleQueue[tuple[str, Any]] = queue.SimpleQueue()
+        self.running = True
+        self.worker: threading.Thread | None = None
+        self.status: dict[str, Any] = {}
+        self.form_label: str | None = None
+        self.form_value = ""
+        self.form_secret = False
+        self.form_callback: Callable[[str], None] | None = None
+        self.form_guidance = ""
+        self.state: dict[str, Any] = {}
+        self._pending_result: str | None = None
+
+    @property
+    def page(self) -> Page:
+        return self.pages[-1]
+
+    def _root_page(self) -> Page:
+        return Page("MAIN MENU", [
+            Entry("Bot & Health", "go:bot"),
+            Entry("Releases & Updates", "go:releases"),
+            Entry("Backups & Recovery", "go:backups"),
+            Entry("Settings & Access", "go:settings"),
+            Entry("Host & Maintenance", "go:host"),
+            Entry("Exit", "quit"),
+        ])
+
+    @staticmethod
+    def submenu(which: str) -> Page:
+        menus: dict[str, tuple[str, list[tuple[str, str]]]] = {
+            "bot": ("BOT & HEALTH", [
+                ("Service status", "op:status"), ("Start bot", "op:start"),
+                ("Stop bot", "confirm:stop"), ("Restart bot", "op:restart"),
+                ("Queue activity", "op:queue"), ("Recent logs", "op:logs"),
+                ("Live diagnostics", "op:diagnostics"),
+            ]),
+            "releases": ("RELEASES & UPDATES", [
+                ("Available branches / Select version", "op:versions"),
+                ("Update active branch", "confirm:update"),
+                ("Switch to a specific commit", "input:commit_branch"),
+                ("Rollback code + data", "confirm:rollback"),
+                ("Preview release cleanup", "op:prune-preview"),
+                ("Prune old releases", "confirm:prune"),
+            ]),
+            "backups": ("BACKUPS & RECOVERY", [
+                ("Create a backup", "op:backup"),
+                ("Browse / restore backups", "op:backups"),
+                ("Storage overview", "op:storage"),
+                ("Recover interrupted update", "confirm:recover"),
+                ("Clear interrupted media", "confirm:cleanup"),
+            ]),
+            "settings": ("SETTINGS & ACCESS", [
+                ("Guided initial setup", "setup"),
+                ("Edit settings", "go:categories"),
+                ("Review pending co-owner requests", "op:owner-requests"),
+                ("Configuration summary", "op:config"),
+            ]),
+            "host": ("HOST & MAINTENANCE", [
+                ("Host preflight", "op:preflight"),
+                ("Install missing host tools", "confirm:deps"),
+                ("Install bot release (choose version)", "op:versions"),
+                ("Remove bot code (keep data)", "confirm:remove"),
+                ("Permanently delete managed project", "confirm:purge"),
+            ]),
         }
-        if action in forms:
-            title, fields, guidance = forms[action]
-            self.push_screen(Fields(title, fields, guidance),
-                             callback=lambda result: self._submitted(action, result))
+        title, operations = menus[which]
+        return Page(title, [Entry(*item) for item in operations] + [Entry("Back", "back")])
+
+    def push(self, page: Page) -> None:
+        self.pages.append(page)
+
+    def back(self) -> None:
+        if self.form_label is not None:
+            self.close_form()
+        elif len(self.pages) > 1:
+            self.pages.pop()
+            if self.page.title in (name.upper() for name in SETTING_GROUPS):
+                name = next(name for name in SETTING_GROUPS if name.upper() == self.page.title)
+                try: self.state["config"] = self.manager_factory().config()
+                except (ManagerError, OSError, ValueError): pass
+                config = self.state.get("config", {})
+                self.page.entries = [Entry(f"{key}  :  {safe_setting_value(key, config.get(key, ''))}",
+                                           "setting", key) for key in SETTING_GROUPS[name]
+                                     if key in EDITABLE] + [Entry("Back", "back")]
         else:
-            self._launch(action)
+            self.running = False
 
-    def begin_setup(self) -> None:
-        manager = Manager()
-        try:
-            state = manager.status()
-            if not state.get("installed"):
-                self.query_one("#log", RichLog).write("Install a v2 release in Deployment first.")
-                return
-            self.setup_existing = state.get("config", False)
-        except ManagerError as exc:
-            self.query_one("#log", RichLog).write(f"Error: {exc}")
-            return
-        if self.setup_existing:
-            self.push_screen(Fields("Run setup again?", [("confirmation", "Type SETUP", False)],
-                                    "Changing bot identity or owner may interrupt existing access. "
-                                    "Mikachan saves a database and configuration snapshot first. "
-                                    "Your existing data is retained."),
-                             callback=self._setup_confirmed)
-        else:
-            self._setup_confirmed({"confirmation": "SETUP"})
+    def notify(self, value: str) -> None:
+        self.notifications.append(value)
 
-    def _setup_confirmed(self, result: dict[str, str] | None) -> None:
-        if not result or result.get("confirmation") != "SETUP":
-            return
-        self.setup_data = {}
-        self.setup_step = 0
-        self._next_setup()
+    def _status_line(self) -> str:
+        if not self.status:
+            return "SERVER: status not checked"
+        if not self.status.get("installed"):
+            return "SERVER: not installed"
+        state = self.status.get("service", "unknown")
+        branch = self.status.get("branch", "?")
+        sha = self.status.get("commit", "")[:12]
+        return f"SERVER: {state.upper()}  |  {branch}@{sha}  |  {'OK' if self.status.get('consistent') else 'INSPECT'}"
 
-    def _next_setup(self) -> None:
-        steps = [
-            ("1 / 6  ·  Connect Telegram", "token", "Bot token", True,
-             "Required. Create or select a bot with @BotFather. The token identifies this bot; "
-             "it is stored in a private server file and hidden in this panel."),
-            ("2 / 6  ·  Choose owner", "owner", "Owner numeric Telegram user ID", False,
-             "Required. This numeric ID grants global owner controls. A username is not accepted."),
-            ("3 / 6  ·  Allow users", "users", "Optional additional numeric user IDs", False,
-             "Press Enter to keep access owner-only. Separate multiple IDs with commas; "
-             "the owner is automatically included. Maximum four users total."),
-            ("4 / 6  ·  Allow groups", "groups", "Optional negative group IDs", False,
-             "Press Enter for private chats only. Every group member still needs individual access."),
-            ("5 / 6  ·  Telegram user account", "api_id", "Optional Telegram API ID", False,
-             "Get your numeric API ID at my.telegram.org. This is for the userbot account, "
-             "not the BotFather token. Leave both API fields blank to skip userbot setup."),
-            ("6 / 6  ·  Telegram user account", "api_hash", "Optional Telegram API Hash", True,
-             "Paste the API Hash paired with your API ID. It is masked and stored privately. "
-             "After setup, scan the QR shown by sudo /opt/Mikachan/current/.venv/bin/"
-             "mikachan userbot-login in private SSH."),
-        ]
-        if self.setup_step == len(steps):
-            api_id = self.setup_data.get("api_id", "")
-            api_hash = self.setup_data.get("api_hash", "")
-            if bool(api_id) != bool(api_hash):
-                self.query_one("#log", RichLog).write(
-                    "Enter both Telegram API ID and Hash, or leave both blank.")
-                self.setup_step = 4
-                self._next_setup()
-                return
-            if api_id and (not api_id.isascii() or not api_id.isdigit() or int(api_id) <= 0):
-                self.query_one("#log", RichLog).write("Telegram API ID must be a positive number.")
-                self.setup_step = 4
-                self._next_setup()
-                return
-            owner = self.setup_data["owner"]
-            users = self.setup_data.get("users", "")
-            settings = {"BOT_TOKEN": self.setup_data["token"],
-                        "OWNER_TELEGRAM_ID": owner,
-                        "ALLOWED_TELEGRAM_IDS": ",".join(filter(None, (owner, users))),
-                        "ALLOWED_GROUP_IDS": self.setup_data.get("groups", "")}
-            if api_id:
-                settings.update({"TELEGRAM_API_ID": api_id, "TELEGRAM_API_HASH": api_hash})
-            self._launch("setup", settings)
-            self.setup_data = {}
-            return
-        title, name, label, secret, guidance = steps[self.setup_step]
-        self.push_screen(Fields(title, [(name, label, secret)], guidance),
-                         callback=lambda result: self._setup_answer(name, result))
+    def open_form(self, label: str, callback: Callable[[str], None], *, secret: bool = False,
+                  guidance: str = "", default: str = "") -> None:
+        self.form_label = label
+        self.form_callback = callback
+        self.form_secret = secret
+        self.form_guidance = guidance
+        self.form_value = default
 
-    def _setup_answer(self, name: str, result: dict[str, str] | None) -> None:
-        if result is None:
-            self.setup_data = {}
-            return
-        if not result[name] and name in {"token", "owner"}:
-            self.query_one("#log", RichLog).write("This step is required.")
-            self._next_setup()
-            return
-        self.setup_data[name] = result[name]
-        self.setup_step += 1
-        self._next_setup()
+    def close_form(self) -> None:
+        self.form_label = None
+        self.form_value = ""
+        self.form_callback = None
+        self.form_secret = False
+        self.form_guidance = ""
 
-    def _setting_selected(self, result: dict[str, str] | None) -> None:
-        if not result:
-            return
-        key = result["key"].upper()
+    def submit_form(self) -> None:
+        callback, answer = self.form_callback, self.form_value.strip()
+        self.close_form()
+        if callback:
+            callback(answer)
+
+    def _confirm(self, action: str, payload: Any = None) -> None:
+        words = {
+            "stop": "STOP", "update": "UPDATE", "switch": "SWITCH", "rollback": "ROLLBACK",
+            "prune": "PRUNE", "restore": "RESTORE", "recover": "RECOVER", "cleanup": "CLEAN",
+            "deps": "INSTALL TOOLS", "install": "INSTALL", "remove": "REMOVE MIKACHAN",
+            "purge": "PURGE MIKACHAN", "owner-approve": "APPROVE OWNER", "setup": "SETUP",
+        }
+        warnings = {
+            "stop": "Stops all bot responses until restarted.",
+            "update": "Installs latest checked commit on the ACTIVE branch. Saves snapshot first.",
+            "switch": f"Activates {payload}; keeps a snapshot for recovery.",
+            "rollback": "DANGER: Restores old code AND OLD DATABASE. Newer changes WILL BE LOST.",
+            "restore": f"DANGER: Overwrites present data with snapshot {payload}; saves undo first.",
+            "purge": "DANGER: Permanently deletes code, config, database AND LOCAL backups.",
+            "owner-approve": "Privileged role change; the request must originate from primary owner.",
+            "cleanup": "Requires stopped service; discards abandoned media jobs.",
+            "install": "Only available when no managed bot is already installed.",
+        }
+        phrase = words[action]
+        self.open_form("Type " + phrase + " to continue", lambda value: (
+            self.execute(action, payload) if value == phrase else self.notify("Cancelled: confirmation mismatch")),
+            guidance=warnings.get(action, "Confirm this system operation."))
+
+    def _choose_setting(self, key: str) -> None:
         if key not in EDITABLE:
-            self.query_one("#log", RichLog).write("Unknown or managed-only setting. View all settings first.")
+            self.notify("Read-only setting")
             return
-        guidance = SETTING_HELP.get(key, "Optional runtime setting. Enter a new value to replace it.")
-        self.push_screen(Fields(f"Change {key}", [("value", "New value", key in PRIVATE_KEYS)],
-                                guidance, defaults={"value": "" if key in PRIVATE_KEYS else
-                                                    self.current_config.get(key, "")}),
-                         callback=lambda data: self._submitted("set", {"key": key,
-                                                     "value": data["value"]} if data else None))
+        def edit(value: str) -> None:
+            self.execute("set", {"key": key, "value": value})
+        self.open_form(f"New value for {key}", edit, secret=is_secret(key),
+                       guidance="Empty = clear if allowed. Existing secret is never revealed.",
+                       default="" if is_secret(key) else self.state.get("config", {}).get(key, ""))
 
-    def _submitted(self, action: str, fields: dict[str, str] | None) -> None:
-        if fields is None:
-            return
-        expected = {"rollback": "ROLLBACK", "restore": "RESTORE", "prune": "PRUNE",
-                    "remove": "REMOVE MIKACHAN", "purge": "PURGE MIKACHAN",
-                    "owner-approve": "APPROVE OWNER"}
-        if action in expected and fields.get("confirmation") != expected[action]:
-            self.query_one("#log", RichLog).write("Cancelled: confirmation text did not match.")
-            return
-        self._launch(action, fields)
+    def _choose_snapshot(self, snapshot: str) -> None:
+        self._confirm("restore", snapshot)
 
-    def _launch(self, action: str, fields: dict[str, str] | None = None) -> None:
-        if not self.busy:
-            self.run_worker(self._execute(action, fields or {}), exclusive=True)
-
-    async def _execute(self, action: str, fields: dict[str, str]) -> None:
-        self.busy = True
-        self.query_one("#activity", Static).update(f"Working: {action}…")
-        for button in self.query("Button").results(Button):
-            button.disabled = True
-        log = self.query_one("#log", RichLog)
-        log.write(f"› {action}")
-        def progress(message: str) -> None:
-            self.call_from_thread(log.write, message)
-
-        manager = Manager(on_event=progress)
-
-        def run() -> Any:
-            if action == "status":
-                return manager.status()
-            if action == "preflight":
-                return manager.preflight()
-            if action == "diagnostics":
-                return manager.diagnostics(live=True)
-            if action == "deps":
-                return manager.install_os_dependencies()
-            if action == "versions":
-                return manager.versions(refresh=True)
-            if action == "install":
-                return manager.install(reuse_existing_config=True)
-            if action == "setup":
-                return manager.setup(fields)
-            if action == "update":
-                return manager.update()
-            if action == "switch":
-                return manager.switch(fields.get("branch", ""),
-                                                           commit=fields.get("commit") or None)
-            if action == "rollback":
-                return manager.rollback()
-            if action == "prune-preview":
-                return manager.prune_releases()
-            if action == "prune":
-                return manager.prune_releases(apply=True)
-            if action == "recover":
-                return manager.recover()
-            if action == "backup":
-                return manager.backup()
-            if action == "backups":
-                return manager.backups()
-            if action == "queue":
-                return manager.queue()
-            if action == "storage":
-                return manager.storage()
-            if action == "cleanup":
-                return manager.cleanup_transient()
-            if action == "restore":
-                return manager.restore(fields.get("snapshot", ""))
-            if action == "config":
-                return manager.config()
-            if action == "set":
-                return manager.set_config(fields["key"], fields["value"])
-            if action == "owner-requests":
-                return manager.owner_approvals()
-            if action == "owner-approve":
-                try:
-                    target_id = int(fields["target"])
-                except ValueError as exc:
-                    raise ManagerError("Target must be a numeric Telegram ID") from exc
-                return manager.approve_owner(fields["token"], target_id)
-            if action in {"start", "stop", "restart"}:
-                return manager.service(action)
-            if action == "logs":
-                return manager.logs()
-            if action == "remove":
-                return manager.remove()
-            if action == "purge":
-                return manager.remove(purge=True)
-            raise ManagerError("Unknown panel action")
-
-        try:
-            result = await asyncio.to_thread(run)
-            if action == "status":
-                self._show_status(result)
-            else:
-                if action == "config" and isinstance(result, dict):
-                    self.current_config = result
-                    if self.section == "configuration":
-                        self.show_section("configuration", refresh=False)
-                log.write(json.dumps(result, indent=2, ensure_ascii=False) if
-                          isinstance(result, (dict, list)) else str(result))
-                if action != "logs":
-                    self._show_status(await asyncio.to_thread(manager.status))
-            self.query_one("#activity", Static).update("Ready")
-        except (ManagerError, OSError, ValueError) as exc:
-            log.write(f"Error: {exc}")
-            self.query_one("#activity", Static).update("Action failed. See details below.")
-        finally:
-            self.busy = False
-            for button in self.query("Button").results(Button):
-                button.disabled = False
-            if action == "set" and self.section == "configuration":
-                self._launch("config")
-
-    def _show_status(self, data: dict[str, Any]) -> None:
-        host = data.get("host") or {}
-        def size(value: Any) -> str:
-            return f"{value / 1024 ** 3:.1f} GiB" if isinstance(value, int) else "—"
-        if data.get("installed"):
-            quality = data.get("quality") or {}
-            queue = data.get("queue") or {}
-            setup = data.get("setup_required", False)
-            summary = ("●  MIKACHAN   " + ("SETUP NEEDED" if setup else data['service'].upper()) + "\n"
-                       f"Release       {data['branch']}  ·  {data['commit'][:12]}  ·  "
-                       f"{'healthy' if data['consistent'] else 'inspect'}\n"
-                       f"Access        {data.get('authorized_users', 0)} users  /  "
-                       f"{data.get('authorized_groups', 0)} groups\n"
-                       f"Database      {'ready' if data['database'] else 'not created'}\n"
-                       f"CPU           {host.get('cpu_percent', '—')}%  ·  "
-                       f"load {host.get('load_1m', '—')}\n"
-                       f"Memory        {size(host.get('memory_used'))} / "
-                       f"{size(host.get('memory_total'))}\n"
-                       f"Free disk     {size(host.get('disk_free'))}\n"
-                       f"Activity      {queue.get('waiting', 0)} waiting  ·  "
-                       f"{queue.get('active', 0)} active  ·  tests {quality.get('pytest', '?')}")
+    def _choose_branch(self, item: dict[str, str]) -> None:
+        branch, commit = item["branch"], item["commit"]
+        installed = self.status.get("installed")
+        if installed is None:
+            try: installed = self.manager_factory().status().get("installed", False)
+            except (ManagerError, OSError, ValueError): installed = False
+        if not installed:
+            entries = [Entry(f"Install {branch}@{commit[:12]}", "confirm:install", branch),
+                       Entry("Back", "back")]
         else:
-            summary = ("○  MIKACHAN   NOT INSTALLED\n"
-                       "Run the one-line installer on a Debian/Ubuntu systemd server.\n"
-                       f"CPU           {host.get('cpu_percent', '—')}%  ·  "
-                       f"load {host.get('load_1m', '—')}\n"
-                       f"Memory        {size(host.get('memory_used'))} / "
-                       f"{size(host.get('memory_total'))}\n"
-                       f"Free disk     {size(host.get('disk_free'))}")
-        self.query_one("#status", Static).update(summary)
+            entries = [Entry(f"Activate latest {branch}@{commit[:12]}", "confirm:switch", (branch, None)),
+                       Entry("Choose different commit SHA", "input:commit", branch),
+                       Entry("Back", "back")]
+        self.push(Page(f"RELEASE {branch}", entries))
+
+    def _choose_owner_request(self, item: dict[str, Any]) -> None:
+        self._confirm("owner-approve", (item["token"], int(item["target_id"])))
+
+    def _open_categories(self) -> None:
+        try:
+            self.state["config"] = self.manager_factory().config()
+        except (ManagerError, OSError, ValueError) as exc:
+            self.notify(f"Cannot load configuration: {type(exc).__name__}")
+            return
+        self.push(Page("SETTING CATEGORIES", [Entry(name, "category", name)
+                                                for name in SETTING_GROUPS] + [Entry("Back", "back")]))
+
+    def _open_category(self, name: str) -> None:
+        try:
+            self.state["config"] = self.manager_factory().config()
+        except (ManagerError, OSError, ValueError) as exc:
+            self.notify(f"Cannot load settings: {type(exc).__name__}")
+            return
+        config = self.state.get("config", {})
+        self.push(Page(name.upper(), [Entry(f"{key}  :  {safe_setting_value(key, config.get(key, ''))}",
+                                          "setting", key)
+                                     for key in SETTING_GROUPS[name] if key in EDITABLE]
+                       + [Entry("Back", "back")]))
+
+    def select(self) -> None:
+        if self.worker and self.worker.is_alive():
+            self.notify("Operation still in progress; changes are locked")
+            return
+        page = self.page
+        if page.kind == "report":
+            self.back()
+            return
+        if not page.entries:
+            self.back()
+            return
+        entry = page.entries[page.selected]
+        cmd = entry.action
+        if cmd == "back": self.back()
+        elif cmd == "quit": self.running = False
+        elif cmd.startswith("go:"):
+            target = cmd.partition(":")[2]
+            if target == "categories": self._open_categories()
+            else: self.push(self.submenu(target))
+        elif cmd == "category": self._open_category(entry.payload)
+        elif cmd == "setting": self._choose_setting(entry.payload)
+        elif cmd == "snapshot": self._choose_snapshot(entry.payload)
+        elif cmd == "branch": self._choose_branch(entry.payload)
+        elif cmd == "owner-request": self._choose_owner_request(entry.payload)
+        elif cmd == "setup": self.start_setup()
+        elif cmd.startswith("op:"): self.execute(cmd.partition(":")[2])
+        elif cmd.startswith("confirm:"): self._confirm(cmd.partition(":")[2], entry.payload)
+        elif cmd == "input:commit_branch":
+            self.open_form("Existing branch (e.g. v2 or v2-test)", self._commit_branch)
+        elif cmd == "input:commit":
+            self._commit_input(entry.payload)
+
+    def _commit_branch(self, branch: str) -> None:
+        if not BRANCH.fullmatch(branch):
+            self.notify("Expected a branch such as v2 or v2-test")
+            return
+        self._commit_input(branch)
+
+    def _commit_input(self, branch: str) -> None:
+        self.open_form(f"Full 40-character commit SHA on {branch}",
+                       lambda sha: self._confirm("switch", (branch, sha)) if re.fullmatch(
+                           r"[0-9a-f]{40}", sha) else self.notify("Invalid full commit SHA"))
+
+    def start_setup(self) -> None:
+        self.state["setup"] = {}
+        self.state["setup_step"] = 0
+        try:
+            if not self.manager_factory().status().get("installed"):
+                self.notify("Install the managed release first")
+                return
+            already = self.manager_factory().status().get("config", False)
+        except (ManagerError, OSError) as exc:
+            self.notify(f"Cannot start setup: {type(exc).__name__}")
+            return
+        if already:
+            self.open_form("Type SETUP to reconfigure",
+                           lambda value: self._setup_next() if value == "SETUP" else
+                           self.notify("Cancelled: confirmation mismatch"),
+                           guidance="Existing bot credentials and owner may change; a snapshot is created.")
+        else:
+            self._setup_next()
+
+    def _setup_next(self) -> None:
+        steps = [
+            ("token", "BotFather bot token", True),
+            ("owner", "Primary owner's numeric Telegram ID", False),
+            ("users", "Other approved user IDs (comma-separated, optional)", False),
+            ("groups", "Allowed group IDs (comma-separated, optional)", False),
+            ("api_id", "Telegram API ID (optional; userbot)", False),
+            ("api_hash", "Telegram API hash (optional; userbot)", True),
+        ]
+        step = self.state["setup_step"]
+        if step >= len(steps):
+            data = self.state.pop("setup")
+            self.state.pop("setup_step", None)
+            token, owner = data.get("token", ""), data.get("owner", "")
+            if not re.fullmatch(r"[0-9]+:[A-Za-z0-9_-]{20,}", token):
+                self.notify("Invalid bot token; restart Setup")
+                return
+            if not owner.isdigit() or int(owner) <= 0:
+                self.notify("Invalid owner user ID; restart Setup")
+                return
+            users = [s.strip() for s in data.get("users", "").split(",") if s.strip()]
+            groups = [s.strip() for s in data.get("groups", "").split(",") if s.strip()]
+            if any(not s.isdigit() or int(s) <= 0 for s in users) or len(set(users + [owner])) > 4:
+                self.notify("Invalid users (max 4 distinct numeric IDs); restart Setup")
+                return
+            if any(not re.fullmatch(r"-[0-9]+", s) for s in groups):
+                self.notify("Invalid negative group IDs; restart Setup")
+                return
+            if bool(data.get("api_id")) != bool(data.get("api_hash")) or (
+                data.get("api_id") and not data["api_id"].isdigit()
+            ):
+                self.notify("API ID and hash must be supplied together; restart Setup")
+                return
+            config = {"BOT_TOKEN": token, "OWNER_TELEGRAM_ID": owner,
+                      "ALLOWED_TELEGRAM_IDS": ",".join(dict.fromkeys([owner] + users)),
+                      "ALLOWED_GROUP_IDS": ",".join(groups)}
+            if groups: config["PRIVATE_CHATS_ONLY"] = "false"
+            if data.get("api_id"):
+                config.update(TELEGRAM_API_ID=data["api_id"], TELEGRAM_API_HASH=data["api_hash"])
+            self.execute("setup", config)
+            return
+        key, label, secret = steps[step]
+        self.open_form(f"SETUP {step + 1}/6  -  {label}", lambda value: self._setup_answer(key, value),
+                       secret=secret, guidance="Enter to continue / Esc to cancel setup")
+
+    def _setup_answer(self, key: str, value: str) -> None:
+        if key in ("token", "owner") and not value:
+            self.notify("Required field; setup cancelled")
+            self.state.pop("setup", None)
+            return
+        self.state["setup"][key] = value
+        self.state["setup_step"] += 1
+        self._setup_next()
+
+    def _work(self, action: str, payload: Any) -> None:
+        def progress(message: str) -> None:
+            # Never log entered credentials or raw configuration values.
+            self.events.put(("progress", message))
+        try:
+            manager = self.manager_factory(on_event=progress)
+            if action == "status": result = manager.status()
+            elif action == "start": result = manager.service("start")
+            elif action == "stop": result = manager.service("stop")
+            elif action == "restart": result = manager.service("restart")
+            elif action == "queue": result = manager.queue()
+            elif action == "logs": result = manager.logs()
+            elif action == "diagnostics": result = manager.diagnostics(live=True)
+            elif action == "versions": result = manager.versions(refresh=True)
+            elif action == "update": result = manager.update()
+            elif action == "switch": result = manager.switch(payload[0], commit=payload[1])
+            elif action == "rollback": result = manager.rollback()
+            elif action == "prune-preview": result = manager.prune_releases()
+            elif action == "prune": result = manager.prune_releases(apply=True)
+            elif action == "backup": result = manager.backup()
+            elif action == "backups": result = manager.backups()
+            elif action == "storage": result = manager.storage()
+            elif action == "recover": result = manager.recover()
+            elif action == "cleanup": result = manager.cleanup_transient()
+            elif action == "owner-requests": result = manager.owner_approvals()
+            elif action == "owner-approve": result = manager.approve_owner(*payload)
+            elif action == "config": result = manager.config()
+            elif action == "set": result = manager.set_config(payload["key"], payload["value"])
+            elif action == "preflight": result = manager.preflight()
+            elif action == "deps": result = manager.install_os_dependencies()
+            elif action == "install":
+                if not isinstance(payload, str) or not BRANCH.fullmatch(payload):
+                    raise ManagerError("Choose a version before installing")
+                result = manager.install(branch=payload, reuse_existing_config=True)
+            elif action == "setup": result = manager.setup(payload)
+            elif action == "remove": result = manager.remove()
+            elif action == "purge": result = manager.remove(purge=True)
+            else: raise ManagerError("Unsupported action")
+            # status refresh is always separate from action result
+            if action == "status": status = result
+            else:
+                try: status = manager.status()
+                except (ManagerError, OSError, ValueError): status = {}
+            self.events.put(("done", (action, result, status)))
+        except (ManagerError, OSError, ValueError, PermissionError) as exc:
+            self.events.put(("failure", f"{type(exc).__name__}: {exc}"))
+        except Exception as exc:
+            # Deliberately don't expose exception details/stack traces containing secrets.
+            self.events.put(("failure", f"Unexpected {type(exc).__name__}; inspect local server logs"))
+
+    def execute(self, action: str, payload: Any = None) -> None:
+        if self.worker and self.worker.is_alive():
+            self.notify("An operation is already in progress")
+            return
+        self.notifications.clear()
+        self.notify(f"Running {action} ...")
+        self._pending_result = "silent" if action == "status" and payload == "silent" else None
+        self.worker = threading.Thread(target=self._work, args=(action, payload),
+                                       name="mikachan-manager-operation", daemon=False)
+        self.worker.start()
+
+    def drain_events(self) -> None:
+        while True:
+            try: kind, data = self.events.get_nowait()
+            except queue.Empty: return
+            if kind == "progress": self.notify(clip(data, 140))
+            elif kind == "failure":
+                self.worker = None
+                self.push(Page("OPERATION FAILED", [Entry("Back", "back")], kind="report",
+                               text=str(data).splitlines()))
+            elif kind == "done":
+                self.worker = None
+                action, result, status = data
+                self.status = status
+                if action == "status" and self._pending_result == "silent":
+                    self._pending_result = None
+                    self.notify("Status refreshed")
+                    continue
+                if action == "config" and isinstance(result, dict):
+                    self.state["config"] = result
+                if action == "versions" and isinstance(result, list):
+                    entries = [Entry(f"{item['branch']}   {item['commit'][:12]}", "branch", item)
+                               for item in result if isinstance(item, dict)
+                               and "branch" in item and "commit" in item]
+                    self.push(Page("AVAILABLE VERSIONS", entries + [Entry("Back", "back")]))
+                elif action == "backups" and isinstance(result, list):
+                    entries = [Entry(snapshot, "snapshot", snapshot) for snapshot in result]
+                    self.push(Page("BACKUP SNAPSHOTS", entries + [Entry("Back", "back")]))
+                elif action == "owner-requests" and isinstance(result, list):
+                    entries = [Entry(f"{item['action']}  {item['target_id']}   by {item['requester_id']}",
+                                     "owner-request", item)
+                               for item in result if isinstance(item, dict)]
+                    self.push(Page("PENDING OWNER REQUESTS", entries + [Entry("Back", "back")]))
+                else:
+                    self.push(Page(f"RESULT: {action.upper()}", [Entry("Back", "back")],
+                                   kind="report", text=format_result(result)))
+
+    def _safe_add(self, win: Any, row: int, col: int, value: str, style: int = 0) -> None:
+        height, width = win.getmaxyx()
+        if 0 <= row < height and col < width and col >= 0:
+            try:
+                win.addnstr(row, col, clip(value, max(0, width - col - 1)),
+                            max(0, width - col - 1), style)
+            except curses.error:
+                pass
+
+    def draw(self, win: Any) -> None:
+        win.erase()
+        height, width = win.getmaxyx()
+        if height < 10 or width < 30:
+            self._safe_add(win, 0, 0, "Enlarge terminal (min 30x10)")
+            win.refresh()
+            return
+        header = banner_lines(width, height)
+        y = 1
+        for line in header:
+            self._safe_add(win, y, max(0, (width - len(line.rstrip())) // 2), line.rstrip(),
+                           curses.A_BOLD)
+            y += 1
+        y += 1
+        page = self.page
+        self._safe_add(win, y, 2, page.title, curses.A_BOLD)
+        y += 2
+        # reserve two footer rows for navigation / progress
+        available = max(1, height - y - 4)
+        if page.kind == "report":
+            lines = []
+            for raw in (page.text or []):
+                lines.extend(textwrap.wrap(raw, width=max(8, width - 8),
+                                           replace_whitespace=False, drop_whitespace=False,
+                                           break_long_words=True, break_on_hyphens=False) or [""])
+            page.offset = min(page.offset, max(0, len(lines) - available))
+            for line in lines[page.offset:page.offset + available]:
+                self._safe_add(win, y, 4, line)
+                y += 1
+        else:
+            page.selected = min(page.selected, len(page.entries) - 1) if page.entries else 0
+            if page.selected < page.offset: page.offset = page.selected
+            if page.selected >= page.offset + available: page.offset = page.selected - available + 1
+            for index in range(page.offset, min(page.offset + available, len(page.entries))):
+                entry = page.entries[index]
+                selected = index == page.selected
+                style = curses.A_REVERSE | curses.A_BOLD if selected else curses.A_NORMAL
+                self._safe_add(win, y, 4, ("> " if selected else "  ") + entry.label, style)
+                y += 1
+        if self.form_label is not None:
+            line = height - 4
+            self._safe_add(win, line - 1, 2, self.form_guidance, curses.A_DIM)
+            visible = "*" * len(self.form_value) if self.form_secret else self.form_value
+            label = clip(self.form_label + ": ", max(15, width // 2))
+            tail = visible[-max(1, width - len(label) - 5):]
+            self._safe_add(win, line, 2, label + tail, curses.A_REVERSE)
+            footer = "Enter Confirm   Esc Cancel   Backspace Edit"
+        else:
+            footer = "↑ ↓ Move    Enter Select    Esc Back    Q Exit"
+        self._safe_add(win, height - 2, 2, footer, curses.A_DIM)
+        if self.worker and self.worker.is_alive():
+            self._safe_add(win, height - 1, 2, "Working — do not close terminal during update/restore", curses.A_BOLD)
+        elif self.notifications:
+            self._safe_add(win, height - 1, 2, self.notifications[-1], curses.A_DIM)
+        win.refresh()
+
+    def handle_key(self, key: int) -> None:
+        if self.form_label is not None:
+            if key in (27,):
+                self.close_form()
+                self.state.pop("setup", None)
+                self.state.pop("setup_step", None)
+            elif key in (10, 13, curses.KEY_ENTER): self.submit_form()
+            elif key in (curses.KEY_BACKSPACE, 127, 8): self.form_value = self.form_value[:-1]
+            elif key == 21: self.form_value = ""  # Ctrl+U
+            elif 32 <= key <= 126 and len(self.form_value) < 4096:
+                self.form_value += chr(key)
+            return
+        if self.worker and self.worker.is_alive():
+            return
+        page = self.page
+        if key in (curses.KEY_UP, ord("k")):
+            if page.kind == "report": page.offset = max(0, page.offset - 1)
+            elif page.entries: page.selected = max(0, page.selected - 1)
+        elif key in (curses.KEY_DOWN, ord("j")):
+            if page.kind == "report": page.offset += 1
+            elif page.entries: page.selected = min(len(page.entries) - 1, page.selected + 1)
+        elif key in (10, 13, curses.KEY_ENTER): self.select()
+        elif key in (27, curses.KEY_LEFT, 127):
+            if len(self.pages) > 1: self.back()
+        elif key in (ord("q"), ord("Q")):
+            if len(self.pages) == 1: self.running = False
+            else: self.back()
+        elif key in (ord("r"), ord("R")) and self.form_label is None:
+            self.execute("status", "silent")
+
+    def run(self, win: Any) -> None:
+        try: curses.curs_set(0)
+        except curses.error: pass
+        win.keypad(True)
+        win.timeout(125)
+        try:
+            self.status = self.manager_factory().status()
+        except (ManagerError, OSError, ValueError) as exc:
+            self.notify(f"Status unavailable: {type(exc).__name__}")
+        while self.running:
+            self.drain_events()
+            self.draw(win)
+            try: key = win.getch()
+            except KeyboardInterrupt:
+                if not (self.worker and self.worker.is_alive()): self.back()
+                continue
+            if key != -1: self.handle_key(key)
+        if self.worker and self.worker.is_alive():
+            self.worker.join()
+
+
+def main() -> None:
+    if not os.isatty(0) or not os.isatty(1):
+        raise SystemExit("Interactive terminal required; use `mikachan status` for CLI mode")
+    if not os.environ.get("TERM") or os.environ.get("TERM") == "dumb":
+        raise SystemExit("Terminal does not support cursor controls (TERM=dumb)")
+    try:
+        curses.wrapper(lambda win: MikachanMenu().run(win))
+    except curses.error as exc:
+        raise SystemExit(f"Unsupported terminal capability: {exc}") from exc
 
 
 if __name__ == "__main__":
-    MikachanPanel().run()
+    main()

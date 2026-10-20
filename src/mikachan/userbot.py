@@ -6,10 +6,12 @@ import mimetypes
 import re
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from aiogram import Bot
-from aiogram.types import InlineKeyboardMarkup, Message
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, Message
 
 from .security import clean_url
 
@@ -39,6 +41,78 @@ def extract_download_url(text: str) -> str:
         if url.startswith("https://"):
             return url
     raise ValueError("File service did not return a valid HTTPS download link")
+
+
+@dataclass(frozen=True)
+class CurrencyReply:
+    """Validated CoinPJ text and optional image; never exposes the user account/session."""
+
+    text: str  # HTML-escaped, suitable for the bot's HTML parse mode.
+    photo: bytes | None = None
+    filename: str = "coinpj.jpg"
+    photo_failed: bool = False
+
+
+MAX_CURRENCY_PHOTO_BYTES = 9_000_000  # Below the hosted Bot API's 10 MB photo limit.
+
+
+def _coinpj_photo_name(data: bytes) -> str | None:
+    if data.startswith(b"\xff\xd8\xff"):
+        return "coinpj.jpg"
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "coinpj.png"
+    if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return "coinpj.webp"
+    return None
+
+
+async def coinpj_image(client, answer) -> tuple[bytes | None, str, bool]:
+    """Fetch one trusted, bounded CoinPJ image from the verified response message."""
+    document = getattr(answer, "document", None)
+    has_image = bool(getattr(answer, "photo", None)) or bool(
+        document and str(getattr(document, "mime_type", "") or "").lower().startswith("image/"))
+    if not has_image:
+        return None, "coinpj.jpg", False
+    try:
+        if document and int(getattr(document, "size", 0) or 0) > MAX_CURRENCY_PHOTO_BYTES:
+            raise ValueError("CoinPJ photo is too large")
+        data = await client.download_media(answer, file=bytes)
+        if not isinstance(data, bytes) or not 0 < len(data) <= MAX_CURRENCY_PHOTO_BYTES:
+            raise ValueError("CoinPJ photo has invalid size")
+        filename = _coinpj_photo_name(data)
+        if filename is None:
+            raise ValueError("CoinPJ response is not a supported image")
+        return data, filename, False
+    except Exception:
+        # Keep a valid quote available even if this single photo fails.  The
+        # caller explicitly discloses this error instead of silently omitting it.
+        return None, "coinpj.jpg", True
+
+
+async def send_currency_reply(message: Message, query: str, result: CurrencyReply) -> None:
+    """Send the image *with its caption*, preserving long quotes as follow-up text."""
+    if result.photo is None:
+        warning = "\n\n⚠️ CoinPJ photo could not be retrieved." if result.photo_failed else ""
+        await message.reply(result.text + warning)
+        return
+
+    # Telegram photo captions are limited to 1024 displayed characters.  Use a
+    # conservative bound on the escaped text, with no truncation of the quote.
+    caption = (result.text if len(result.text) <= 1000 else
+               "💱 <b>" + html.escape(query) + "</b>")
+    try:
+        await message.reply_photo(BufferedInputFile(result.photo, result.filename),
+                                  caption=caption)
+    except TelegramBadRequest:
+        # Some image documents are accepted as documents but not as photos.
+        try:
+            await message.reply_document(BufferedInputFile(result.photo, result.filename),
+                                         caption=caption)
+        except TelegramBadRequest:
+            await message.reply(result.text + "\n\n⚠️ CoinPJ image could not be sent.")
+            return
+    if caption != result.text:
+        await message.reply(result.text)
 
 
 class UserbotBridge:
@@ -169,7 +243,12 @@ class UserbotBridge:
                 except Exception:
                     pass
 
-    async def currency(self, query: str) -> str:
+    async def currency_message(self, query: str) -> CurrencyReply:
+        """Relay CoinPJ text and its attached photo to the owner-controlled Bot API.
+
+        Retrieve media while holding the userbot's existing single-flight lock.
+        Photo failures are reported separately so the original quote survives.
+        """
         if len(query) > 120 or "\n" in query:
             raise ValueError("Currency request is too long")
         try:
@@ -192,13 +271,21 @@ class UserbotBridge:
                     result = str(answer.raw_text or "").strip()
                     if not result or len(result) > 3500:
                         raise ValueError("Currency service returned no readable result")
-                    return "💱 <b>" + html.escape(query) + "</b>\n\n" + html.escape(result)
+
+                    photo, filename, failed = await coinpj_image(self.client, answer)
+                    return CurrencyReply(
+                        text="💱 <b>" + html.escape(query) + "</b>\n\n" + html.escape(result),
+                        photo=photo, filename=filename, photo_failed=failed)
         except asyncio.TimeoutError as exc:
             raise ValueError("Currency service timed out") from exc
         except ValueError:
             raise
         except Exception as exc:
             raise ValueError("Currency service is unavailable") from exc
+
+    async def currency(self, query: str) -> str:
+        """Backwards-compatible text-only API for other existing callers."""
+        return (await self.currency_message(query)).text
 
     async def close(self) -> None:
         if self.client.is_connected():

@@ -259,7 +259,7 @@ class SettingsUI:
             return False
         if not q.from_user or not isinstance(q.message, Message):
             return True
-        parts = data.split(":")
+        parts = data.split(":", 2)
         if len(parts) != 3:
             await q.answer()
             return True
@@ -274,6 +274,21 @@ class SettingsUI:
         if not owner and action not in {"personal", "location", "city", "clearcity",
                                        "confirm", "cancel", "close"}:
             await q.answer("Unavailable")
+            return True
+        # Keep Identity as a transient notice; the owner must remain on Home.
+        if action == "identity":
+            await q.answer("Coming soon")
+            return True
+        # All other actions are encoded as z:TOKEN:ACTION. A Person or Group
+        # action contains one additional colon, preserved by split(":", 2).
+        if action.startswith("person:") and not (
+                action[7:].isdigit() and 0 < int(action[7:]) < 2**63):
+            await q.answer("Invalid person")
+            return True
+        if action.startswith("group:") and not (
+                action[6:].startswith("-") and action[7:].isdigit() and
+                -2**63 < int(action[6:]) < 0):
+            await q.answer("Invalid group")
             return True
         await q.answer()
         if action == "close":

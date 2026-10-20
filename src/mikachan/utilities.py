@@ -39,7 +39,9 @@ from .market_prices import ASSETS, MarketPrices
 from .now_service import CITY_ALIASES, NowService
 from .geocoding import nominatim_places
 from .translator import translate_public
-from .coinpj import CoinPJ
+from .coinpj import CoinPJ, coinpj_prompt
+from .userbot import send_currency_reply
+from .sticker_tools import to_static_sticker, to_transparent_png
 
 MAX_INPUT = 8 * 1024 * 1024
 Image.MAX_IMAGE_PIXELS = 20_000_000
@@ -366,8 +368,8 @@ class Utilities:
             raise ValueError("Animated GIF validation failed")
         return output
 
-    async def reply_file(self, m: Message) -> tuple[bytes, str]:
-        reply = m.reply_to_message
+    async def reply_file(self, m: Message, *, source_message: Message | None = None) -> tuple[bytes, str]:
+        reply = source_message if source_message is not None else m.reply_to_message
         if not reply:
             raise ValueError("Reply to a photo, sticker, or document")
         item = reply.photo[-1] if reply.photo else reply.sticker or reply.document
@@ -381,6 +383,66 @@ class Utilities:
         if len(data) > MAX_INPUT:
             raise ValueError("File exceeds the 8 MiB utility limit")
         return data, (reply.document.file_name or "") if reply.document else ""
+
+    async def _video_sticker_frame(self, raw: bytes) -> bytes:
+        """Extract only the first, bounded still frame from a Telegram WebM sticker."""
+        if not shutil.which("ffmpeg"):
+            raise ValueError("Video-sticker conversion needs ffmpeg on the server")
+        process = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-threads", "1",
+            "-i", "pipe:0", "-frames:v", "1",
+            "-vf", "scale=512:512:force_original_aspect_ratio=decrease,format=rgba",
+            "-f", "image2pipe", "-vcodec", "png", "pipe:1",
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            frame, _ = await asyncio.wait_for(process.communicate(raw), timeout=15)
+        except TimeoutError:
+            process.kill()
+            await process.wait()
+            raise ValueError("Video sticker conversion timed out") from None
+        if process.returncode or not frame or len(frame) > MAX_INPUT:
+            raise ValueError("Video sticker first frame cannot be decoded")
+        return frame
+
+    async def _sticker_command(self, m: Message, cmd: str) -> None:
+        reply = m.reply_to_message
+        if cmd == "/st":
+            if reply is None and (m.photo or m.document):
+                reply = m
+            if not reply or not (reply.photo or reply.document):
+                raise ValueError("Reply to a photo or image document with /st (عکس به استیکر)")
+            if reply.document and not (
+                (reply.document.mime_type or "").startswith("image/")
+                or (reply.document.file_name or "").lower().endswith(
+                    (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif",
+                     ".tiff", ".ico", ".tga", ".ppm", ".avif", ".jp2", ".pcx", ".dds"))
+            ):
+                raise ValueError("Reply to an image, not a non-image document")
+            raw, _ = await self.reply_file(m, source_message=reply)
+            async with self.media_slots:
+                sticker = await asyncio.to_thread(to_static_sticker, raw)
+            await m.reply_sticker(BufferedInputFile(sticker, "mikachan.webp"))
+            return
+
+        if not reply or not reply.sticker:
+            raise ValueError("Reply to a sticker with /xst (استیکر به عکس)")
+        source = reply.sticker
+        raw, _ = await self.reply_file(m)
+        async with self.media_slots:
+            if source.is_animated:
+                gif = await self.tgs_to_gif(raw)
+                png = await asyncio.to_thread(to_transparent_png, gif)
+            elif source.is_video:
+                frame = await self._video_sticker_frame(raw)
+                png = await asyncio.to_thread(to_transparent_png, frame)
+            else:
+                png = await asyncio.to_thread(to_transparent_png, raw)
+        await m.reply_document(BufferedInputFile(png, "mikachan-sticker.png"),
+                               caption="🖼 PNG · original transparency preserved"
+                               if not source.is_animated and not source.is_video
+                               else "🖼 PNG · first frame of the sticker")
 
     async def api(self, url: str, params: dict[str, str | int]) -> dict:
         async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
@@ -492,9 +554,17 @@ class Utilities:
         return data
 
     async def command(self, m: Message, cmd: str, arg: str) -> bool:
-        if cmd not in {"/qr", "/scan", "/ocr", "/weather", "/rate", "/now",
+        if cmd not in {"/qr", "/scan", "/ocr", "/st", "/xst", "/weather", "/now",
                        "/nasa", "/translate"}:
             return False
+        await self._safe_command(m, cmd, arg)
+        return True
+
+    async def asset_quote(self, m: Message, arg: str) -> None:
+        """Internal Persian asset lookup, not a public slash command."""
+        await self._safe_command(m, "_asset_quote", arg)
+
+    async def _safe_command(self, m: Message, cmd: str, arg: str) -> None:
         try:
             await self._command(m, cmd, arg)
         except (ValueError, KeyError, TypeError, IndexError, httpx.HTTPError, TimeoutError,
@@ -503,12 +573,13 @@ class Utilities:
             detail = ("External provider request failed. Try again later."
                       if isinstance(exc, httpx.HTTPError) else str(exc)[:300] or type(exc).__name__)
             await m.reply(html.escape(detail))
-        return True
 
     async def _command(self, m: Message, cmd: str, arg: str) -> None:
         data: Any
         if cmd == "/now":
             await self.now.command(m, arg)
+        elif cmd in {"/st", "/xst"}:
+            await self._sticker_command(m, cmd)
         elif cmd == "/qr":
             value = arg or (m.reply_to_message.text if m.reply_to_message else "") or ""
             if not value:
@@ -721,24 +792,30 @@ class Utilities:
                               f"{separator}{html.escape(label)}",
                               f"🌡 {safe(low)}–{safe(high)} °C", f"🌧 Rain {safe(rain)} mm"))
             await m.reply("\n".join(lines))
-        elif cmd == "/rate":
+        elif cmd == "_asset_quote":
             parts = arg.upper().split()
             amount = Decimal(1)
             if len(parts) == 3:
                 try:
                     amount = Decimal(parts[0].replace(",", ""))
                 except InvalidOperation as exc:
-                    raise ValueError("Use /rate AMOUNT ASSET IRT") from exc
+                    raise ValueError("Use an asset name and optional amount") from exc
                 parts = parts[1:]
             if len(parts) != 2 or not amount.is_finite() or not 0 < amount <= Decimal("1000000000"):
-                raise ValueError("Use /rate USD EUR, /rate BTC USD, or /rate 100 USD IRT")
+                raise ValueError("Send an asset name and amount, for example 100 دلار")
             base, quote = parts
             if quote == "IRT":
                 if base not in ASSETS:
                     raise ValueError("Supported Iranian Toman assets: " + ", ".join(ASSETS))
                 if self.coinpj is not None:
                     try:
-                        await m.reply(await self.coinpj.quote(base, amount))
+                        media_quote = getattr(self.coinpj, "quote_media", None)
+                        if media_quote is not None:
+                            await send_currency_reply(m, coinpj_prompt(base, amount),
+                                                      await media_quote(base, amount))
+                        else:
+                            # Keep compatibility with text-only adapters.
+                            await m.reply(await self.coinpj.quote(base, amount))
                         return
                     except ValueError:
                         pass
@@ -759,9 +836,9 @@ class Utilities:
                 raise ValueError("Use ASSET IRT for an Iranian Toman quote")
             elif "IRR" in {base, quote}:
                 raise ValueError("Official IRR reference rates do not represent Iran's open market. "
-                                 "Use /rate USD IRT for a Toman market estimate.")
+                                 "Send a Persian asset name for a Toman market estimate.")
             elif not all(p.isalpha() and len(p) <= 5 for p in parts):
-                raise ValueError("Use /rate USD EUR, /rate BTC USD, or /rate USD IRT")
+                raise ValueError("Send an asset name like دلار or 100 دلار")
             else:
                 if amount != 1:
                     raise ValueError("Amounts are supported for Toman quotes only")

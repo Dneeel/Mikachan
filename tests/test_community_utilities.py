@@ -36,11 +36,9 @@ def test_group_isolation_audit_and_content_import(tmp_path):
     community = CommunityStore(base.db)
     community.set_setting(-100, "rules", "Group A")
     community.set_item("group_notes", -100, "hello", "A note")
-    community.set_item("group_commands", -100, "greet", "Hello")
     community.set_nickname(-100, 2, "Ally")
     assert community.setting(-101, "rules") == ""
     assert community.item("group_notes", -101, "hello") is None
-    assert community.item("group_commands", -101, "greet") is None
     assert community.nickname(-101, 2) is None
     assert community.nickname(2, 2) is None
     community.audit(-100, 1, "rules", None, "updated")

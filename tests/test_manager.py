@@ -570,3 +570,15 @@ def test_failed_repeat_setup_restores_config_database_and_service(
     assert manager.status()["service"] == "active"
     with sqlite3.connect(path) as db:
         assert {row[0] for row in db.execute("SELECT user_id FROM access")} == {42}
+
+
+def test_test_branch_can_install_pinned_older_commit(deployment):
+    manager, source, first = deployment
+    second = commit(source, "newer release")
+    git("branch", "v2-test", cwd=source)
+    assert second != first
+    assert "v2-test" in {item["branch"] for item in manager.versions(refresh=True)}
+    result = manager.install(branch="v2-test", commit=first)
+    assert "v2-test@" in result
+    assert manager.status()["branch"] == "v2-test"
+    assert manager.status()["commit"] == first

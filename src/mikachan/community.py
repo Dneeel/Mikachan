@@ -2,7 +2,6 @@
 
 import html
 import json
-import re
 import secrets
 import sqlite3
 import time
@@ -15,24 +14,13 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 from .ganjoor import Ganjoor, render_poem
 from .access import AccessRegistry
+from .group_content import GroupContent, GroupContentStore
 
-PROTECTED = {"start", "help", "search", "music", "podcast", "pod", "twitter", "instagram",
-             "tiktok", "youtube", "queue", "cancel", "status", "settings", "admin", "fal",
-             "poem", "joke", "quote", "dice", "nickname", "rules", "setrules", "note",
-             "setnote", "delnote", "setcmd", "delcmd", "welcome", "del", "pin", "mute",
-             "unmute", "ban", "unban", "bans",
-             "modlog", "groupstats", "groupstatus", "groupsettings", "qr", "scan", "ocr", "image",
-             "sticker", "stickerimage", "gif", "pack", "convert", "weather", "rate",
-             "time", "apod", "translate"}
-NAME = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS group_settings (
  chat_id INTEGER NOT NULL, name TEXT NOT NULL, value TEXT NOT NULL,
  PRIMARY KEY(chat_id,name));
 CREATE TABLE IF NOT EXISTS group_notes (
- chat_id INTEGER NOT NULL, name TEXT NOT NULL, body TEXT NOT NULL,
- PRIMARY KEY(chat_id,name));
-CREATE TABLE IF NOT EXISTS group_commands (
  chat_id INTEGER NOT NULL, name TEXT NOT NULL, body TEXT NOT NULL,
  PRIMARY KEY(chat_id,name));
 CREATE TABLE IF NOT EXISTS group_nicknames (
@@ -77,14 +65,14 @@ class CommunityStore:
         return self.setting(chat, "module_" + domain, "1") == "1"
 
     def item(self, table: str, chat: int, name: str) -> str | None:
-        if table not in {"group_notes", "group_commands"}:
+        if table != "group_notes":
             raise ValueError("invalid table")
         row = self.db.execute(f"SELECT body FROM {table} WHERE chat_id=? AND name=?",
                               (chat, name)).fetchone()
         return str(row[0]) if row else None
 
     def set_item(self, table: str, chat: int, name: str, body: str | None) -> None:
-        if table not in {"group_notes", "group_commands"}:
+        if table != "group_notes":
             raise ValueError("invalid table")
         if body is None:
             self.db.execute(f"DELETE FROM {table} WHERE chat_id=? AND name=?", (chat, name))
@@ -209,6 +197,7 @@ class Community:
         self.bot, self.store, self.owner_id = bot, store, owner_id
         self.access = access
         self.ganjoor = Ganjoor()
+        self.content = GroupContent(bot, GroupContentStore(store.db), self)
 
     async def admin(self, chat: int, user: int) -> bool:
         return self.access.can_manage(user, chat) if self.access else user == self.owner_id
@@ -228,8 +217,6 @@ class Community:
         chat, user = m.chat.id, m.from_user.id
         group = m.chat.type in {"group", "supergroup"}
         if group and cmd in {"/fal", "/poem", "/quote", "/dice"} and not self.store.enabled(chat, "culture"):
-            return True
-        if group and cmd in {"/rules", "/note"} and not self.store.enabled(chat, "notes"):
             return True
         if cmd in {"/fal", "/poem", "/quote"}:
             self.store.use(chat, user, cmd[1:])
@@ -256,14 +243,7 @@ class Community:
             return True
         if not group:
             return False
-        if cmd == "/rules":
-            self.store.use(chat, user, "rules")
-            await m.reply(html.escape(self.store.setting(chat, "rules") or "No rules have been set."))
-            return True
-        if cmd == "/note":
-            value = self.store.item("group_notes", chat, arg.lower()) if NAME.fullmatch(arg.lower()) else None
-            await m.reply(html.escape(value) if value else "Note not found. Use /note NAME.")
-            self.store.use(chat, user, "note")
+        if await self.content.command(m, cmd, arg):
             return True
         if cmd == "/groupstats":
             if arg == "user":
@@ -301,31 +281,12 @@ class Community:
                 return True
             await self.group_panel(m)
             return True
-        if cmd in {"/setrules", "/setnote", "/delnote", "/setcmd", "/delcmd", "/welcome",
+        if cmd in {"/welcome",
                    "/nickname", "/del", "/pin", "/mute", "/unmute", "/ban",
                    "/unban", "/bans", "/modlog"}:
             if not await self.admin(chat, user):
                 return True
-            if cmd == "/setrules" and 0 < len(arg) <= 3500:
-                self.store.set_setting(chat, "rules", arg)
-                self.store.audit(chat, user, "rules", None, "updated")
-                await m.reply("Rules saved.")
-            elif cmd in {"/setnote", "/setcmd"}:
-                name, _, body = arg.partition(" ")
-                name = name.lower()
-                if NAME.fullmatch(name) and 0 < len(body) <= 3000 and (cmd != "/setcmd" or name not in PROTECTED):
-                    self.store.set_item("group_notes" if cmd == "/setnote" else "group_commands",
-                                        chat, name, body)
-                    self.store.audit(chat, user, cmd[1:], None, "updated")
-                    await m.reply("Saved.")
-                else:
-                    await m.reply("Use a unique name and text (up to 3000 characters).")
-            elif cmd in {"/delnote", "/delcmd"} and NAME.fullmatch(arg.lower()):
-                self.store.set_item("group_notes" if cmd == "/delnote" else "group_commands",
-                                    chat, arg.lower(), None)
-                self.store.audit(chat, user, cmd[1:], None, "removed")
-                await m.reply("Removed.")
-            elif cmd == "/welcome":
+            if cmd == "/welcome":
                 if arg in {"on", "off"}:
                     self.store.set_setting(chat, "welcome_enabled", "1" if arg == "on" else "0")
                 elif 0 < len(arg) <= 500:
@@ -453,13 +414,6 @@ class Community:
                          f"{r[0]} · {r[1]} · {r[2] or '-'} · {r[3]}" for r in audit_rows]
                 await m.reply(html.escape("\n".join(lines) or "No Mikachan actions recorded."))
             return True
-        name = cmd.lstrip("/")
-        if NAME.fullmatch(name):
-            custom_body = self.store.item("group_commands", chat, name)
-            if custom_body:
-                self.store.use(chat, user, "custom_command")
-                await m.reply(html.escape(custom_body))
-                return True
         return False
 
     @staticmethod
@@ -483,9 +437,10 @@ class Community:
                     "Use /welcome TEXT to change it. Only approved people receive a welcome.")
         elif section == "rules":
             rows = []
-            body = ("📜 <b>Group Rules</b>\n" +
-                    html.escape(self.store.setting(chat, "rules")[:3000] or "No rules have been set.") +
-                    "\nUse /setrules TEXT to update.")
+            existing = self.content.store.get(chat, "__rules__")
+            body = ("📜 <b>Group Rules</b> · " + ("Saved" if existing else "Not set") +
+                    "\nUse /rules to view the original. Reply to the original rules "
+                    "message with /setrules to update, or /delrules to delete with confirmation.")
         elif section == "stats":
             enabled = self.store.setting(chat, "groupstatus_user_enabled", "1") == "1"
             rows = [[button("Disable User view" if enabled else "Enable User view", "stats_toggle")]]

@@ -337,13 +337,13 @@ async def test_rate_irt_uses_local_market_instead_of_global_reference(tmp_path):
     utility.market_prices.report = AsyncMock(return_value="Iran market quote")
     utility.api = AsyncMock(side_effect=AssertionError("global fiat API must not be used"))
     message = SimpleNamespace(reply=AsyncMock())
-    await utility._command(message, "/rate", "USD IRT")
+    await utility._command(message, "_asset_quote", "USD IRT")
     message.reply.assert_awaited_once_with("Iran market quote")
-    await utility._command(message, "/rate", "GOLD18 IRT")
-    await utility._command(message, "/rate", "BTC IRT")
+    await utility._command(message, "_asset_quote", "GOLD18 IRT")
+    await utility._command(message, "_asset_quote", "BTC IRT")
     assert utility.market_prices.report.await_count == 3
     with pytest.raises(ValueError, match="Official IRR"):
-        await utility._command(message, "/rate", "USD IRR")
+        await utility._command(message, "_asset_quote", "USD IRR")
 
 
 @pytest.mark.asyncio

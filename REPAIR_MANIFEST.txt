@@ -4,4 +4,24 @@ Modified by assistant in an isolated working copy, not pushed to GitHub or deplo
 Review docs/FOLLOW_DOWNLOADER_REPAIR_FA.md before use.
 WARNING: E2E access to Telegram/social sites remains UNVERIFIED.
 All cookies/session data must remain outside the source repository.
+CoinPJ v2 hotfix: UserbotBridge now relays CoinPJ image+caption.
+The older /rate path previously relayed media; the public /rate command is now removed.
+Internal currency queries still use the image+caption relay with overflow/document fallback.
+See docs/COINPJ_MEDIA_RELAY.md and tests/test_coinpj_media.py.
 
+2026-10-20 command refinement:
+- Public /rate command removed from dispatcher, Telegram command menu and help.
+  Plain-text currency queries, the CoinPJ media relay and internal market lookup preserved.
+- /st, /xst plus Persian aliases enabled, with bounded WebP/PNG converters.
+  Animated TGS/video WebM sticker -> first PNG frame only.
+- Full verified slash/trigger inventory: docs/COMMANDS_COMPLETE_FA.md.
+- Offline conversion/handler/ffmpeg tests: tests/test_sticker_tools.py.
+- Live Telegram delivery and production VPS acceptance remain unverified.
+
+2026-10-20 Notes & Rules rebuild:
+- /admin, /setcmd and /delcmd removed from active message handlers/help.
+- Legacy custom command execution disabled; saved legacy SQLite records not destructively dropped.
+- /notes + /setnote replace /note + /delnote, with per-group exact keyword trigger.
+- /rules, reply-only /setrules, confirmation-based /delrules preserve original media/caption.
+- Introduced src/mikachan/group_content.py, migrations and focused offline tests.
+- See docs/NOTES_RULES_FA.md. Live group Privacy Mode and Telegram media copying must be verified on VPS.

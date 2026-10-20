@@ -10,6 +10,7 @@ from telethon import TelegramClient  # type: ignore[import-untyped]
 from telethon.sessions import StringSession  # type: ignore[import-untyped]
 
 from .market_prices import ASSETS
+from .userbot import CurrencyReply, coinpj_image
 
 PROMPTS = {
     "USD": "دلار", "EUR": "یورو", "AED": "درهم", "SEKE": "سکه", "GOLD18": "طلا",
@@ -78,11 +79,11 @@ class CoinPJ:
         self.client = TelegramClient(StringSession(session), api_id, api_hash)
         self.lock = asyncio.Lock()
         self.peer = None
-        self.cache: dict[tuple[str, Decimal], tuple[str, float]] = {}
+        self.cache: dict[tuple[str, Decimal], tuple[CurrencyReply, float]] = {}
         self.unavailable_until = 0.0
         self.last_sent = 0.0
 
-    async def quote(self, symbol: str, amount: Decimal) -> str:
+    async def quote_media(self, symbol: str, amount: Decimal) -> CurrencyReply:
         prompt = coinpj_prompt(symbol, amount)
         try:
             async with asyncio.timeout(38):
@@ -114,10 +115,13 @@ class CoinPJ:
                             getattr(answer, "id", 0) <= sent.id):
                         raise ValueError("CoinPJ response could not be bound to this request")
                     card = parse_coinpj(str(answer.raw_text or ""), symbol, amount)
+                    photo, filename, failed = await coinpj_image(self.client, answer)
+                    payload = CurrencyReply(card, photo=photo, filename=filename,
+                                            photo_failed=failed)
                     if len(self.cache) >= 128:
                         self.cache.clear()
-                    self.cache[key] = card, time.monotonic() + 30
-                    return card
+                    self.cache[key] = payload, time.monotonic() + 30
+                    return payload
         except asyncio.TimeoutError as exc:
             self.unavailable_until = time.monotonic() + 120
             raise ValueError("CoinPJ timed out; public market estimate may be used") from exc
@@ -128,6 +132,10 @@ class CoinPJ:
             self.unavailable_until = time.monotonic() + (min(600, max(30, int(flood)))
                                                         if isinstance(flood, int) else 30)
             raise ValueError("CoinPJ is unavailable. Try again later.") from exc
+
+    async def quote(self, symbol: str, amount: Decimal) -> str:
+        """Preserve the existing text-only interface for callers that need it."""
+        return (await self.quote_media(symbol, amount)).text
 
     async def close(self) -> None:
         if self.client.is_connected():

@@ -32,7 +32,7 @@ from typing import Any, Callable, Iterator
 
 
 OFFICIAL_REPO = "https://github.com/Dneeel/Mikachan.git"
-BRANCH = re.compile(r"v[1-9][0-9]*\Z")
+BRANCH = re.compile(r"(?:v[1-9][0-9]*|v2-test)\Z")
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 SNAPSHOT = re.compile(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}\Z")
 MANAGED = "Mikachan manager schema 1\n"
@@ -55,7 +55,8 @@ ENV_KEYS = EDITABLE | {
 }
 PRIVATE_KEYS = {"BOT_TOKEN", "SPOTIFY_CLIENT_SECRET", "NASA_API_KEY", "NAVASAN_API_KEY",
                 "TRANSLATION_API_KEY", "TELEGRAM_API_HASH", "COINPJ_SESSION", "USERBOT_SESSION",
-                "MIKACHAN_INSTAGRAM_COOKIES_FILE", "MIKACHAN_PORNHUB_COOKIES_FILE"}
+                "MIKACHAN_INSTAGRAM_COOKIES_FILE", "MIKACHAN_PORNHUB_COOKIES_FILE",
+                "FREESTYLE_API_KEY", "HTTP_PROXY", "HTTPS_PROXY"}
 
 
 class ManagerError(RuntimeError):
@@ -470,7 +471,7 @@ class Manager:
 
     def _target(self, branch: str, commit: str | None = None) -> str:
         if not BRANCH.fullmatch(branch):
-            raise ManagerError("Select an existing major branch such as v2")
+            raise ManagerError("Select an existing major version branch such as v2 or v2-test")
         ref = f"refs/remotes/origin/{branch}^{{commit}}"
         tip = self._run("git", "--git-dir", str(self.paths.repo), "rev-parse", "--verify",
                         ref, check=False)
@@ -838,7 +839,8 @@ class Manager:
                     0o755 if name == "manage.sh" else 0o644)
 
     def install(self, config: dict[str, str] | None = None, *, branch: str = "v2",
-                checks: bool = True, reuse_existing_config: bool = False) -> str:
+                commit: str | None = None, checks: bool = True,
+                reuse_existing_config: bool = False) -> str:
         if self.require_root:
             self._root()
             self._require_host()
@@ -855,7 +857,7 @@ class Manager:
                 raise ManagerError("Unknown manager marker; refusing installation")
             _atomic(self.paths.marker, MANAGED)
             self._fetch()
-            sha = self._target(branch)
+            sha = self._target(branch, commit)
             release = self._stage(sha, checks=checks)
             values = dict(config) if config is not None else (
                 _parse_env(self.paths.env) if reuse_existing_config and self.paths.env.is_file()
@@ -1398,7 +1400,8 @@ def _cli() -> None:
     install = sub.add_parser("install")
     install.add_argument("--config", type=Path, help="0600 environment file; otherwise prompt")
     install.add_argument("--code-only", action="store_true", help="stage code; configure in Setup")
-    install.add_argument("--branch", default="v2")
+    install.add_argument("--branch", help="Required explicit version (v2, v2-test, ...)")
+    install.add_argument("--commit", help="Optional full SHA reachable from that version")
     install.add_argument("--skip-checks", action="store_true")
     update = sub.add_parser("update")
     update.add_argument("--skip-checks", action="store_true")
@@ -1447,6 +1450,8 @@ def _cli() -> None:
         elif args.command == "versions":
             result = manager.versions(refresh=args.refresh)
         elif args.command == "install":
+            if not args.branch:
+                raise ManagerError("Specify --branch explicitly; no version is installed automatically")
             if args.code_only:
                 config = None
             elif args.config:
@@ -1463,7 +1468,8 @@ def _cli() -> None:
                           "PRIVATE_CHATS_ONLY": "true"}
                 if config["ALLOWED_GROUP_IDS"]:
                     config["PRIVATE_CHATS_ONLY"] = "false"
-            result = manager.install(config, branch=args.branch, checks=not args.skip_checks)
+            result = manager.install(config, branch=args.branch, commit=args.commit,
+                                     checks=not args.skip_checks)
         elif args.command == "update":
             result = manager.update(checks=not args.skip_checks)
         elif args.command == "switch":

@@ -52,7 +52,8 @@ async def test_toman_command_prefers_bound_userbot_quote(tmp_path):
     utility.coinpj = SimpleNamespace(quote=AsyncMock(return_value="CoinPJ verified quote"))
     utility.market_prices.amount_card = AsyncMock(side_effect=AssertionError("wrong provider"))
     message = SimpleNamespace(reply=AsyncMock())
-    assert await utility.command(message, "/rate", "100 JPY IRT")
+    assert await utility.command(message, "/rate", "100 JPY IRT") is False
+    await utility.asset_quote(message, "100 JPY IRT")
     utility.coinpj.quote.assert_awaited_once_with("JPY", Decimal(100))
     assert message.reply.await_args.args[0] == "CoinPJ verified quote"
 

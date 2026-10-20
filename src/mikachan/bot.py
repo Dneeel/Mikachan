@@ -37,7 +37,7 @@ from .security import allowed, clean_url, collection, links, source, validate_dn
 from .store import Store
 from .community import Community, CommunityStore
 from .utilities import Utilities, _market_card, qr_png
-from .userbot import UserbotBridge, is_currency_query
+from .userbot import UserbotBridge, is_currency_query, send_currency_reply
 from .market_prices import parse_asset_query
 from .personality import Mode, mode_for, response
 from .public_social import public_x_media, public_x_post
@@ -188,12 +188,14 @@ HELP_TEXT = (
     "/follow · /following · /queue\n\n"
     "👥 <b>Community</b>\n"
     "/fal · /poem · /quote · /dice\n"
-    "Groups: /rules · /note · /groupstats · /groupsettings\n\n"
+    "Groups: /rules · /notes · /setnote · /groupstats · /groupsettings\n\n"
     "🛠 <b>Utilities</b>\n"
     "/qr · /scan · /ocr · /url (reply to a file)\n"
-    "/weather CITY · /rate ASSET IRT · /now [CITY]\n"
+    "/weather CITY · /now [CITY]\n"
+    "/st · /xst (reply to an image or sticker)\n"
     "/nasa · /translate en|fa TEXT\n\n"
     "💱 Toman quotes: send exactly دلار, سکه, طلا, تتر or ارز.\n"
+    "فارسی: عکس به استیکر · استیکر به عکس\n"
     "For file tools, reply to the file with a command."
 )
 
@@ -288,10 +290,28 @@ class App:
             await self.community.welcome(m, self.store.allowlist())
         if not m.from_user or not self.authorized(m.from_user.id, m.chat.id, m.chat.type):
             return
+        if (m.chat.type in {"group", "supergroup"} and
+                await self.community.content.pending_message(m)):
+            return
         if not m.text:
+            # A photo or image file can also carry the conversion command as its caption.
+            caption = " ".join((m.caption or "").replace("ي", "ی").replace("ك", "ک").split())
+            if caption in {"/st", "عکس به استیکر"} and self.module_enabled("utilities", m.chat.id):
+                await self.utilities.command(m, "/st", "")
             return
         text = m.text.strip()
+        normalized_text = " ".join(text.replace("ي", "ی").replace("ك", "ک").split())
+        if normalized_text in {"عکس به استیکر", "استیکر به عکس"}:
+            if not self.module_enabled("utilities", m.chat.id):
+                return
+            await self.utilities.command(m, "/st" if normalized_text == "عکس به استیکر"
+                                         else "/xst", "")
+            return
         if hasattr(self, "settings_ui") and await self.settings_ui.reply(m):
+            return
+        if (m.chat.type in {"group", "supergroup"} and
+                self.module_enabled("community", m.chat.id) and
+                await self.community.content.keyword(m, normalized_text)):
             return
         stats_kind = group_stats_alias(text) if m.chat.type in {"group", "supergroup"} else None
         if stats_kind and hasattr(self, "group_status"):
@@ -317,14 +337,12 @@ class App:
             builtin = command_name in {
                 "help", "search", "music", "podcast", "pod", "twitter", "instagram",
                 "follow", "following",
-                "tiktok", "youtube", "settings", "queue", "status", "admin",
+                "tiktok", "youtube", "settings", "queue", "status",
                 "fal", "poem", "quote", "dice", "nickname", "rules", "setrules",
-                "note", "setnote", "delnote", "setcmd", "delcmd", "welcome", "del",
+                "notes", "setnote", "delrules", "welcome", "del",
                 "mute", "modlog", "groupstats", "groupstatus", "groupsettings", "qr", "scan", "ocr",
-                "weather", "rate", "now", "nasa", "translate", "url"}
-            custom = text.startswith("/") and self.community.store.item(
-                "group_commands", m.chat.id, command_name) is not None
-            if explicit_text or text.startswith("/") and (builtin or custom):
+                "st", "xst", "weather", "now", "nasa", "translate", "url"}
+            if explicit_text or text.startswith("/") and builtin:
                 self.community.store.use(m.chat.id, m.from_user.id, "request")
         if (m.chat.type in {"group", "supergroup"} and
                 not self.community.store.enabled(m.chat.id, "utilities") and
@@ -338,7 +356,7 @@ class App:
             if not self.store.rate(m.from_user.id, "currency", 8):
                 return
             try:
-                await m.reply(await userbot.currency(text))
+                await send_currency_reply(m, text, await userbot.currency_message(text))
             except ValueError as exc:
                 await m.reply(html.escape(str(exc)))
             return
@@ -361,11 +379,11 @@ class App:
         asset_query = parse_asset_query(text)
         if asset_query:
             symbol, amount = asset_query
-            await self.utilities.command(m, "/rate", f"{symbol} IRT" if amount == 1 else
-                                         f"{amount} {symbol} IRT")
+            await self.utilities.asset_quote(m, f"{symbol} IRT" if amount == 1 else
+                                             f"{amount} {symbol} IRT")
             return
         if text.startswith("ارز "):
-            await self.utilities.command(m, "/rate", text[4:].strip())
+            await self.utilities.asset_quote(m, text[4:].strip())
             return
         if text == "ترجمه انگلیسی":
             await self.utilities.command(m, "/translate", "en")
@@ -440,18 +458,18 @@ class App:
         downloader_commands = {"/search", "/music", "/podcast", "/pod"}
         follow_commands = {"/follow", "/following", "/twitter", "/instagram",
                            "/tiktok", "/youtube"}
-        utility_commands = {"/qr", "/scan", "/ocr", "/weather", "/rate", "/now",
+        utility_commands = {"/qr", "/scan", "/ocr", "/st", "/xst", "/weather", "/now",
                             "/nasa", "/translate", "/url", "/image", "/sticker", "/stickerimage",
                             "/gif", "/pack", "/convert"}
         if (cmd in downloader_commands and not self.module_enabled("downloader", m.chat.id) or
                 cmd in follow_commands and not self.module_enabled("follow", m.chat.id) or
                 cmd in utility_commands and not self.module_enabled("utilities", m.chat.id) or
                 cmd not in downloader_commands | follow_commands | utility_commands |
-                    {"/help", "/settings", "/admin", "/queue", "/status"} and
+                    {"/help", "/settings", "/queue", "/status"} and
                     not self.module_enabled("community", m.chat.id)):
             return
-        if cmd == "/admin" and m.chat.type != "private":
-            return
+        if cmd == "/rate":
+            return  # Removed public command; currency phrases still use their existing provider.
         if cmd == "/settings" and hasattr(self, "settings_ui"):
             await self.settings_ui.show(m)
             return
@@ -462,7 +480,7 @@ class App:
             return
         if (m.chat.type in {"group", "supergroup"} and
                 not self.community.store.enabled(m.chat.id, "utilities") and
-                cmd in {"/qr", "/scan", "/ocr", "/weather", "/rate", "/now",
+                cmd in {"/qr", "/scan", "/ocr", "/st", "/xst", "/weather", "/now",
                         "/nasa", "/translate", "/url"}):
             return
         if cmd == "/url":
@@ -494,11 +512,9 @@ class App:
         if cmd == "/help":
             personality_mode = (mode_for(m.from_user.id, self.store.allowlist(), self.settings.mommy_ids)
                     if m.chat.type == "private" else Mode.NORMAL)
-            extra_help = ("\n\n🛡 Group admins: /welcome · /setrules · /setnote · "
-                          "/setcmd · /nickname · /del · /mute · /modlog"
+            extra_help = ("\n\n🛡 Group admins: /notes · /setnote · /setrules · "
+                          "/delrules · /nickname · /del · /mute · /modlog"
                           if m.chat.type in {"group", "supergroup"} else "")
-            if m.from_user.id == self.settings.owner_telegram_id:
-                extra_help += "\n🔐 Owner: /admin"
             await m.reply(HELP_TEXT + extra_help + "\n\n" + response("ready", personality_mode))
         elif cmd == "/follow":
             target = command_target(arg)
@@ -542,43 +558,6 @@ class App:
             await m.reply(
                 f"Jobs: {len(self.store.jobs(m.from_user.id))} recent · Active: {len(self.worker.tasks)}"
             )
-        elif cmd == "/admin" and m.from_user.id == self.settings.owner_telegram_id:
-            parts = arg.split()
-            if len(parts) == 3 and parts[0] == "provider":
-                try:
-                    self.utilities.set_provider(parts[1], parts[2])
-                except ValueError as exc:
-                    await m.reply(html.escape(str(exc)))
-                else:
-                    await m.reply("Price provider saved.")
-                return
-            group_change = (len(parts) == 3 and parts[0] == "group" and
-                            parts[1] in {"add", "remove"} and
-                            parts[2].startswith("-") and parts[2][1:].isdigit())
-            user_change = (len(parts) == 2 and parts[0] in {"add", "remove"} and
-                           parts[1].isdigit())
-            if group_change or user_change:
-                if self.store.access_registry is not None:
-                    await m.reply("Use /settings → Access Control or Group Registry. "
-                                  "Registration requires an internal name and preview.")
-                    return
-                admin_target_id = int(parts[2] if group_change else parts[1])
-                action = "group_" + parts[1] if group_change else parts[0]
-                token = self.store.propose_access(
-                    m.from_user.id, m.chat.id, admin_target_id, action
-                )
-                prompt = await m.reply(
-                    f"Confirm {html.escape(action)} {admin_target_id}?",
-                    reply_markup=kb(
-                        [[("✅ Confirm", f"a:{token}:yes"), ("❌ Cancel", f"a:{token}:no")]]
-                    ),
-                )
-                self.store.bind_admin_prompt(token, prompt.message_id)
-            else:
-                state = ", ".join(f"{k}: {v}" for k, v in self.searcher.health.items())
-                await m.reply(
-                    f"Owner diagnostics\nAllowed users: {len(self.store.allowlist())}\nAllowed groups: {len(self.store.groups())}\nActive jobs: {len(self.worker.tasks)}\nSources: {html.escape(state)}\nPrice providers: fiat {self.utilities.provider('fiat')}, crypto {self.utilities.provider('crypto')}\nUse /admin add|remove USER_ID or /admin group add|remove GROUP_ID (confirmation required). /admin provider fiat|crypto NAME changes the fixed price provider."
-                )
 
     async def begin_search(self, m: Message, query: str, mode: str) -> None:
         if m.from_user is None:
@@ -1111,12 +1090,15 @@ class App:
         domain = ({"c": "downloader", "s": "downloader", "b": "downloader",
                    "f": "follow", "fm": "follow", "fu": "follow", "p": "follow",
                    "fn": "follow", "fd": "follow", "u": "community", "g": "community",
-                   "gs": "community", "n": "utilities"}).get(prefix)
+                   "gs": "community", "gc": "community", "n": "utilities"}).get(prefix)
         if domain and not self.module_enabled(domain, q.message.chat.id):
             await acknowledge(q, "This module is currently unavailable")
             return
         if hasattr(self, "utilities") and hasattr(self.utilities, "now") and \
                 await self.utilities.now.callback(q, data):
+            return
+        if (hasattr(self, "community") and
+                await self.community.content.callback(q, data)):
             return
         if hasattr(self, "community") and await self.community.callback(q, data):
             return
@@ -1342,40 +1324,6 @@ class App:
             return
         if data.startswith("m:"):
             await acknowledge(q)
-            return
-        if data.startswith("a:"):
-            await acknowledge(q)
-            parts = data.split(":")
-            if len(parts) != 3 or q.from_user.id != self.settings.owner_telegram_id:
-                return
-            if self.store.access_registry is not None:
-                self.store.db.execute("DELETE FROM admin_pending WHERE id=?", (parts[1],))
-                await q.message.edit_text("Use /settings to manage named people and groups.")
-                return
-            if parts[2] == "yes":
-                access_pending = self.store.db.execute("SELECT action,target_id FROM admin_pending "
-                    "WHERE id=? AND owner_id=? AND chat_id=? AND message_id=?",
-                    (parts[1], q.from_user.id, q.message.chat.id, q.message.message_id)).fetchone()
-                result = self.store.apply_access(
-                    parts[1],
-                    q.from_user.id,
-                    self.settings.owner_telegram_id,
-                    q.message.chat.id,
-                    q.message.message_id,
-                )
-                if access_pending and "complete" in result and access_pending["action"] in {"remove", "group_remove"}:
-                    for revocation_jid, active_task in list(self.worker.tasks.items()):
-                        job = self.store.job(revocation_jid)
-                        if job and (job["user_id"] if access_pending["action"] == "remove"
-                                    else job["chat_id"]) == access_pending["target_id"]:
-                            active_task.cancel()
-            else:
-                self.store.db.execute(
-                    "DELETE FROM admin_pending WHERE id=? AND owner_id=?",
-                    (parts[1], q.from_user.id),
-                )
-                result = "Cancelled"
-            await q.message.edit_text(html.escape(result))
             return
         if data.startswith("c:"):
             parts = data.split(":")
@@ -1911,13 +1859,14 @@ class App:
                     ("dice", "Roll a Telegram die"),
                     ("rules", "Group rules"),
                     ("groupstatus", "Observed group message statistics"),
-                    ("note", "Group note"),
+                    ("notes", "Manage group notes"),
                     ("qr", "Create a QR image"),
                     ("url", "Get a link for a replied file"),
                     ("scan", "Scan a replied QR or barcode"),
                     ("ocr", "Read text in a replied image"),
+                    ("st", "Convert replied image to sticker"),
+                    ("xst", "Convert replied sticker to PNG"),
                     ("weather", "Weather and forecast"),
-                    ("rate", "Fiat or crypto reference rate"),
                     ("now", "Local time and calendars"),
                     ("nasa", "NASA astronomy picture"),
                     ("translate", "Translate selected text"),
