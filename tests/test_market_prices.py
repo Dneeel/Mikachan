@@ -270,8 +270,9 @@ async def test_exact_persian_prices_and_private_access(tmp_path):
     app.community = SimpleNamespace(search_reply=AsyncMock(return_value=False))
     report = AsyncMock(return_value="Market price in Toman")
     command = AsyncMock(return_value=True)
+    asset_quote = AsyncMock()
     app.utilities = SimpleNamespace(market_prices=SimpleNamespace(report=report),
-                                    command=command)
+                                    command=command, asset_quote=asset_quote)
     async def send(value: str, actor: int = 1) -> SimpleNamespace:
         message = SimpleNamespace(from_user=SimpleNamespace(id=actor),
             chat=SimpleNamespace(id=actor, type="private"), text=value,
@@ -285,15 +286,16 @@ async def test_exact_persian_prices_and_private_access(tmp_path):
     await send("طلا")
     await send("تتر")
     await send("بیت‌کوین")
-    assert [call.args[2] for call in command.await_args_list] == [
+    assert [call.args[1] for call in asset_quote.await_args_list] == [
         "USD IRT", "SEKE IRT", "GOLD18 IRT", "USDT IRT", "BTC IRT"]
+    command.assert_not_awaited()
     message = await send("ارز")
     report.assert_awaited_once_with(("USD", "EUR", "AED"))
     message.reply.assert_awaited_once_with("Market price in Toman")
     await send("دلار؟")
     await send("طلا؟")
     await send("قیمت بیت‌کوین")
-    assert command.await_count == 5
+    assert asset_quote.await_count == 5
 
 
 @pytest.mark.asyncio
@@ -307,12 +309,16 @@ async def test_persian_prices_respect_group_allowlist_and_module_setting(tmp_pat
     app.store.seed_groups({-100})
     report = AsyncMock(return_value="Market price")
     command = AsyncMock(return_value=True)
-    app.utilities = SimpleNamespace(market_prices=SimpleNamespace(report=report), command=command)
+    asset_quote = AsyncMock()
+    app.utilities = SimpleNamespace(market_prices=SimpleNamespace(report=report),
+                                    command=command, asset_quote=asset_quote)
     enabled = False
     app.community = SimpleNamespace(store=SimpleNamespace(
         enabled=lambda chat, module: enabled,
         item=lambda *args: None, use=lambda *args: None),
-        search_reply=AsyncMock(return_value=False))
+        search_reply=AsyncMock(return_value=False),
+        content=SimpleNamespace(pending_message=AsyncMock(return_value=False),
+                                keyword=AsyncMock(return_value=False)))
     async def send(actor: int, chat: int, value: str = "ارز") -> SimpleNamespace:
         message = SimpleNamespace(from_user=SimpleNamespace(id=actor),
             chat=SimpleNamespace(id=chat, type="supergroup"), text=value,
@@ -323,10 +329,14 @@ async def test_persian_prices_respect_group_allowlist_and_module_setting(tmp_pat
     assert (await send(1, -101)).reply.await_count == 0
     assert (await send(1, -100)).reply.await_count == 0
     await send(1, -100, "طلا")
-    assert command.await_count == 0
+    command.assert_not_awaited()
+    asset_quote.assert_not_awaited()
     enabled = True
     assert (await send(1, -100)).reply.await_count == 1
     report.assert_awaited_once()
+    await send(1, -100, "طلا")
+    asset_quote.assert_awaited_once()
+    assert asset_quote.await_args.args[1] == "GOLD18 IRT"
 
 
 @pytest.mark.asyncio

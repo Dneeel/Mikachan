@@ -77,10 +77,14 @@ def group_content(tmp_path):
         sys.modules["aiogram.types"] = fake_types
         spec.loader.exec_module(module)
     finally:
-        if original_aiogram is None: sys.modules.pop("aiogram", None)
-        else: sys.modules["aiogram"] = original_aiogram
-        if original_types is None: sys.modules.pop("aiogram.types", None)
-        else: sys.modules["aiogram.types"] = original_types
+        if original_aiogram is None:
+            sys.modules.pop("aiogram", None)
+        else:
+            sys.modules["aiogram"] = original_aiogram
+        if original_types is None:
+            sys.modules.pop("aiogram.types", None)
+        else:
+            sys.modules["aiogram.types"] = original_types
     db = sqlite3.connect(tmp_path / "test.sqlite", isolation_level=None)
     db.row_factory = sqlite3.Row
     db.execute("CREATE TABLE group_notes(chat_id INTEGER, name TEXT, body TEXT, PRIMARY KEY(chat_id,name))")

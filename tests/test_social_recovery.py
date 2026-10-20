@@ -116,7 +116,16 @@ def test_instagram_cookie_file_is_private_and_scoped(monkeypatch, tmp_path):
         "--cookies", str(path)]
     assert instagram_cookie_args("https://x.com/alice/status/123") == []
     path.chmod(0o644)
-    with pytest.raises(ValueError, match="private regular file"):
+    with pytest.raises(ValueError, match="private and owned by the bot user"):
+        instagram_cookie_args("https://www.instagram.com/p/abc/")
+    path.chmod(0o600)
+    alias = tmp_path / "cookie-link"
+    alias.symlink_to(path)
+    monkeypatch.setenv("MIKACHAN_INSTAGRAM_COOKIES_FILE", str(alias))
+    with pytest.raises(ValueError, match="private and owned by the bot user"):
+        instagram_cookie_args("https://www.instagram.com/p/abc/")
+    monkeypatch.setenv("MIKACHAN_INSTAGRAM_COOKIES_FILE", str(tmp_path))
+    with pytest.raises(ValueError, match="private and owned by the bot user"):
         instagram_cookie_args("https://www.instagram.com/p/abc/")
 
 

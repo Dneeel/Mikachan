@@ -96,12 +96,29 @@ async def test_follow_notification_owner_and_tiktok_avatar_stability(monkeypatch
     await follow.deliver(row, target, "posts", "https://www.tiktok.com/@alice/video/123", "new")
     markup = bot.send_message.await_args.kwargs["reply_markup"]
     names = [button.text for group in markup.inline_keyboard for button in group]
-    assert names == ["🔗 Link", "⬇️ Download", "👤 Profile panel", "✅ Thank you"]
-    notice_token = markup.inline_keyboard[-1][0].callback_data.split(":")[1]
-    assert follow.db.notification(notice_token, 42, 42, 44)
-    assert follow.db.notification(notice_token, 43, 42, 44) is None
-    assert follow.db.notification(notice_token, 42, 43, 44) is None
-    assert follow.db.notification(notice_token, 42, 42, 45) is None
+    assert names == ["⬇️ Get it", "🔗 View original"]
+    assert markup.inline_keyboard[0][1].url == "https://www.tiktok.com/@alice/video/123"
+    _, callback_follow, get_token = markup.inline_keyboard[0][0].callback_data.split(":")
+    assert callback_follow == fid
+    download = follow.db.db.execute(
+        "SELECT follow_id,user_id,url,kind FROM follow_downloads WHERE token=?", (get_token,)
+    ).fetchone()
+    assert tuple(download) == (fid, 42, "https://www.tiktok.com/@alice/video/123", "posts")
+    # Both the stored owner and destination chat must match at callback time.
+    from mikachan.bot import App
+    app = object.__new__(App)
+    app.store, app.follow, app.bot = store, follow, bot
+    app.authorized = lambda *_args: True
+    app.module_enabled = lambda *_args: True
+    for actor, chat in ((43, 42), (42, 43)):
+        callback = SimpleNamespace(
+            data=f"fd:{fid}:{get_token}", from_user=SimpleNamespace(id=actor),
+            message=SimpleNamespace(chat=SimpleNamespace(id=chat, type="private"),
+                                    message_id=44), answer=AsyncMock(),
+        )
+        await app.callback(callback)
+        callback.answer.assert_awaited()
+    assert store.jobs(42) == [] and store.jobs(43) == []
     monkeypatch.setattr("mikachan.follow.validate_dns", lambda _url: None)
     monkeypatch.setattr("mikachan.follow._extract", AsyncMock(return_value=[
         [2, {"user": {"nickname": "Alice", "signature": "Bio",
@@ -116,7 +133,9 @@ async def test_follow_notification_owner_and_tiktok_avatar_stability(monkeypatch
               "file_id": "stable_avatar_123"}]]))
     assert (await public_profile(target))["avatar"] == "stable_avatar_123"
     assert follow.db.remove(fid, 42)
-    assert follow.db.notification(notice_token, 42, 42, 44)["url"] is None
+    assert follow.db.db.execute(
+        "SELECT 1 FROM follow_downloads WHERE token=?", (get_token,)
+    ).fetchone() is None
 
 
 @pytest.mark.asyncio
@@ -141,8 +160,15 @@ async def test_twitter_text_posts_enabled_and_empty_timeline_flagged(monkeypatch
     await follow.check(row)
     monkeypatch.setattr("mikachan.follow.public_items", AsyncMock(return_value=[]))
     row = follow.db.db.execute("SELECT * FROM follows WHERE id=?", (fid,)).fetchone()
-    with pytest.raises(ValueError, match="no public data"):
+    with pytest.raises(ValueError, match="no public source accessible"):
         await follow.check(row)
+    assert follow.db.db.execute(
+        "SELECT reason FROM follow_source_errors WHERE follow_id=? AND category='tweets'",
+        (fid,),
+    ).fetchone()[0] == "previously populated timeline unexpectedly empty"
+    assert follow.db.db.execute(
+        "SELECT 1 FROM follow_seen WHERE follow_id=?", (fid,),
+    ).fetchone() is not None
     assert bot.send_message.await_count == 0
 
 

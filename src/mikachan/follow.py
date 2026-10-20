@@ -26,7 +26,7 @@ from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from .security import allowed, clean_url, instagram_cookie_args, source, validate_dns
-from .public_social import public_statuses, public_x_media
+from .public_social import public_statuses
 from .store import Store
 
 INTERVAL = 15 * 60
@@ -995,11 +995,10 @@ class FollowService:
                     # signed URL without inventing an avatar edit.
                     continue
                 value = "Avatar updated" if key == "avatar" else html.escape(profile[key][:500])
-                token = secrets.token_urlsafe(8)
                 get_token = secrets.token_urlsafe(7)
                 buttons = [[InlineKeyboardButton(text="⬇️ Get it", callback_data=f"fd:{row['id']}:{get_token}"),
                             InlineKeyboardButton(text="🔗 View original", url=target.url)]]
-                sent = await self.bot.send_message(row["chat_id"],
+                await self.bot.send_message(row["chat_id"],
                     f"👀 <b>{target.platform.title()} · @{html.escape(target.handle)}</b>\n"
                     f"{LABELS[key]}\n\n{value}",
                     reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
@@ -1028,13 +1027,12 @@ class FollowService:
             chat_type = "private" if row["chat_id"] == row["user_id"] else "group"
             if not self.store.can_access(row["user_id"], row["chat_id"], chat_type):
                 return
-        notice_token = secrets.token_urlsafe(8)
         get_token = secrets.token_urlsafe(7)
         markup = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="⬇️ Get it", callback_data=f"fd:{row['id']}:{get_token}"),
             InlineKeyboardButton(text="🔗 View original", url=url),
         ]])
-        sent = await self.bot.send_message(row["chat_id"],
+        await self.bot.send_message(row["chat_id"],
             f"👀 <b>{target.platform.title()} · @{html.escape(target.handle)}</b>\n"
             f"New {html.escape(kind)}{': ' + html.escape(title[:200]) if title else ''}",
             reply_markup=markup)

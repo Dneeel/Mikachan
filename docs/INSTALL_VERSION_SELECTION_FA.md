@@ -37,6 +37,38 @@ sudo chmod 600 /root/mikachan-test.env
 curl -fsSL https://raw.githubusercontent.com/Dneeel/Mikachan/v2-test/deploy/bootstrap.sh | sudo bash -s -- --branch v2-test --config /root/mikachan-test.env
 ```
 
+## ادامهٔ نصب آزمایشی پس از شکست آزمون‌ها
+
+اگر نصب اولیه در `pytest` متوقف شده و `mikachan status` مقدار
+`"incomplete_install": true` و `"installed": false` را نشان می‌دهد،
+همان نصب را از طریق مدیر موجود ادامه دهید. این دستور شاخهٔ `v2-test` را دوباره
+واکشی می‌کند، commit جدید را با استفاده از مخزن و کش قبلی آماده می‌کند و
+آزمون‌ها را اجرا می‌کند. فایل‌های تنظیمات، داده و بکاپ را حذف نمی‌کند.
+
+```bash
+sudo mikachan status
+sudo mikachan install --branch v2-test --code-only
+sudo mikachan status
+```
+
+در نصب‌هایی که مدیر پنل از commit قدیمی کپی شده است، پس از نصب موفق، فایل
+تأییدشدهٔ مدیر را یک بار از release جدید به پنل منتقل کنید تا `preflight`
+مسیر `uv` داخلی پنل را درست نشان دهد:
+
+```bash
+sudo install -m 0644 /opt/Mikachan/current/deploy/manager.py /opt/Mikachan/panel/deploy/manager.py
+sudo mikachan preflight
+sudo mikachan
+```
+
+در پنل **Guided setup** را با توکن و شناسهٔ مالک آزمایشی تکمیل کنید. فعال‌سازی
+سرویس فقط پس از موفقیت آزمون‌ها و اعتبارسنجی تنظیمات انجام می‌شود. سپس
+`sudo mikachan diagnostics --live` را اجرا کنید. اگر `install` باز هم خطا داد،
+متن همان خطا را بررسی کنید؛ `bootstrap-test.sh` برای نصب ناقص موجود مناسب نیست،
+چون از بازنویسی ریشهٔ نصب جلوگیری می‌کند. `recover` برای تراکنش فعال‌سازیِ
+ناتمام پس از ایجاد manifest است و در این حالت کمکی نمی‌کند. `abort-install`
+هم برای این مسیر لازم نیست.
+
 توکن و Session را در دستور ترمینال ننویسید. برای تست هم‌زمان با نسخهٔ اصلی، از **بات تلگرام و توکن جداگانه** استفاده کنید تا دو Poller برای یک بات فعال نشوند.
 
 ## محافظت از نسخهٔ اصلی

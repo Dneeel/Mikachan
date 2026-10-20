@@ -182,8 +182,10 @@ class MikachanMenu:
             self.pages.pop()
             if self.page.title in (name.upper() for name in SETTING_GROUPS):
                 name = next(name for name in SETTING_GROUPS if name.upper() == self.page.title)
-                try: self.state["config"] = self.manager_factory().config()
-                except (ManagerError, OSError, ValueError): pass
+                try:
+                    self.state["config"] = self.manager_factory().config()
+                except (ManagerError, OSError, ValueError):
+                    pass
                 config = self.state.get("config", {})
                 self.page.entries = [Entry(f"{key}  :  {safe_setting_value(key, config.get(key, ''))}",
                                            "setting", key) for key in SETTING_GROUPS[name]
@@ -265,8 +267,10 @@ class MikachanMenu:
         branch, commit = item["branch"], item["commit"]
         installed = self.status.get("installed")
         if installed is None:
-            try: installed = self.manager_factory().status().get("installed", False)
-            except (ManagerError, OSError, ValueError): installed = False
+            try:
+                installed = self.manager_factory().status().get("installed", False)
+            except (ManagerError, OSError, ValueError):
+                installed = False
         if not installed:
             entries = [Entry(f"Install {branch}@{commit[:12]}", "confirm:install", branch),
                        Entry("Back", "back")]
@@ -313,20 +317,32 @@ class MikachanMenu:
             return
         entry = page.entries[page.selected]
         cmd = entry.action
-        if cmd == "back": self.back()
-        elif cmd == "quit": self.running = False
+        if cmd == "back":
+            self.back()
+        elif cmd == "quit":
+            self.running = False
         elif cmd.startswith("go:"):
             target = cmd.partition(":")[2]
-            if target == "categories": self._open_categories()
-            else: self.push(self.submenu(target))
-        elif cmd == "category": self._open_category(entry.payload)
-        elif cmd == "setting": self._choose_setting(entry.payload)
-        elif cmd == "snapshot": self._choose_snapshot(entry.payload)
-        elif cmd == "branch": self._choose_branch(entry.payload)
-        elif cmd == "owner-request": self._choose_owner_request(entry.payload)
-        elif cmd == "setup": self.start_setup()
-        elif cmd.startswith("op:"): self.execute(cmd.partition(":")[2])
-        elif cmd.startswith("confirm:"): self._confirm(cmd.partition(":")[2], entry.payload)
+            if target == "categories":
+                self._open_categories()
+            else:
+                self.push(self.submenu(target))
+        elif cmd == "category":
+            self._open_category(entry.payload)
+        elif cmd == "setting":
+            self._choose_setting(entry.payload)
+        elif cmd == "snapshot":
+            self._choose_snapshot(entry.payload)
+        elif cmd == "branch":
+            self._choose_branch(entry.payload)
+        elif cmd == "owner-request":
+            self._choose_owner_request(entry.payload)
+        elif cmd == "setup":
+            self.start_setup()
+        elif cmd.startswith("op:"):
+            self.execute(cmd.partition(":")[2])
+        elif cmd.startswith("confirm:"):
+            self._confirm(cmd.partition(":")[2], entry.payload)
         elif cmd == "input:commit_branch":
             self.open_form("Existing branch (e.g. v2 or v2-test)", self._commit_branch)
         elif cmd == "input:commit":
@@ -398,7 +414,8 @@ class MikachanMenu:
             config = {"BOT_TOKEN": token, "OWNER_TELEGRAM_ID": owner,
                       "ALLOWED_TELEGRAM_IDS": ",".join(dict.fromkeys([owner] + users)),
                       "ALLOWED_GROUP_IDS": ",".join(groups)}
-            if groups: config["PRIVATE_CHATS_ONLY"] = "false"
+            if groups:
+                config["PRIVATE_CHATS_ONLY"] = "false"
             if data.get("api_id"):
                 config.update(TELEGRAM_API_ID=data["api_id"], TELEGRAM_API_HASH=data["api_hash"])
             self.execute("setup", config)
@@ -422,43 +439,74 @@ class MikachanMenu:
             self.events.put(("progress", message))
         try:
             manager = self.manager_factory(on_event=progress)
-            if action == "status": result = manager.status()
-            elif action == "start": result = manager.service("start")
-            elif action == "stop": result = manager.service("stop")
-            elif action == "restart": result = manager.service("restart")
-            elif action == "queue": result = manager.queue()
-            elif action == "logs": result = manager.logs()
-            elif action == "diagnostics": result = manager.diagnostics(live=True)
-            elif action == "versions": result = manager.versions(refresh=True)
-            elif action == "update": result = manager.update()
-            elif action == "switch": result = manager.switch(payload[0], commit=payload[1])
-            elif action == "rollback": result = manager.rollback()
-            elif action == "prune-preview": result = manager.prune_releases()
-            elif action == "prune": result = manager.prune_releases(apply=True)
-            elif action == "backup": result = manager.backup()
-            elif action == "backups": result = manager.backups()
-            elif action == "storage": result = manager.storage()
-            elif action == "recover": result = manager.recover()
-            elif action == "cleanup": result = manager.cleanup_transient()
-            elif action == "owner-requests": result = manager.owner_approvals()
-            elif action == "owner-approve": result = manager.approve_owner(*payload)
-            elif action == "config": result = manager.config()
-            elif action == "set": result = manager.set_config(payload["key"], payload["value"])
-            elif action == "preflight": result = manager.preflight()
-            elif action == "deps": result = manager.install_os_dependencies()
+            if action == "status":
+                result = manager.status()
+            elif action == "start":
+                result = manager.service("start")
+            elif action == "stop":
+                result = manager.service("stop")
+            elif action == "restart":
+                result = manager.service("restart")
+            elif action == "queue":
+                result = manager.queue()
+            elif action == "logs":
+                result = manager.logs()
+            elif action == "diagnostics":
+                result = manager.diagnostics(live=True)
+            elif action == "versions":
+                result = manager.versions(refresh=True)
+            elif action == "update":
+                result = manager.update()
+            elif action == "switch":
+                result = manager.switch(payload[0], commit=payload[1])
+            elif action == "rollback":
+                result = manager.rollback()
+            elif action == "prune-preview":
+                result = manager.prune_releases()
+            elif action == "prune":
+                result = manager.prune_releases(apply=True)
+            elif action == "backup":
+                result = manager.backup()
+            elif action == "backups":
+                result = manager.backups()
+            elif action == "storage":
+                result = manager.storage()
+            elif action == "recover":
+                result = manager.recover()
+            elif action == "cleanup":
+                result = manager.cleanup_transient()
+            elif action == "owner-requests":
+                result = manager.owner_approvals()
+            elif action == "owner-approve":
+                result = manager.approve_owner(*payload)
+            elif action == "config":
+                result = manager.config()
+            elif action == "set":
+                result = manager.set_config(payload["key"], payload["value"])
+            elif action == "preflight":
+                result = manager.preflight()
+            elif action == "deps":
+                result = manager.install_os_dependencies()
             elif action == "install":
                 if not isinstance(payload, str) or not BRANCH.fullmatch(payload):
                     raise ManagerError("Choose a version before installing")
                 result = manager.install(branch=payload, reuse_existing_config=True)
-            elif action == "setup": result = manager.setup(payload)
-            elif action == "remove": result = manager.remove()
-            elif action == "purge": result = manager.remove(purge=True)
-            else: raise ManagerError("Unsupported action")
-            # status refresh is always separate from action result
-            if action == "status": status = result
+            elif action == "setup":
+                result = manager.setup(payload)
+            elif action == "remove":
+                result = manager.remove()
+            elif action == "purge":
+                result = manager.remove(purge=True)
             else:
-                try: status = manager.status()
-                except (ManagerError, OSError, ValueError): status = {}
+                raise ManagerError("Unsupported action")
+            # status refresh is always separate from action result
+            if action == "status":
+                status = result
+            else:
+                try:
+                    status = manager.status()
+                except (ManagerError, OSError, ValueError):
+                    status = {}
             self.events.put(("done", (action, result, status)))
         except (ManagerError, OSError, ValueError, PermissionError) as exc:
             self.events.put(("failure", f"{type(exc).__name__}: {exc}"))
@@ -479,9 +527,12 @@ class MikachanMenu:
 
     def drain_events(self) -> None:
         while True:
-            try: kind, data = self.events.get_nowait()
-            except queue.Empty: return
-            if kind == "progress": self.notify(clip(data, 140))
+            try:
+                kind, data = self.events.get_nowait()
+            except queue.Empty:
+                return
+            if kind == "progress":
+                self.notify(clip(data, 140))
             elif kind == "failure":
                 self.worker = None
                 self.push(Page("OPERATION FAILED", [Entry("Back", "back")], kind="report",
@@ -553,8 +604,10 @@ class MikachanMenu:
                 y += 1
         else:
             page.selected = min(page.selected, len(page.entries) - 1) if page.entries else 0
-            if page.selected < page.offset: page.offset = page.selected
-            if page.selected >= page.offset + available: page.offset = page.selected - available + 1
+            if page.selected < page.offset:
+                page.offset = page.selected
+            if page.selected >= page.offset + available:
+                page.offset = page.selected - available + 1
             for index in range(page.offset, min(page.offset + available, len(page.entries))):
                 entry = page.entries[index]
                 selected = index == page.selected
@@ -584,9 +637,12 @@ class MikachanMenu:
                 self.close_form()
                 self.state.pop("setup", None)
                 self.state.pop("setup_step", None)
-            elif key in (10, 13, curses.KEY_ENTER): self.submit_form()
-            elif key in (curses.KEY_BACKSPACE, 127, 8): self.form_value = self.form_value[:-1]
-            elif key == 21: self.form_value = ""  # Ctrl+U
+            elif key in (10, 13, curses.KEY_ENTER):
+                self.submit_form()
+            elif key in (curses.KEY_BACKSPACE, 127, 8):
+                self.form_value = self.form_value[:-1]
+            elif key == 21:
+                self.form_value = ""  # Ctrl+U
             elif 32 <= key <= 126 and len(self.form_value) < 4096:
                 self.form_value += chr(key)
             return
@@ -594,23 +650,33 @@ class MikachanMenu:
             return
         page = self.page
         if key in (curses.KEY_UP, ord("k")):
-            if page.kind == "report": page.offset = max(0, page.offset - 1)
-            elif page.entries: page.selected = max(0, page.selected - 1)
+            if page.kind == "report":
+                page.offset = max(0, page.offset - 1)
+            elif page.entries:
+                page.selected = max(0, page.selected - 1)
         elif key in (curses.KEY_DOWN, ord("j")):
-            if page.kind == "report": page.offset += 1
-            elif page.entries: page.selected = min(len(page.entries) - 1, page.selected + 1)
-        elif key in (10, 13, curses.KEY_ENTER): self.select()
+            if page.kind == "report":
+                page.offset += 1
+            elif page.entries:
+                page.selected = min(len(page.entries) - 1, page.selected + 1)
+        elif key in (10, 13, curses.KEY_ENTER):
+            self.select()
         elif key in (27, curses.KEY_LEFT, 127):
-            if len(self.pages) > 1: self.back()
+            if len(self.pages) > 1:
+                self.back()
         elif key in (ord("q"), ord("Q")):
-            if len(self.pages) == 1: self.running = False
-            else: self.back()
+            if len(self.pages) == 1:
+                self.running = False
+            else:
+                self.back()
         elif key in (ord("r"), ord("R")) and self.form_label is None:
             self.execute("status", "silent")
 
     def run(self, win: Any) -> None:
-        try: curses.curs_set(0)
-        except curses.error: pass
+        try:
+            curses.curs_set(0)
+        except curses.error:
+            pass
         win.keypad(True)
         win.timeout(125)
         try:
@@ -620,11 +686,14 @@ class MikachanMenu:
         while self.running:
             self.drain_events()
             self.draw(win)
-            try: key = win.getch()
+            try:
+                key = win.getch()
             except KeyboardInterrupt:
-                if not (self.worker and self.worker.is_alive()): self.back()
+                if not (self.worker and self.worker.is_alive()):
+                    self.back()
                 continue
-            if key != -1: self.handle_key(key)
+            if key != -1:
+                self.handle_key(key)
         if self.worker and self.worker.is_alive():
             self.worker.join()
 

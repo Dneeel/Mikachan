@@ -2,6 +2,15 @@
 
 **Status: Full combined test source uploaded; installer is version-selectable.**
 
+**2026-10-20 regression recovery:** The reported seven installation-stage test failures
+were reproduced and repaired on `v2-test`. The release manager now recognizes its
+managed `uv` executable during read-only preflight and refreshes a bootstrap-owned
+panel after a verified first install. The incomplete-install path is covered by an
+offline resume test. The full suite passes **291 tests**; Ruff, Python compilation
+and installer shell syntax pass. Mypy remains advisory with **36 existing errors**
+in six source files. No VPS installation or live Telegram delivery was performed
+for this repair. See the [safe resume commands](docs/INSTALL_VERSION_SELECTION_FA.md#ادامهٔ-نصب-آزمایشی-پس-از-شکست-آزمونها).
+
 - Production branch: `v2` — unchanged.
 - Experimental branch: `v2-test` — includes Follow/Downloader, Owner, CoinPJ, sticker, Notes/Rules, ASCII terminal panel and installer changes.
 - The installer supports explicit `--branch` and optional full `--commit`; no version is silently selected.

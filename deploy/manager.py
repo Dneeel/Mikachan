@@ -196,7 +196,10 @@ class Manager:
             raise ManagerError("Manager repository URL is invalid")
         self.repo_url = repo_url
         self.require_root = require_root
-        self.uv = uv or shutil.which("uv") or "uv"
+        panel_uv = paths.base / "panel-venv/bin/uv"
+        self.uv = (uv or
+                   (str(panel_uv) if panel_uv.is_file() and os.access(panel_uv, os.X_OK)
+                    else None) or shutil.which("uv") or "uv")
         self.on_event = on_event or (lambda message: None)
 
     def _root(self) -> None:
@@ -264,7 +267,10 @@ class Manager:
 
     def preflight(self) -> dict[str, Any]:
         tools = {name: shutil.which(name) for name in
-                 ("git", "uv", "systemctl", "flock", "ffmpeg", "ffprobe", "tesseract")}
+                 ("git", "systemctl", "flock", "ffmpeg", "ffprobe", "tesseract")}
+        # Read-only commands launch with the system Python, outside the panel
+        # venv. Report the same uv executable that installation will use.
+        tools["uv"] = shutil.which(self.uv)
         disk = shutil.disk_usage(self.paths.base.parent) if self.paths.base.parent.exists() else None
         languages = self._run("tesseract", "--list-langs", check=False).stdout.splitlines() \
             if tools["tesseract"] else []
@@ -859,6 +865,10 @@ class Manager:
             self._fetch()
             sha = self._target(branch, commit)
             release = self._stage(sha, checks=checks)
+            try:
+                self._refresh_panel(release)
+            except (OSError, ValueError) as exc:
+                self.on_event(f"Panel refresh skipped: {type(exc).__name__}")
             values = dict(config) if config is not None else (
                 _parse_env(self.paths.env) if reuse_existing_config and self.paths.env.is_file()
                 else None)

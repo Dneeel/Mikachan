@@ -113,7 +113,7 @@ class TelegramFlowTests(unittest.IsolatedAsyncioTestCase):
             (
                 "https://instagram.com/stories/a/1",
                 b"Use --cookies for authentication",
-                "requires login",
+                "authorized public session",
             ),
             (
                 "https://instagram.com/p/abc",

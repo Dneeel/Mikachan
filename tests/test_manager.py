@@ -25,6 +25,25 @@ def test_default_paths_keep_managed_files_beneath_one_root():
     assert paths.unit == Path("/etc/systemd/system/mikachan.service")
 
 
+def test_preflight_finds_managed_uv_outside_global_path(tmp_path, monkeypatch):
+    root = tmp_path / "Mikachan"
+    panel_bin = root / "panel-venv" / "bin"
+    panel_bin.mkdir(parents=True)
+    managed_uv = panel_bin / "uv"
+    managed_uv.write_text("#!/bin/sh\nexit 0\n")
+    managed_uv.chmod(0o755)
+    empty_path = tmp_path / "empty-path"
+    empty_path.mkdir()
+    monkeypatch.setenv("PATH", str(empty_path))
+    manager = Manager(Paths(base=root), require_root=False)
+    assert manager.uv == str(managed_uv)
+    assert manager.preflight()["tools"]["uv"] == str(managed_uv)
+    global_uv = empty_path / "uv"
+    global_uv.write_text("#!/bin/sh\nexit 0\n")
+    global_uv.chmod(0o755)
+    assert Manager(Paths(base=root), require_root=False).uv == str(managed_uv)
+
+
 def test_panel_refresh_requires_bootstrap_marker_and_rejects_symlink(tmp_path):
     paths = Paths(base=tmp_path / "managed", state=tmp_path / "managed" / "state")
     manager = Manager(paths, require_root=False)
@@ -256,6 +275,48 @@ def test_failed_activation_restores_previous_code_and_database(
     assert manager.status()["service"] == "active"
     assert note(path) == "original"
     assert not manager.paths.journal.exists()
+
+
+def test_failed_quality_stage_can_resume_on_repaired_test_commit(
+        deployment: tuple[FakeManager, Path, str], monkeypatch) -> None:
+    manager, source, _ = deployment
+    git("checkout", "-b", "v2-test", cwd=source)
+    failed_sha = commit(source, "test release with failed quality gate")
+    original_stage = manager._stage
+    attempts = 0
+
+    def stage(sha: str, *, checks: bool = True) -> Path:
+        nonlocal attempts
+        release = original_stage(sha, checks=checks)
+        attempts += 1
+        if attempts == 1:
+            raise ManagerError("pytest failed (1): simulated regression")
+        return release
+
+    monkeypatch.setattr(manager, "_stage", stage)
+    refreshed: list[str] = []
+    monkeypatch.setattr(manager, "_refresh_panel", lambda release: refreshed.append(release.name))
+    with pytest.raises(ManagerError, match="pytest failed"):
+        manager.install(None, branch="v2-test")
+    assert refreshed == []
+    assert manager.status()["incomplete_install"]
+    assert not manager.paths.manifest.exists()
+    assert not manager.paths.unit.exists()
+    assert (manager.paths.releases / failed_sha).is_dir()
+    cached = manager.paths.cache / "uv" / "cached-wheel"
+    cached.parent.mkdir(parents=True)
+    cached.write_text("retain")
+    saved = manager.paths.state / "saved-state"
+    saved.parent.mkdir(parents=True)
+    saved.write_text("retain")
+    repaired_sha = commit(source, "repaired test release")
+    result = manager.install(None, branch="v2-test")
+    assert f"Installed v2-test@{repaired_sha[:12]}" in result
+    assert manager.status()["commit"] == repaired_sha
+    assert manager.status()["service"] == "inactive"
+    assert refreshed == [repaired_sha]
+    assert cached.read_text() == saved.read_text() == "retain"
+    assert (manager.paths.releases / failed_sha).is_dir()
 
 
 def test_snapshot_restore_and_authorization_sync(deployment: tuple[FakeManager, Path, str]) -> None:

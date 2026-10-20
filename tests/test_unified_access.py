@@ -192,6 +192,19 @@ async def test_personal_settings_identical_and_bound(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_broadcast_edits_its_original_progress_message(tmp_path):
+    store, access = registry(tmp_path)
+    bot = SimpleNamespace(send_message=AsyncMock(), edit_message_text=AsyncMock())
+    ui = SettingsUI(store.db, access, NowService(store.db), bot)
+    await ui._broadcast("session", 1, 1, 17, "<status>", [-100])
+    bot.send_message.assert_awaited_once_with(-100, "&lt;status&gt;")
+    edit = bot.edit_message_text.await_args
+    assert "Sent · 1" in edit.args[0]
+    assert edit.kwargs["chat_id"] == 1
+    assert edit.kwargs["message_id"] == 17
+
+
+@pytest.mark.asyncio
 async def test_saved_location_keeps_calendar_and_weather_skips_geocoding(tmp_path):
     db = Store(tmp_path / "state.sqlite").db
     now = NowService(db)

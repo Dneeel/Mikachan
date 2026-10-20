@@ -250,7 +250,8 @@ class SettingsUI:
         try:
             await self.bot.edit_message_text(
                 f"📨 <b>Delivery finished</b>\nSent · {sent}\nFailed · {failed}",
-                chat, message, reply_markup=markup([[("◀ Studio", f"z:{token}:messages")]]))
+                chat_id=chat, message_id=message,
+                reply_markup=markup([[("◀ Studio", f"z:{token}:messages")]]))
         finally:
             self.broadcast_tasks.pop(token, None)
 

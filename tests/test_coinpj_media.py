@@ -186,10 +186,16 @@ async def test_rate_command_coinpj_adapter_also_returns_photo_and_preserves_lega
 @pytest.mark.asyncio
 async def test_currency_reply_document_fallback_on_unsupported_photo():
     from aiogram.exceptions import TelegramBadRequest
+    from aiogram.methods import SendPhoto
     message = SimpleNamespace(
-        reply_photo=AsyncMock(side_effect=TelegramBadRequest()),
+        reply_photo=AsyncMock(side_effect=TelegramBadRequest(
+            method=SendPhoto(chat_id=42, photo="invalid-photo"),
+            message="Photo format is unsupported")),
         reply_document=AsyncMock(), reply=AsyncMock(),
     )
     await send_currency_reply(message, "100 usd", CurrencyReply("Rate", JPEG))
+    message.reply_photo.assert_awaited_once()
+    document = message.reply_document.await_args.args[0]
+    assert document.data == JPEG
     assert message.reply_document.await_args.kwargs["caption"] == "Rate"
     message.reply.assert_not_awaited()
