@@ -136,6 +136,7 @@ class UserbotBridge:
         self.staging_chat_id = staging_chat_id
         self.lock = asyncio.Lock()
         self.instagram_lock = asyncio.Lock()
+        self.instagram_transfer_lock = asyncio.Lock()
         self.last_request = 0.0
         self.cooldown_until = 0.0
         self.file_peer = None
@@ -181,12 +182,13 @@ class UserbotBridge:
     async def _instagram_collect(self, peer, after: int, *, settle: float,
                                  limit: int = 110, watch_edit=None,
                                  stop_on_highlight_done: bool = False,
-                                 goal: str = "media") -> list:
+                                 goal: str = "media", on_media=None) -> list:
         """Collect only this verified bot's subsequent messages, in source order."""
         found: dict[int, object] = {}
         started = time.monotonic()
-        deadline = started + (55 if goal == "profile" else 180)
+        deadline = started + (90 if goal == "profile" else 180)
         quiet_until = time.monotonic() + 32
+        profile_ready_at = None
         while time.monotonic() < deadline and len(found) < limit:
             rows = await self.client.get_messages(peer, limit=min(120, limit + 10))
             fresh = []
@@ -212,6 +214,11 @@ class UserbotBridge:
                         fresh.append(edited)
             if fresh:
                 quiet_until = time.monotonic() + (max(settle, 8) if goal == "profile" else settle)
+                if on_media is not None:
+                    for item in sorted(fresh, key=lambda value: value.id):
+                        if getattr(item, "media", None):
+                            await on_media(item)
+                    quiet_until = time.monotonic() + settle
                 if stop_on_highlight_done and any(
                         "highlight downloaded" in str(getattr(item, "raw_text", "") or "").casefold()
                         for item in fresh):
@@ -220,7 +227,10 @@ class UserbotBridge:
                         self._instagram_has_button(item, "download posts") or
                         self._instagram_has_button(item, "download highlights")
                         for item in found.values()):
-                    break
+                    if any(getattr(item, "media", None) for item in found.values()):
+                        break
+                    if profile_ready_at is None:
+                        profile_ready_at = time.monotonic() + 4
                 if goal == "posts" and any(self._instagram_has_button(item, "next 5 posts")
                                            for item in found.values()):
                     break
@@ -230,7 +240,9 @@ class UserbotBridge:
                 any(word in str(getattr(item, "raw_text", "") or "").casefold()
                     for word in ("please wait", "processing", "در حال", "لطفا صبر"))
                 for item in found.values())
-            if found and time.monotonic() >= quiet_until and not pending:
+            if found and time.monotonic() >= quiet_until and not pending and goal != "profile":
+                break
+            if profile_ready_at is not None and time.monotonic() >= profile_ready_at:
                 break
             await asyncio.sleep(0.4 if time.monotonic() - started < 6 else 1.0)
         if not found:
@@ -259,7 +271,7 @@ class UserbotBridge:
 
     async def instagram_click(self, message_id: int, row: int, column: int,
                               expected_label: str, *, settle: float = 10,
-                              stop_on_highlight_done: bool = False) -> list:
+                              stop_on_highlight_done: bool = False, on_media=None) -> list:
         try:
             async with asyncio.timeout(230):
                 async with self.instagram_lock:
@@ -292,7 +304,7 @@ class UserbotBridge:
                                 else "media")
                         return await self._instagram_collect(peer, after, settle=settle,
                             watch_edit=watch, stop_on_highlight_done=stop_on_highlight_done,
-                            goal=goal)
+                            goal=goal, on_media=on_media)
                     except ValueError:
                         edited = await self.client.get_messages(peer, ids=message_id)
                         if (edited and getattr(edited, "sender_id", None) == peer.id
@@ -307,7 +319,7 @@ class UserbotBridge:
 
     async def instagram_caption(self, message):
         """Press Get the caption and return the edited media message when offered."""
-        async with self.instagram_lock:
+        async with self.instagram_transfer_lock:
             await self._ready()
             peer = await self._instagram_peer()
             current = await self.client.get_messages(peer, ids=message.id)
@@ -338,7 +350,7 @@ class UserbotBridge:
                 raise ValueError("Instagram media exceeds the temporary download limit")
 
         async with asyncio.timeout(180):
-            async with self.instagram_lock:
+            async with self.instagram_transfer_lock:
                 await self._ready()
                 peer = await self._instagram_peer()
                 current = await self.client.get_messages(peer, ids=message.id)
@@ -354,7 +366,7 @@ class UserbotBridge:
         """Forward to the shared private staging chat for Bot API server-side copy."""
         if self.staging_chat_id >= 0:
             raise ValueError("Instagram fast copy needs a private staging chat")
-        async with self.instagram_lock:
+        async with self.instagram_transfer_lock:
             await self._ready()
             peer = await self._instagram_peer()
             current = await self.client.get_messages(peer, ids=message_id)
@@ -369,7 +381,7 @@ class UserbotBridge:
 
     async def instagram_unstage(self, message_id: int) -> None:
         if self.staging_chat_id < 0:
-            async with self.instagram_lock:
+            async with self.instagram_transfer_lock:
                 await self.client.delete_messages(self.staging_chat_id, message_id)
 
     async def proxy_request(self):

@@ -7,9 +7,42 @@ import pytest
 from mikachan.follow import command_target, public_items
 from mikachan.jobs import extractor_error, gallery_media_headers
 from mikachan.security import source
-from mikachan.public_social import (_get, public_statuses, public_tiktok_profile,
-                                    public_x_profile,
-                                    public_tiktok_sound, public_x_media)
+from mikachan.public_social import (_get, public_statuses, public_instagram_profile,
+                                     public_tiktok_profile, public_x_profile,
+                                     public_tiktok_sound, public_x_media)
+
+
+@pytest.mark.asyncio
+async def test_instagram_public_page_exposes_only_verified_name_and_stable_avatar(monkeypatch):
+    import httpx
+
+    html = ('<meta property="og:title" content="Real Name (@alice) • Instagram">'
+            '<meta property="og:image" content="https://scontent.cdninstagram.com/'
+            'v/t51.2885-19/123456789012345_123456789012345_n.jpg?token=rotates">')
+    original = httpx.AsyncClient
+    monkeypatch.setattr("mikachan.public_social.validate_dns", lambda _url: None)
+    monkeypatch.setattr("mikachan.public_social.httpx.AsyncClient",
+                        lambda **kwargs: original(transport=httpx.MockTransport(
+                            lambda _request: httpx.Response(200, text=html)), **kwargs))
+    assert await public_instagram_profile("alice") == {
+        "name": "Real Name", "avatar": "123456789012345_123456789012345_n.jpg"}
+    assert (await public_instagram_profile("alice", display_avatar=True))["avatar"].startswith(
+        "https://scontent.cdninstagram.com/")
+
+
+@pytest.mark.asyncio
+async def test_instagram_public_page_rejects_mismatched_identity(monkeypatch):
+    import httpx
+
+    original = httpx.AsyncClient
+    monkeypatch.setattr("mikachan.public_social.validate_dns", lambda _url: None)
+    monkeypatch.setattr("mikachan.public_social.httpx.AsyncClient",
+                        lambda **kwargs: original(transport=httpx.MockTransport(
+                            lambda _request: httpx.Response(200, text=(
+                                '<meta property="og:title" content="Other (@bob) • Instagram">'))),
+                            **kwargs))
+    with pytest.raises(ValueError, match="identity mismatch"):
+        await public_instagram_profile("alice")
 
 
 @pytest.mark.asyncio

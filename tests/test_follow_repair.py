@@ -48,6 +48,22 @@ def test_follow_only_cookie_files_require_private_owner_permissions(monkeypatch,
 
 
 @pytest.mark.asyncio
+async def test_instagram_name_avatar_fallback_does_not_claim_bio(monkeypatch, tmp_path):
+    monkeypatch.setattr(f, "validate_dns", lambda _url: None)
+    monkeypatch.setattr(f, "_extract", AsyncMock(side_effect=ValueError("login required")))
+    fallback = AsyncMock(return_value={"name": "Alice", "avatar": "stable-photo.jpg"})
+    monkeypatch.setattr(f, "public_instagram_profile", fallback)
+    target = f.command_target("instagram alice")
+    assert await f.public_profile(target) == {"name": "Alice", "avatar": "stable-photo.jpg"}
+    service, fid = saved(Store(tmp_path / "bot.db"), "instagram", ["bio", "name", "avatar"])
+    row = service.db.db.execute("SELECT * FROM follows WHERE id=?", (fid,)).fetchone()
+    assert await service.check(row) == {"profile": True}
+    errors = {item[0]: item[1] for item in service.db.db.execute(
+        "SELECT category,reason FROM follow_source_errors WHERE follow_id=?", (fid,))}
+    assert errors == {"bio": "public profile does not expose this field"}
+
+
+@pytest.mark.asyncio
 async def test_instagram_independent_reels_and_exactly_two_buttons(monkeypatch, tmp_path):
     service, fid = saved(Store(tmp_path / "bot.db"), "instagram", ["posts", "reels"])
     lists = {

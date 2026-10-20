@@ -26,7 +26,8 @@ from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from .security import allowed, clean_url, instagram_cookie_args, source, validate_dns
-from .public_social import public_statuses, public_tiktok_profile, public_x_profile
+from .public_social import (public_statuses, public_instagram_profile,
+                            public_tiktok_profile, public_x_profile)
 from .store import Store
 
 INTERVAL = 15 * 60
@@ -712,6 +713,11 @@ async def public_profile(target: Target, *, display_avatar: bool = False) -> dic
             return await public_x_profile(target.handle, display_avatar=display_avatar)
         except (ValueError, TimeoutError, OSError, httpx.HTTPError):
             pass
+    if target.platform == "instagram":
+        try:
+            return await public_instagram_profile(target.handle, display_avatar=display_avatar)
+        except (ValueError, TimeoutError, OSError, httpx.HTTPError):
+            pass
     if target.platform == "youtube":
         data = await _extract([
             "yt-dlp", "--flat-playlist", "--playlist-end", "1",
@@ -999,6 +1005,16 @@ class FollowService:
                                    "reason=excluded.reason,checked_at=excluded.checked_at",
                                    (row["id"], category, reason, time.time()))
             await self._source_health(row, category, healthy)
+        for category in selected & {"bio", "name", "avatar"}:
+            if category in profile:
+                self.db.db.execute("DELETE FROM follow_source_errors WHERE follow_id=? AND category=?",
+                                   (row["id"], category))
+            elif health.get("profile"):
+                self.db.db.execute("INSERT INTO follow_source_errors VALUES (?,?,?,?) "
+                                   "ON CONFLICT(follow_id,category) DO UPDATE SET "
+                                   "reason=excluded.reason,checked_at=excluded.checked_at",
+                                   (row["id"], category,
+                                    "public profile does not expose this field", time.time()))
         if not any(health.values()):
             raise ValueError("no public source accessible")
         old_profile = json.loads(row["profile_data"])

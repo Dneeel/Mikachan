@@ -361,7 +361,8 @@ class InstagramRelay:
         return True
 
     async def _send_results(self, chat: int, user: int, handle: str,
-                            messages: list, *, stories: bool = False) -> tuple[int, object | None, int]:
+                            messages: list, *, stories: bool = False,
+                            skip_ids: set[int] | None = None) -> tuple[int, object | None, int]:
         fallback = f"https://www.instagram.com/stories/{handle}/" if stories else None
         count = 0
         skipped = 0
@@ -369,6 +370,8 @@ class InstagramRelay:
         trusted_batch = any(self._media(message) and _recognized_media(message)
                             for message in messages)
         for message in messages:
+            if message.id in (skip_ids or set()):
+                continue
             if any(_action_for(_button_label(button)) == "next_posts"
                    for row in getattr(message, "buttons", None) or [] for button in row):
                 menu = message
@@ -455,13 +458,49 @@ class InstagramRelay:
             return True
         self.active_menus.add(token)
         await query.answer("Loading…")
+        stream_task = None
         try:
-            settle = (20 if action == "stories" or action.startswith("h") else
+            settle = (35 if action == "stories" else 20 if action.startswith("h") else
                       12 if action in {"posts", "next_posts"} else 3)
+            streamed: set[int] = set()
+            streamed_count = 0
+            streamed_skipped = 0
+            stream_queue: asyncio.Queue = asyncio.Queue(maxsize=110)
+            async def deliver(item) -> None:
+                if item.id in streamed or not _recognized_media(item):
+                    return
+                streamed.add(item.id)
+                await stream_queue.put(item)
+            async def stream_worker() -> None:
+                nonlocal streamed_count, streamed_skipped
+                while True:
+                    item = await stream_queue.get()
+                    try:
+                        async with asyncio.timeout(190):
+                            sent = await self._send_media(menu.chat, menu.user, item,
+                                f"https://www.instagram.com/stories/{menu.handle}/"
+                                if action == "stories" else None, trusted_batch=True)
+                        if sent:
+                            streamed_count += 1
+                        else:
+                            streamed_skipped += 1
+                    except Exception:
+                        streamed_skipped += 1
+                    finally:
+                        stream_queue.task_done()
+            streaming = action == "stories" or action.startswith("h")
+            if streaming:
+                stream_task = asyncio.create_task(stream_worker())
             messages = await self.bridge.instagram_click(menu.upstream, *selected[:2], selected[2],
-                settle=settle, stop_on_highlight_done=action.startswith("h"))
+                settle=settle, stop_on_highlight_done=action.startswith("h"),
+                on_media=deliver if streaming else None)
+            if stream_task is not None:
+                await stream_queue.join()
             count, next_menu, skipped = await self._send_results(
-                menu.chat, menu.user, menu.handle, messages, stories=action == "stories")
+                menu.chat, menu.user, menu.handle, messages, stories=action == "stories",
+                skip_ids=streamed)
+            count += streamed_count
+            skipped += streamed_skipped
             if next_menu:
                 replacement = secrets.token_urlsafe(8)
                 markup, actions = self._menu_markup(replacement, next_menu,
@@ -495,5 +534,8 @@ class InstagramRelay:
             await self.bot.send_message(menu.chat,
                 "⚠️ Instagram provider could not complete this action. Try again later.")
         finally:
+            if stream_task is not None:
+                stream_task.cancel()
+                await asyncio.gather(stream_task, return_exceptions=True)
             self.active_menus.discard(token)
         return True

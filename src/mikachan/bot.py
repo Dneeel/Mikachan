@@ -193,7 +193,7 @@ HELP_TEXT = (
     "/fal · /poem · /quote · /dice\n"
     "Groups: /rules · /notes · /setnote · /groupstats · /groupsettings · /id (reply)\n\n"
     "🛠 <b>Utilities</b>\n"
-    "/qr · /scan · /ocr · /url (reply to a file)\n"
+    "/qr · /scan · /ocr · /url or /link (reply to a file)\n"
     "/weather CITY · /now [CITY]\n"
     "/st · /xst (reply to an image or sticker)\n"
     "/nasa · /translate en|fa TEXT\n\n"
@@ -312,9 +312,15 @@ class App:
             return
         text = m.text.strip()
         normalized_text = " ".join(text.replace("ي", "ی").replace("ك", "ک").split())
-        if normalized_text in {"آیدی", "ایدی"} and m.chat.type in {"group", "supergroup"}:
+        if ((normalized_text in {"آیدی", "ایدی"} or
+             normalized_text.casefold() == "id" and m.reply_to_message) and
+                m.chat.type in {"group", "supergroup"}):
             if self.module_enabled("community", m.chat.id):
                 await self.group_status.show_identity(m)
+            return
+        if normalized_text == "لینک" and m.reply_to_message:
+            if self.module_enabled("utilities", m.chat.id):
+                await self.command(m, "/url")
             return
         if normalized_text == "پروکسی":
             if self.module_enabled("utilities", m.chat.id):
@@ -360,7 +366,7 @@ class App:
                 "fal", "poem", "quote", "dice", "nickname", "rules", "setrules",
                 "notes", "setnote", "delrules", "welcome", "del",
                 "mute", "modlog", "groupstats", "groupstatus", "groupsettings", "qr", "scan", "ocr",
-                "st", "xst", "weather", "now", "nasa", "translate", "url"}
+                "st", "xst", "weather", "now", "nasa", "translate", "url", "link", "vpn", "proxy"}
             if explicit_text or text.startswith("/") and builtin:
                 self.community.store.use(m.chat.id, m.from_user.id, "request")
         if (m.chat.type in {"group", "supergroup"} and
@@ -479,12 +485,14 @@ class App:
             return
         word, _, arg = raw.partition(" ")
         cmd = word.split("@")[0].lower()
+        if cmd == "/link":
+            cmd = "/url"
         arg = arg.strip()
         downloader_commands = {"/search", "/music", "/podcast", "/pod", "/book"}
         follow_commands = {"/follow", "/following", "/twitter", "/instagram",
                            "/tiktok", "/youtube"}
         utility_commands = {"/qr", "/scan", "/ocr", "/st", "/xst", "/weather", "/now",
-                            "/nasa", "/translate", "/url", "/proxy", "/image", "/sticker", "/stickerimage",
+                            "/nasa", "/translate", "/url", "/proxy", "/vpn", "/image", "/sticker", "/stickerimage",
                             "/gif", "/pack", "/convert"}
         if (cmd in downloader_commands and not self.module_enabled("downloader", m.chat.id) or
                 cmd in follow_commands and not self.module_enabled("follow", m.chat.id) or
@@ -495,6 +503,9 @@ class App:
             return
         if cmd == "/rate":
             return  # Removed public command; currency phrases still use their existing provider.
+        if cmd == "/vpn":
+            await m.reply("🍆")
+            return
         if cmd == "/settings" and hasattr(self, "settings_ui"):
             await self.settings_ui.show(m)
             return
@@ -874,10 +885,16 @@ class App:
                 await self.bot.send_message(chat, "Instagram profiles need a Telegram user "
                                             "account session. Run userbot-login on the server.")
                 return
+            progress = await self.bot.send_message(chat, "⏳ Finding Instagram profile…")
             try:
                 await relay.show_profile(chat, user, target.handle)
             except ValueError as exc:
                 await self.bot.send_message(chat, html.escape(str(exc)))
+            finally:
+                try:
+                    await self.bot.delete_message(chat, progress.message_id)
+                except Exception:
+                    pass
             return
         token = self.follow.db.profile_panel(user, chat, target)
         rows = [
@@ -1981,6 +1998,7 @@ class App:
                     ("notes", "Manage group notes"),
                     ("qr", "Create a QR image"),
                     ("url", "Get a link for a replied file"),
+                    ("link", "Get a link for a replied file"),
                     ("scan", "Scan a replied QR or barcode"),
                     ("ocr", "Read text in a replied image"),
                     ("st", "Convert replied image to sticker"),
@@ -1989,6 +2007,7 @@ class App:
                     ("now", "Local time and calendars"),
                     ("nasa", "NASA astronomy picture"),
                     ("proxy", "Current Telegram proxies"),
+                    ("vpn", "VPN status"),
                     ("translate", "Translate selected text"),
                 )
             ]

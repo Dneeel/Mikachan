@@ -10,6 +10,7 @@ import time
 from urllib.parse import urlsplit
 
 import httpx
+from bs4 import BeautifulSoup
 
 from .security import clean_url, validate_dns
 
@@ -87,6 +88,47 @@ async def public_tiktok_profile(handle: str, *, display_avatar: bool = False) ->
             match = re.search(r"/([a-f0-9]{32,})~", urlsplit(avatar).path)
             if match:
                 result["avatar"] = match.group(1)
+    return result
+
+
+async def public_instagram_profile(handle: str, *, display_avatar: bool = False) -> dict[str, str]:
+    """Use identity-checked public page metadata for name and avatar only.
+
+    Public page metadata does not contain a reliable biography or post timeline.
+    """
+    if not re.fullmatch(r"[\w.]{1,30}", handle, re.ASCII):
+        raise ValueError("invalid Instagram handle")
+    endpoint = clean_url(f"https://www.instagram.com/{handle}/")
+    await asyncio.to_thread(validate_dns, endpoint)
+    async with httpx.AsyncClient(timeout=12, follow_redirects=False) as client:
+        response = await client.get(endpoint, headers={"User-Agent": "Mozilla/5.0"})
+        response.raise_for_status()
+        if len(response.content) > 2_000_000:
+            raise ValueError("Instagram profile page is too large")
+        soup = BeautifulSoup(response.text, "html.parser")
+    title_tag = soup.find("meta", attrs={"property": "og:title"})
+    title = str(title_tag.get("content") or "") if title_tag else ""
+    if not re.search(r"\(@" + re.escape(handle) + r"\)", title, re.I):
+        raise ValueError("Instagram public profile identity mismatch")
+    result: dict[str, str] = {}
+    name = title.split("(@", 1)[0].strip(" \u200e\u200f·")
+    if name:
+        result["name"] = name[:500]
+    image_tag = soup.find("meta", attrs={"property": "og:image"})
+    image = str(image_tag.get("content") or "") if image_tag else ""
+    parts = urlsplit(image)
+    host = (parts.hostname or "").lower()
+    if (parts.scheme == "https" and
+            (host.endswith(".cdninstagram.com") or host.endswith(".fbcdn.net"))):
+        if display_avatar:
+            await asyncio.to_thread(validate_dns, image)
+            result["avatar"] = image
+        else:
+            filename = parts.path.rsplit("/", 1)[-1]
+            if re.fullmatch(r"[\w.-]{15,180}\.(?:jpg|jpeg|png|webp)", filename, re.I):
+                result["avatar"] = filename
+    if not result:
+        raise ValueError("Instagram public profile metadata unavailable")
     return result
 
 

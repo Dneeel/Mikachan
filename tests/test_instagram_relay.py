@@ -139,6 +139,74 @@ async def test_profile_collector_waits_for_card_after_initial_notice():
 
 
 @pytest.mark.asyncio
+async def test_profile_collector_waits_past_partial_reply_quiet_period(monkeypatch):
+    bridge = UserbotBridge.__new__(UserbotBridge)
+    peer = SimpleNamespace(id=99)
+    notice = SimpleNamespace(id=11, sender_id=99, raw_text="Preparing profile",
+                             buttons=[], media=None)
+    profile = SimpleNamespace(id=12, sender_id=99, raw_text="🆔 Username: cnn",
+                              buttons=[[button("Download posts")]], media=object())
+    rounds = 0
+    async def get_messages(_peer, **_kwargs):
+        nonlocal rounds
+        rounds += 1
+        return [notice] if rounds < 4 else [profile, notice]
+    ticks = iter(range(0, 100, 2))
+    monkeypatch.setattr("mikachan.userbot.time", SimpleNamespace(monotonic=lambda: next(ticks)))
+    monkeypatch.setattr("mikachan.userbot.asyncio.sleep", AsyncMock())
+    bridge.client = SimpleNamespace(get_messages=get_messages)
+    result = await bridge._instagram_collect(peer, 10, settle=0.1, goal="profile")
+    assert rounds == 4
+    assert result[-1].id == 12
+
+
+@pytest.mark.asyncio
+async def test_profile_collector_keeps_photo_arriving_after_text_controls():
+    bridge = UserbotBridge.__new__(UserbotBridge)
+    peer = SimpleNamespace(id=99)
+    controls = SimpleNamespace(id=11, sender_id=99, raw_text="🆔 Username: cnn",
+                               buttons=[[button("Download posts")]], media=None)
+    portrait = SimpleNamespace(id=12, sender_id=99, raw_text="", buttons=[], media=object())
+    rounds = 0
+    async def get_messages(_peer, **_kwargs):
+        nonlocal rounds
+        rounds += 1
+        return [controls] if rounds == 1 else [portrait, controls]
+    bridge.client = SimpleNamespace(get_messages=get_messages)
+    result = await asyncio.wait_for(bridge._instagram_collect(
+        peer, 10, settle=0.1, goal="profile"), 3)
+    assert [item.id for item in result] == [11, 12]
+
+
+@pytest.mark.asyncio
+async def test_story_collector_delivers_first_item_before_batch_finishes():
+    bridge = UserbotBridge.__new__(UserbotBridge)
+    peer = SimpleNamespace(id=99)
+    first = SimpleNamespace(id=11, sender_id=99, raw_text="Story 1", media=object(),
+                            buttons=[])
+    second = SimpleNamespace(id=12, sender_id=99, raw_text="Story 2", media=object(),
+                             buttons=[])
+    done = SimpleNamespace(id=13, sender_id=99, raw_text="✅ Highlight downloaded",
+                           media=None, buttons=[])
+    delivered = []
+    rounds = 0
+    async def get_messages(_peer, **_kwargs):
+        nonlocal rounds
+        rounds += 1
+        if rounds == 1:
+            return [first]
+        assert delivered == [11]
+        return [done, second, first]
+    async def on_media(item):
+        delivered.append(item.id)
+    bridge.client = SimpleNamespace(get_messages=get_messages)
+    result = await asyncio.wait_for(bridge._instagram_collect(
+        peer, 10, settle=1, stop_on_highlight_done=True, on_media=on_media), 3)
+    assert delivered == [11, 12]
+    assert len(result) == 3
+
+
+@pytest.mark.asyncio
 async def test_posts_collector_keeps_edited_next_button_with_new_media():
     bridge = UserbotBridge.__new__(UserbotBridge)
     peer = SimpleNamespace(id=99)
@@ -159,7 +227,7 @@ async def test_posts_collector_keeps_edited_next_button_with_new_media():
 @pytest.mark.asyncio
 async def test_caption_button_added_after_first_snapshot_is_clicked():
     bridge = UserbotBridge.__new__(UserbotBridge)
-    bridge.instagram_lock = asyncio.Lock()
+    bridge.instagram_transfer_lock = asyncio.Lock()
     bridge.instagram_last_click = 0
     peer = SimpleNamespace(id=99)
     stale = SimpleNamespace(id=11, sender_id=99, raw_text="",
@@ -287,6 +355,32 @@ async def test_next_posts_menu_survives_media_button_in_same_batch():
     count, menu, skipped = await relay._send_results(70, 7, "cnn", [next_posts, post])
     assert (count, skipped) == (1, 0)
     assert menu is next_posts
+
+
+@pytest.mark.asyncio
+async def test_story_callback_sends_first_item_while_provider_is_still_uploading():
+    story = SimpleNamespace(id=30, photo=object(), document=None, video=None,
+                            raw_text="🤖 Downloaded with @instaRoxinoBot", buttons=[])
+    delivered = asyncio.Event()
+    async def send_media(*_args, **_kwargs):
+        delivered.set()
+        return True
+    async def click(*_args, **kwargs):
+        await kwargs["on_media"](story)
+        await asyncio.wait_for(delivered.wait(), 1)
+        return [story]
+    bridge = SimpleNamespace(instagram_click=AsyncMock(side_effect=click))
+    bot = SimpleNamespace(send_message=AsyncMock())
+    relay = InstagramRelay(bridge, bot, None, None)
+    relay._send_media = AsyncMock(side_effect=send_media)
+    _, actions = relay._menu_markup("profile", card(), profile_handle="cnn")
+    relay._remember_menu("profile", 7, 70, 100, "cnn", card(), actions)
+    query = SimpleNamespace(data="ir:profile:stories", from_user=SimpleNamespace(id=7),
+                            message=SimpleNamespace(chat=SimpleNamespace(id=70),
+                                                    message_id=100), answer=AsyncMock())
+    assert await asyncio.wait_for(relay.callback(query), 2)
+    relay._send_media.assert_awaited_once()
+    assert bot.send_message.await_args.args[1] == "✅ Done"
 
 
 @pytest.mark.asyncio

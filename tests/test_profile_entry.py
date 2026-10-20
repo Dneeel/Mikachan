@@ -55,11 +55,15 @@ async def test_resolve_instagram_and_youtube_creator_from_public_metadata(monkey
 class FakeBot:
     def __init__(self):
         self.sent = []
+        self.deleted = []
 
     async def send_message(self, chat, text, **kwargs):
         message_id = 200 + len(self.sent)
         self.sent.append((chat, text, kwargs, message_id))
         return SimpleNamespace(message_id=message_id)
+
+    async def delete_message(self, chat, message_id):
+        self.deleted.append((chat, message_id))
 
 
 def query(data, message_id):
@@ -93,7 +97,8 @@ async def test_predownload_profile_callback_opens_panel_and_follow(monkeypatch, 
     monkeypatch.setattr("mikachan.bot.resolve_creator_from_post", resolve)
     await app.callback(query(f"c:{cid}:p", 101))
     app.instagram_relay.show_profile.assert_awaited_once_with(42, 42, "alice")
-    assert app.bot.sent == []
+    assert app.bot.sent[0][1] == "⏳ Finding Instagram profile…"
+    assert app.bot.deleted == [(42, app.bot.sent[0][3])]
     state = app.store.db.execute("SELECT state FROM confirmations WHERE id=?", (cid,)).fetchone()
     assert state["state"] == "PENDING"
 
