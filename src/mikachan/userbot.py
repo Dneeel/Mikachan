@@ -123,6 +123,11 @@ class UserbotBridge:
                             getattr(button, "data", None)) for button in row)
                      for row in (getattr(message, "buttons", None) or []))
 
+    @staticmethod
+    def _instagram_has_button(message, phrase: str) -> bool:
+        return any(phrase in str(getattr(button, "text", "") or "").casefold()
+                   for row in (getattr(message, "buttons", None) or []) for button in row)
+
     def __init__(self, api_id: int, api_hash: str, session: str, staging_chat_id: int):
         from telethon import TelegramClient  # type: ignore[import-untyped]
         from telethon.sessions import StringSession  # type: ignore[import-untyped]
@@ -130,6 +135,7 @@ class UserbotBridge:
         self.client = TelegramClient(StringSession(session), api_id, api_hash)
         self.staging_chat_id = staging_chat_id
         self.lock = asyncio.Lock()
+        self.instagram_lock = asyncio.Lock()
         self.last_request = 0.0
         self.cooldown_until = 0.0
         self.file_peer = None
@@ -174,48 +180,69 @@ class UserbotBridge:
 
     async def _instagram_collect(self, peer, after: int, *, settle: float,
                                  limit: int = 110, watch_edit=None,
-                                 stop_on_highlight_done: bool = False) -> list:
+                                 stop_on_highlight_done: bool = False,
+                                 goal: str = "media") -> list:
         """Collect only this verified bot's subsequent messages, in source order."""
         found: dict[int, object] = {}
-        deadline = time.monotonic() + 180
+        started = time.monotonic()
+        deadline = started + (55 if goal == "profile" else 180)
         quiet_until = time.monotonic() + 32
         while time.monotonic() < deadline and len(found) < limit:
             rows = await self.client.get_messages(peer, limit=min(120, limit + 10))
-            fresh = [item for item in rows if getattr(item, "sender_id", None) == peer.id
-                     and getattr(item, "id", 0) > after and item.id not in found]
-            if fresh:
-                for item in fresh:
+            fresh = []
+            for item in rows:
+                if getattr(item, "sender_id", None) != peer.id or getattr(item, "id", 0) <= after:
+                    continue
+                previous = found.get(item.id)
+                if previous is None or (item.raw_text != getattr(previous, "raw_text", None) or
+                                        self._button_signature(item) !=
+                                        self._button_signature(previous)):
                     found[item.id] = item
-                quiet_until = time.monotonic() + settle
+                    fresh.append(item)
+            if watch_edit is not None:
+                edited = await self.client.get_messages(peer, ids=watch_edit.id)
+                if (edited and getattr(edited, "sender_id", None) == peer.id and
+                        (edited.raw_text != watch_edit.raw_text or
+                         self._button_signature(edited) != self._button_signature(watch_edit))):
+                    previous = found.get(edited.id)
+                    if previous is None or (edited.raw_text != getattr(previous, "raw_text", None) or
+                                            self._button_signature(edited) !=
+                                            self._button_signature(previous)):
+                        found[edited.id] = edited
+                        fresh.append(edited)
+            if fresh:
+                quiet_until = time.monotonic() + (max(settle, 8) if goal == "profile" else settle)
                 if stop_on_highlight_done and any(
                         "highlight downloaded" in str(getattr(item, "raw_text", "") or "").casefold()
                         for item in fresh):
                     break
-                # A profile card or a highlight selection menu is complete as
-                # soon as its verified inline keyboard is available.
-                if any(getattr(item, "buttons", None) and not getattr(item, "media", None)
-                       for item in fresh) and not any(getattr(item, "media", None) for item in fresh):
+                if goal == "profile" and any(
+                        self._instagram_has_button(item, "download posts") or
+                        self._instagram_has_button(item, "download highlights")
+                        for item in found.values()):
                     break
-                if settle <= 3 and any(getattr(item, "buttons", None) for item in fresh):
+                if goal == "posts" and any(self._instagram_has_button(item, "next 5 posts")
+                                           for item in found.values()):
                     break
-            if watch_edit is not None and not found:
-                edited = await self.client.get_messages(peer, ids=watch_edit.id)
-                if (edited and getattr(edited, "sender_id", None) == peer.id
-                        and (edited.raw_text != watch_edit.raw_text
-                             or self._button_signature(edited) != self._button_signature(watch_edit))):
-                    return [edited]
-            if found and time.monotonic() >= quiet_until:
+                if goal == "menu" and any(getattr(item, "buttons", None) for item in fresh):
+                    break
+            pending = goal == "profile" and any(
+                any(word in str(getattr(item, "raw_text", "") or "").casefold()
+                    for word in ("please wait", "processing", "در حال", "لطفا صبر"))
+                for item in found.values())
+            if found and time.monotonic() >= quiet_until and not pending:
                 break
-            await asyncio.sleep(0.75)
+            await asyncio.sleep(0.4 if time.monotonic() - started < 6 else 1.0)
         if not found:
             raise ValueError("Instagram provider did not return a supported result")
         return [found[key] for key in sorted(found)]
 
-    async def instagram_request(self, query: str, *, settle: float = 5) -> list:
+    async def instagram_request(self, query: str, *, settle: float = 3,
+                                goal: str = "media") -> list:
         """One query at a time; the upstream bot requires 29 seconds between links."""
         try:
             async with asyncio.timeout(230):
-                async with self.lock:
+                async with self.instagram_lock:
                     await self._ready()
                     peer = await self._instagram_peer()
                     delay = self.instagram_last_sent + 30 - time.monotonic()
@@ -223,7 +250,8 @@ class UserbotBridge:
                         await asyncio.sleep(delay)
                     sent = await self.client.send_message(peer, query)
                     self.instagram_last_sent = time.monotonic()
-                    return await self._instagram_collect(peer, sent.id, settle=settle)
+                    return await self._instagram_collect(peer, sent.id, settle=settle,
+                                                         goal=goal)
         except ValueError:
             raise
         except Exception as exc:
@@ -234,7 +262,7 @@ class UserbotBridge:
                               stop_on_highlight_done: bool = False) -> list:
         try:
             async with asyncio.timeout(230):
-                async with self.lock:
+                async with self.instagram_lock:
                     await self._ready()
                     peer = await self._instagram_peer()
                     original = await self.client.get_messages(peer, ids=message_id)
@@ -255,10 +283,16 @@ class UserbotBridge:
                     self.instagram_last_click = time.monotonic()
                     try:
                         watch = original if ("highlights" in expected_label.casefold()
+                                             or "next 5 posts" in expected_label.casefold()
                                              or expected_label.casefold().startswith(
                                                  ("next", "previous", "prev"))) else None
+                        goal = ("posts" if "posts" in expected_label.casefold() else
+                                "menu" if "highlights" in expected_label.casefold() or
+                                expected_label.casefold().startswith(("next", "previous", "prev"))
+                                else "media")
                         return await self._instagram_collect(peer, after, settle=settle,
-                            watch_edit=watch, stop_on_highlight_done=stop_on_highlight_done)
+                            watch_edit=watch, stop_on_highlight_done=stop_on_highlight_done,
+                            goal=goal)
                     except ValueError:
                         edited = await self.client.get_messages(peer, ids=message_id)
                         if (edited and getattr(edited, "sender_id", None) == peer.id
@@ -273,28 +307,29 @@ class UserbotBridge:
 
     async def instagram_caption(self, message):
         """Press Get the caption and return the edited media message when offered."""
-        for row_index, row in enumerate(getattr(message, "buttons", None) or []):
-            for column, button in enumerate(row):
-                if ("get the caption" in str(getattr(button, "text", "")).casefold()
-                        and getattr(button, "data", None) is not None):
-                    async with self.lock:
-                        await self._ready()
-                        peer = await self._instagram_peer()
-                        current = await self.client.get_messages(peer, ids=message.id)
-                        if not current or getattr(current, "sender_id", None) != peer.id:
-                            return message
-                        delay = self.instagram_last_click + 2 - time.monotonic()
-                        if delay > 0:
-                            await asyncio.sleep(delay)
-                        await current.click(row_index, column)
-                        self.instagram_last_click = time.monotonic()
-                        for _ in range(12):
-                            await asyncio.sleep(0.5)
-                            edited = await self.client.get_messages(peer, ids=message.id)
-                            if edited and edited.raw_text != message.raw_text:
-                                return edited
-                    return message
-        return message
+        async with self.instagram_lock:
+            await self._ready()
+            peer = await self._instagram_peer()
+            current = await self.client.get_messages(peer, ids=message.id)
+            if not current or getattr(current, "sender_id", None) != peer.id:
+                raise ValueError("Instagram media message is no longer available")
+            for row_index, row in enumerate(getattr(current, "buttons", None) or []):
+                for column, button in enumerate(row):
+                    if ("get the caption" not in str(getattr(button, "text", "")).casefold()
+                            or getattr(button, "data", None) is None):
+                        continue
+                    delay = self.instagram_last_click + 2 - time.monotonic()
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    await current.click(row_index, column)
+                    self.instagram_last_click = time.monotonic()
+                    for _ in range(30):
+                        await asyncio.sleep(0.4)
+                        edited = await self.client.get_messages(peer, ids=message.id)
+                        if edited and edited.raw_text != current.raw_text:
+                            return edited
+                    raise ValueError("Instagram caption did not arrive after requesting it")
+            return current
 
     async def instagram_download(self, message, destination: Path,
                                  max_bytes: int) -> Path:
@@ -303,7 +338,7 @@ class UserbotBridge:
                 raise ValueError("Instagram media exceeds the temporary download limit")
 
         async with asyncio.timeout(180):
-            async with self.lock:
+            async with self.instagram_lock:
                 await self._ready()
                 peer = await self._instagram_peer()
                 current = await self.client.get_messages(peer, ids=message.id)
@@ -314,6 +349,28 @@ class UserbotBridge:
         if not result or Path(result).stat().st_size > max_bytes:
             raise ValueError("Instagram media download failed or exceeded the limit")
         return Path(result)
+
+    async def instagram_stage(self, message_id: int) -> int:
+        """Forward to the shared private staging chat for Bot API server-side copy."""
+        if self.staging_chat_id >= 0:
+            raise ValueError("Instagram fast copy needs a private staging chat")
+        async with self.instagram_lock:
+            await self._ready()
+            peer = await self._instagram_peer()
+            current = await self.client.get_messages(peer, ids=message_id)
+            if not current or getattr(current, "sender_id", None) != peer.id or not current.media:
+                raise ValueError("Instagram media is no longer available")
+            staged = await self.client.forward_messages(self.staging_chat_id, current)
+            if isinstance(staged, list):
+                if len(staged) != 1:
+                    raise ValueError("Instagram staging returned an unexpected batch")
+                staged = staged[0]
+            return int(staged.id)
+
+    async def instagram_unstage(self, message_id: int) -> None:
+        if self.staging_chat_id < 0:
+            async with self.instagram_lock:
+                await self.client.delete_messages(self.staging_chat_id, message_id)
 
     async def proxy_request(self):
         """Request the provider's own menu through the existing MTProto account."""

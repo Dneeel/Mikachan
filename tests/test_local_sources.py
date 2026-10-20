@@ -57,7 +57,7 @@ async def test_book_search_bound_callback_and_temp_cleanup(tmp_path):
         return str(target)
     provider.client.download_media = download
     bot = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=42)),
-                          send_document=AsyncMock())
+                          send_document=AsyncMock(), edit_message_text=AsyncMock())
     sources.bot = bot
     await sources.show_books(7, 8, "Novel")
     button = bot.send_message.await_args.kwargs["reply_markup"].inline_keyboard[0][0]
@@ -69,6 +69,7 @@ async def test_book_search_bound_callback_and_temp_cleanup(tmp_path):
     query.from_user.id = 8
     assert await sources.callback(query)
     bot.send_document.assert_awaited_once()
+    assert "✅ Sent" in bot.edit_message_text.await_args.args[0]
     assert list((tmp_path / "jobs").iterdir()) == []
 
 
@@ -127,7 +128,7 @@ async def test_local_music_uses_validated_audio_and_cleans_files(tmp_path):
         return file
     provider.client.download_media = download
     bot = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=42)),
-                          send_audio=AsyncMock())
+                          send_audio=AsyncMock(), edit_message_text=AsyncMock())
     sources.bot = bot
     await sources.show_files(7, 8, "tone", "music")
     button = bot.send_message.await_args.kwargs["reply_markup"].inline_keyboard[0][0]

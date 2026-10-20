@@ -1255,10 +1255,28 @@ class App:
                 await acknowledge(q, "Follow unavailable")
                 return
             if action == "open":
-                selected = ", ".join(json.loads(row["features"])) or "none"
+                selected_features = list(json.loads(row["features"]))
+                selected = ", ".join(selected_features) or "none"
+                errors = {str(item["category"]): str(item["reason"])
+                          for item in self.follow.db.db.execute(
+                              "SELECT category,reason FROM follow_source_errors WHERE follow_id=?",
+                              (follow_id,))}
+                baselines = {str(item[0]) for item in self.follow.db.db.execute(
+                    "SELECT category FROM follow_baselines WHERE follow_id=?", (follow_id,))}
+                health_lines = []
+                for key in selected_features:
+                    reason = errors.get(key) or (errors.get("profile") if key in
+                                                 {"bio", "name", "avatar"} else None)
+                    if reason:
+                        health_lines.append(f"⚠️ {html.escape(key)} · {html.escape(reason[:85])}")
+                    elif key in baselines:
+                        health_lines.append(f"✓ {html.escape(key)} · baseline recorded")
+                    else:
+                        health_lines.append(f"○ {html.escape(key)} · not verified")
                 body = (f"👀 <b>@{html.escape(row['handle'])}</b> · {row['platform'].title()}\n"
                         f"Watching: {html.escape(selected)}\n"
-                        f"Delivery: {html.escape(row['mode'])}")
+                        f"Delivery: {html.escape(row['mode'])}\n\n"
+                        "<b>Source status</b>\n" + "\n".join(health_lines))
                 markup = kb([[("⚙️ Settings", f"fm:{follow_id}:edit"),
                               ("🔄 Check now", f"fm:{follow_id}:check")],
                              [("✕ Unfollow", f"fm:{follow_id}:remove")],

@@ -11,6 +11,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from aiogram.types import FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 
 from .media import media_kind, verify
 from .security import clean_url
@@ -128,6 +129,7 @@ class InstagramRelay:
         self.audio_gate = asyncio.Semaphore(2)
         self.audio_active: set[str] = set()
         self.active_menus: set[str] = set()
+        self.fast_copy_available = True
 
     @staticmethod
     def _media(message) -> bool:
@@ -144,7 +146,7 @@ class InstagramRelay:
                         *, audio_only: bool = False) -> tuple[list[Path], str]:
         if not instagram_media_link(url):
             raise ValueError("Sorry, Instagram sound and unsupported links are not supported")
-        messages = await self.bridge.instagram_request(url, settle=12)
+        messages = await self.bridge.instagram_request(url, settle=6)
         media = [message for message in messages if self._media(message)]
         if media and not any(_recognized_media(message) for message in media):
             raise ValueError("Sorry, this Instagram media response is not supported")
@@ -231,25 +233,52 @@ class InstagramRelay:
     async def show_profile(self, chat: int, user: int, handle: str) -> None:
         if not re.fullmatch(r"[A-Za-z0-9._]{1,30}", handle):
             raise ValueError("Invalid Instagram username")
-        messages = await self.bridge.instagram_request("@" + handle, settle=2)
+        messages = await self.bridge.instagram_request("@" + handle, settle=2, goal="profile")
         card = next((item for item in messages if getattr(item, "buttons", None)
-                     and self._media(item)), None)
+                     and (self._menu_markup("probe", item, profile_handle=handle)[1].keys() &
+                          {"stories", "highlights", "posts"})), None)
         if card is None:
             raise ValueError(_unsupported_response(messages))
+        photo = card if self._media(card) else next((item for item in messages
+                                                    if self._media(item)), None)
         token = secrets.token_urlsafe(8)
         markup, actions = self._menu_markup(token, card, profile_handle=handle)
         if not {"stories", "highlights", "posts"} & actions.keys():
             raise ValueError("Instagram profile controls are unavailable")
-        body = self._profile_text(card, handle)
-        if self._media_size(card) > 10_000_000:
+        profile_fields = next((item for item in messages if "Username:" in str(
+            getattr(item, "raw_text", "") or "")), card)
+        body = self._profile_text(profile_fields, handle)
+        if photo and self._media_size(photo) > 10_000_000:
             raise ValueError("Instagram profile image is too large")
-        root = self.settings.data_dir / "jobs"
-        root.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix="ig-profile-", dir=root) as temp:
-            path = await self.bridge.instagram_download(card, Path(temp) / "profile", 10_000_000)
-            await verify(path, 10_000_000)
-            sent = await self.bot.send_photo(chat, FSInputFile(path), caption=body,
-                                             reply_markup=markup)
+        sent = None
+        if (photo and self.fast_copy_available and hasattr(self.bridge, "instagram_stage") and
+                getattr(self.bridge, "staging_chat_id", 0) < 0 and
+                hasattr(self.bot, "copy_message")):
+            staged = None
+            try:
+                staged = await self.bridge.instagram_stage(photo.id)
+                sent = await self.bot.copy_message(chat, self.bridge.staging_chat_id,
+                    staged, caption=body, reply_markup=markup)
+            except (TelegramBadRequest, TelegramForbiddenError):
+                self.fast_copy_available = False
+            except ValueError:
+                pass
+            finally:
+                if staged is not None:
+                    try:
+                        await self.bridge.instagram_unstage(staged)
+                    except Exception:
+                        pass
+        if photo and sent is None:
+            root = self.settings.data_dir / "jobs"
+            root.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix="ig-profile-", dir=root) as temp:
+                path = await self.bridge.instagram_download(photo, Path(temp) / "profile", 10_000_000)
+                await verify(path, 10_000_000)
+                sent = await self.bot.send_photo(chat, FSInputFile(path), caption=body,
+                                                 reply_markup=markup)
+        elif sent is None:
+            sent = await self.bot.send_message(chat, body, reply_markup=markup)
         self._remember_menu(token, user, chat, sent.message_id, handle, card, actions)
 
     async def _send_media(self, chat: int, user: int, message, fallback_url: str | None,
@@ -258,36 +287,70 @@ class InstagramRelay:
             return False
         if self._media_size(message) > 48 * 1024 * 1024:
             return False
-        message = await self.bridge.instagram_caption(message)
+        has_caption_button = any("get the caption" in _button_label(button).casefold()
+                                 for row in getattr(message, "buttons", None) or []
+                                 for button in row)
+        if has_caption_button or not trusted_batch:
+            message = await self.bridge.instagram_caption(message)
         caption, discovered = clean_instagram_caption(str(getattr(message, "raw_text", "") or ""))
         source_url = _message_link(message) or discovered or instagram_media_link(fallback_url or "")
-        root = self.settings.data_dir / "jobs"
-        root.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix="ig-item-", dir=root) as temp:
-            path = await self.bridge.instagram_download(message, Path(temp) / "media",
-                                                        48 * 1024 * 1024)
-            path = (await self.worker._prepare_media([path], 48 * 1024 * 1024))[0]
-            check = await verify(path, 48 * 1024 * 1024)
-            kind = media_kind(path, check)
-            token = secrets.token_urlsafe(8)
-            rows = ([[InlineKeyboardButton(
-                text="🔗 Open stories" if "/stories/" in source_url else "🔗 Open post",
-                url=source_url)] ] if source_url else [])
-            if kind == "video" and check["audio"]:
-                rows.append([InlineKeyboardButton(text="🎵 MP3",
-                    callback_data=f"ir:{token}:mp3")])
-            markup = InlineKeyboardMarkup(inline_keyboard=rows)
-            safe_caption = html.escape(caption[:700]) if caption else None
-            if kind == "photo":
-                sent = await self.bot.send_photo(chat, FSInputFile(path),
-                                                 caption=safe_caption, reply_markup=markup)
-            elif kind == "video":
-                sent = await self.bot.send_video(chat, FSInputFile(path),
-                                                 caption=safe_caption, reply_markup=markup,
-                                                 supports_streaming=True)
-            else:
-                return False
-        if kind == "video" and check["audio"]:
+        token = secrets.token_urlsafe(8)
+        rows = ([[InlineKeyboardButton(
+            text="🔗 Open stories" if "/stories/" in source_url else "🔗 Open post",
+            url=source_url)]] if source_url else [])
+        document = getattr(message, "document", None)
+        native_video = bool(getattr(message, "video", None) or
+            str(getattr(document, "mime_type", "") or "").startswith("video/"))
+        fast_kind = "photo" if getattr(message, "photo", None) else \
+                    "video" if native_video else ""
+        if fast_kind == "video":
+            rows.append([InlineKeyboardButton(text="🎵 MP3", callback_data=f"ir:{token}:mp3")])
+        markup = InlineKeyboardMarkup(inline_keyboard=rows)
+        safe_caption = html.escape(caption[:700]) if caption else None
+        sent = None
+        kind = fast_kind
+        audio = native_video
+        if (fast_kind and self.fast_copy_available and hasattr(self.bridge, "instagram_stage") and
+                getattr(self.bridge, "staging_chat_id", 0) < 0 and
+                hasattr(self.bot, "copy_message")):
+            staged = None
+            try:
+                staged = await self.bridge.instagram_stage(message.id)
+                sent = await self.bot.copy_message(chat, self.bridge.staging_chat_id,
+                    staged, caption=safe_caption or "", reply_markup=markup)
+            except (TelegramBadRequest, TelegramForbiddenError):
+                self.fast_copy_available = False
+            except ValueError:
+                pass
+            finally:
+                if staged is not None:
+                    try:
+                        await self.bridge.instagram_unstage(staged)
+                    except Exception:
+                        pass
+        if sent is None:
+            root = self.settings.data_dir / "jobs"
+            root.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix="ig-item-", dir=root) as temp:
+                path = await self.bridge.instagram_download(message, Path(temp) / "media",
+                                                            48 * 1024 * 1024)
+                path = (await self.worker._prepare_media([path], 48 * 1024 * 1024))[0]
+                check = await verify(path, 48 * 1024 * 1024)
+                kind = media_kind(path, check)
+                audio = check["audio"]
+                if kind == "video" and check["audio"] and fast_kind != "video":
+                    markup.inline_keyboard.append([InlineKeyboardButton(
+                        text="🎵 MP3", callback_data=f"ir:{token}:mp3")])
+                if kind == "photo":
+                    sent = await self.bot.send_photo(chat, FSInputFile(path),
+                                                     caption=safe_caption, reply_markup=markup)
+                elif kind == "video":
+                    sent = await self.bot.send_video(chat, FSInputFile(path),
+                                                     caption=safe_caption, reply_markup=markup,
+                                                     supports_streaming=True)
+                else:
+                    return False
+        if kind == "video" and audio:
             now = time.time()
             self.media_actions = {key: item for key, item in self.media_actions.items()
                                   if item.expires > now}
@@ -306,13 +369,16 @@ class InstagramRelay:
         trusted_batch = any(self._media(message) and _recognized_media(message)
                             for message in messages)
         for message in messages:
+            if any(_action_for(_button_label(button)) == "next_posts"
+                   for row in getattr(message, "buttons", None) or [] for button in row):
+                menu = message
             if self._media(message) and trusted_batch:
                 if await self._send_media(chat, user, message, fallback,
                                           trusted_batch=True):
                     count += 1
                 else:
                     skipped += 1
-            elif getattr(message, "buttons", None):
+            elif getattr(message, "buttons", None) and menu is None:
                 menu = message
         return count, menu, skipped
 

@@ -35,6 +35,18 @@ def test_existing_db_upgrades_without_losing_follows(tmp_path):
     assert {x[1] for x in store.db.execute("PRAGMA table_info(follow_downloads)")} >= {"kind", "value"}
 
 
+def test_follow_only_cookie_files_require_private_owner_permissions(monkeypatch, tmp_path):
+    path = tmp_path / "x-cookies.txt"
+    path.write_text("# Netscape HTTP Cookie File\n")
+    path.chmod(0o600)
+    monkeypatch.setenv("MIKACHAN_X_FOLLOW_COOKIES_FILE", str(path))
+    assert f._follow_cookie_args("https://x.com/alice/tweets") == ["--cookies", str(path)]
+    assert f._follow_cookie_args("https://www.youtube.com/@alice/videos") == []
+    path.chmod(0o644)
+    with pytest.raises(ValueError, match="private"):
+        f._follow_cookie_args("https://x.com/alice/tweets")
+
+
 @pytest.mark.asyncio
 async def test_instagram_independent_reels_and_exactly_two_buttons(monkeypatch, tmp_path):
     service, fid = saved(Store(tmp_path / "bot.db"), "instagram", ["posts", "reels"])

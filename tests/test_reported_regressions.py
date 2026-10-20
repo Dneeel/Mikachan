@@ -132,6 +132,8 @@ async def test_following_check_now_and_close_controls(tmp_path):
     app.follow.db.bind(token, 11)
     fid = app.follow.db.save(app.follow.db.get_session(token, 42, 42, 11))
     store.db.execute("UPDATE follows SET next_check=9999999999 WHERE id=?", (fid,))
+    store.db.execute("INSERT INTO follow_source_errors VALUES (?,?,?,?)",
+                     (fid, "profile", "provider needs login", 1.0))
     message = SimpleNamespace(chat=SimpleNamespace(id=42, type="private"),
                               message_id=22, edit_text=edit_text)
     app.follow.db.bind_menu(42, 42, 22)
@@ -142,6 +144,7 @@ async def test_following_check_now_and_close_controls(tmp_path):
     assert edits == []
     q.from_user = SimpleNamespace(id=42)
     await app.callback(q)
+    assert "⚠️ bio · provider needs login" in edits[-1][0]
     actions = button_data(edits[-1][1]["reply_markup"])
     assert {"⚙️ Settings", "🔄 Check now", "✖ Close"} <= actions.keys()
     q.data = actions["🔄 Check now"]

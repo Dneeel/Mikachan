@@ -6,6 +6,7 @@ the requested creator or post before it can create a follow event or download.
 
 import asyncio
 import re
+import time
 from urllib.parse import urlsplit
 
 import httpx
@@ -61,6 +62,64 @@ async def public_statuses(platform: str, handle: str) -> list[tuple[str, str, st
                       kind, url, str(item.get("text") or "")[:2000]))
     posts.sort(key=lambda item: (item[0], item[2]), reverse=True)
     return [(kind, url, title) for _, kind, url, title in posts[:15]]
+
+
+async def public_tiktok_profile(handle: str, *, display_avatar: bool = False) -> dict[str, str]:
+    """Use one identity-checked public profile response for stable change signals."""
+    if not re.fullmatch(r"[\w.]{1,64}", handle, re.ASCII):
+        raise ValueError("invalid TikTok handle")
+    data = await _get("tiktok", f"/2/tiktok/profile/{handle}")
+    user = data.get("user")
+    if (not isinstance(user, dict) or
+            str(user.get("screen_name") or "").casefold() != handle.casefold() or
+            user.get("protected") is True):
+        raise ValueError("TikTok public profile identity mismatch")
+    result = {"name": str(user.get("name") or "")[:500],
+              "bio": str(user.get("description") or "")[:500]}
+    avatar = str(user.get("avatar_url") or "")
+    if avatar.startswith("https://"):
+        if display_avatar:
+            await asyncio.to_thread(validate_dns, avatar)
+            result["avatar"] = avatar
+        else:
+            # CDN transforms and signed query parameters rotate independently
+            # of profile changes. The embedded asset hash is a stable signal.
+            match = re.search(r"/([a-f0-9]{32,})~", urlsplit(avatar).path)
+            if match:
+                result["avatar"] = match.group(1)
+    return result
+
+
+async def public_x_profile(handle: str, *, display_avatar: bool = False) -> dict[str, str]:
+    """Use VxTwitter only when its cached profile is fresh and identity matches."""
+    if not re.fullmatch(r"[\w.]{1,64}", handle, re.ASCII):
+        raise ValueError("invalid X handle")
+    endpoint = clean_url(f"https://api.vxtwitter.com/{handle}")
+    await asyncio.to_thread(validate_dns, endpoint)
+    async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
+        response = await client.get(endpoint, headers={"Accept": "application/json"})
+        response.raise_for_status()
+        if len(response.content) > 300_000:
+            raise ValueError("X profile response is too large")
+        data = response.json()
+    if (not isinstance(data, dict) or
+            str(data.get("screen_name") or "").casefold() != handle.casefold() or
+            data.get("protected") is True):
+        raise ValueError("X public profile identity mismatch")
+    fetched = data.get("fetched_on")
+    if not isinstance(fetched, (int, float)) or not 0 <= time.time() - fetched <= 7200:
+        raise ValueError("X public profile snapshot is stale")
+    result = {"name": str(data.get("name") or "")[:500],
+              "bio": str(data.get("description") or "")[:500]}
+    avatar = str(data.get("profile_image_url") or "")
+    parts = urlsplit(avatar)
+    if parts.scheme == "https" and parts.hostname == "pbs.twimg.com":
+        if display_avatar:
+            result["avatar"] = avatar
+        else:
+            result["avatar"] = re.sub(r"_(?:normal|bigger|mini)(?=\.[A-Za-z]{3,4}$)",
+                                       "", parts.path)
+    return result
 
 
 async def public_x_post(url: str) -> tuple[str, list[str]] | None:

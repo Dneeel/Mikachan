@@ -148,6 +148,14 @@ class LocalSources:
         await query.answer("Sending file…")
         if self.bridge is None:
             return True
+        title = html.escape(str(row["title"])[:100])
+        progress = await self.bot.send_message(row["chat_id"], "⏳ Fetching · " + title)
+        async def finish(text: str) -> None:
+            try:
+                await self.bot.edit_message_text(text, chat_id=row["chat_id"],
+                                                 message_id=progress.message_id)
+            except Exception:
+                pass
         root = self.data_dir / "jobs"
         root.mkdir(parents=True, exist_ok=True)
         try:
@@ -179,16 +187,19 @@ class LocalSources:
                              header.startswith(b"PK\x03\x04"))
                     if not valid or Path(path).stat().st_size > 48 * 1024 * 1024:
                         raise ValueError("Book file format or size is invalid")
+                    await finish("📤 Sending · " + title)
                     await self.bot.send_document(row["chat_id"], FSInputFile(path),
                                                  caption="📚 " + html.escape(name[:120]))
                 else:
                     streams = await verify(Path(path), 48 * 1024 * 1024)
                     if not streams["audio"] or streams["video"]:
                         raise ValueError("Source file is not audio")
+                    await finish("📤 Sending · " + title)
                     await self.bot.send_audio(row["chat_id"], FSInputFile(path),
                                               caption="🎵 " + html.escape(name[:120]))
+            await finish("✅ Sent · " + title)
         except (ValueError, OSError) as exc:
-            await self.bot.send_message(row["chat_id"], "⚠️ " + html.escape(str(exc)[:180]))
+            await finish("⚠️ " + html.escape(str(exc)[:180]))
         except Exception:
-            await self.bot.send_message(row["chat_id"], "⚠️ Local source is unavailable.")
+            await finish("⚠️ Local source is unavailable.")
         return True

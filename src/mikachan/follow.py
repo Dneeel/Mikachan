@@ -26,7 +26,7 @@ from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from .security import allowed, clean_url, instagram_cookie_args, source, validate_dns
-from .public_social import public_statuses
+from .public_social import public_statuses, public_tiktok_profile, public_x_profile
 from .store import Store
 
 INTERVAL = 15 * 60
@@ -409,6 +409,26 @@ def settings_panel(session) -> tuple[str, InlineKeyboardMarkup]:
     return body, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def _follow_cookie_args(url: str) -> list[str]:
+    """Opt-in platform sessions for Follow extraction only, with private files."""
+    platform = source(url)
+    if platform == "instagram":
+        return instagram_cookie_args(url)
+    setting = {"tiktok": "MIKACHAN_TIKTOK_FOLLOW_COOKIES_FILE",
+               "twitter": "MIKACHAN_X_FOLLOW_COOKIES_FILE"}.get(platform)
+    if setting is None or not (raw := os.environ.get(setting, "").strip()):
+        return []
+    path = Path(raw).expanduser()
+    try:
+        info = path.stat()
+    except OSError:
+        raise ValueError(f"{platform} Follow cookie file is unavailable") from None
+    if (not path.is_file() or path.is_symlink() or info.st_uid != os.geteuid()
+            or info.st_mode & 0o077 or not info.st_mode & 0o400):
+        raise ValueError(f"{platform} Follow cookie file must be private and owned by the bot user")
+    return ["--cookies", str(path.resolve())]
+
+
 async def _extract(command: list[str], timeout: int) -> object:
     executable = shutil.which(command[0]) or str(Path(sys.executable).with_name(command[0]))
     if not Path(executable).is_file():
@@ -416,9 +436,9 @@ async def _extract(command: list[str], timeout: int) -> object:
     command = [executable, *command[1:]]
     if Path(executable).name == "gallery-dl":
         command = [command[0], "--config-ignore", "--cache-file", ":memory:",
-                   *instagram_cookie_args(command[-1]), *command[1:]]
+                   *_follow_cookie_args(command[-1]), *command[1:]]
     elif Path(executable).name == "yt-dlp":
-        command = [command[0], "--ignore-config", *instagram_cookie_args(command[-1]),
+        command = [command[0], "--ignore-config", *_follow_cookie_args(command[-1]),
                    *command[1:]]
     network_env = {key: value for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
                     "NO_PROXY", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE")
@@ -635,6 +655,11 @@ async def public_items(target: Target, kind: str = "posts") -> list[tuple[str, s
 async def public_profile(target: Target, *, display_avatar: bool = False) -> dict[str, str]:
     """Use structured public fields; OG summaries are not reliable change signals."""
     await asyncio.to_thread(validate_dns, target.url)
+    if target.platform == "tiktok":
+        try:
+            return await public_tiktok_profile(target.handle, display_avatar=display_avatar)
+        except (ValueError, TimeoutError, OSError, httpx.HTTPError):
+            pass
     if target.platform in {"instagram", "twitter", "tiktok"}:
         endpoint = (target.url.rstrip("/") + "/info" if target.platform != "tiktok"
                     else target.url.rstrip("/") + "/avatar")
@@ -681,6 +706,11 @@ async def public_profile(target: Target, *, display_avatar: bool = False) -> dic
                     if any(result.values()):
                         return _stable_profile(result, display_avatar=display_avatar)
         except (ValueError, TimeoutError, OSError, json.JSONDecodeError):
+            pass
+    if target.platform == "twitter":
+        try:
+            return await public_x_profile(target.handle, display_avatar=display_avatar)
+        except (ValueError, TimeoutError, OSError, httpx.HTTPError):
             pass
     if target.platform == "youtube":
         data = await _extract([

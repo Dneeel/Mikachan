@@ -30,6 +30,11 @@ def test_story_links_reveal_public_creator_without_lookup():
     assert creator_from_post("https://www.tiktok.com/@alice/stories").handle == "alice"
 
 
+def test_instagram_profile_url_with_tracking_query_uses_profile_panel():
+    target = profile_target("https://www.instagram.com/zig_sparrow?obrf=N3o3bW5wOGthaXZw")
+    assert target and target.platform == "instagram" and target.handle == "zig_sparrow"
+
+
 @pytest.mark.asyncio
 async def test_resolve_instagram_and_youtube_creator_from_public_metadata(monkeypatch):
     monkeypatch.setattr("mikachan.follow.validate_dns", lambda _url: None)

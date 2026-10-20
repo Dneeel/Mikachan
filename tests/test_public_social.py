@@ -7,7 +7,9 @@ import pytest
 from mikachan.follow import command_target, public_items
 from mikachan.jobs import extractor_error, gallery_media_headers
 from mikachan.security import source
-from mikachan.public_social import _get, public_statuses, public_tiktok_sound, public_x_media
+from mikachan.public_social import (_get, public_statuses, public_tiktok_profile,
+                                    public_x_profile,
+                                    public_tiktok_sound, public_x_media)
 
 
 @pytest.mark.asyncio
@@ -61,6 +63,40 @@ async def test_tiktok_pinned_posts_do_not_hide_latest(monkeypatch):
     }))
     items = await public_statuses("tiktok", "truereinhard")
     assert items[0][2] == "new"
+
+
+@pytest.mark.asyncio
+async def test_tiktok_profile_fallback_checks_identity_and_stable_avatar(monkeypatch):
+    payload = {"code": 200, "user": {
+        "screen_name": "bnetanyahu", "name": "Public Name", "description": "Public bio",
+        "avatar_url": "https://p16-common-sign.tiktokcdn-eu.com/path/"
+                      "32de12cc61222299960546fe18461e36~tplv-a.jpeg?expires=1"}}
+    monkeypatch.setattr("mikachan.public_social._get", AsyncMock(return_value=payload))
+    assert await public_tiktok_profile("bnetanyahu") == {
+        "name": "Public Name", "bio": "Public bio",
+        "avatar": "32de12cc61222299960546fe18461e36"}
+    payload["user"]["screen_name"] = "different"
+    with pytest.raises(ValueError, match="identity"):
+        await public_tiktok_profile("bnetanyahu")
+
+
+@pytest.mark.asyncio
+async def test_x_profile_fallback_rejects_stale_cache(monkeypatch):
+    import httpx
+    import time
+    payload = {"screen_name": "Dniuis", "name": "DNI", "description": "New bio",
+               "fetched_on": time.time() - 60,
+               "profile_image_url": "https://pbs.twimg.com/profile_images/1/abc_normal.jpg"}
+    original = httpx.AsyncClient
+    monkeypatch.setattr("mikachan.public_social.validate_dns", lambda _url: None)
+    monkeypatch.setattr("mikachan.public_social.httpx.AsyncClient",
+        lambda **kwargs: original(transport=httpx.MockTransport(
+            lambda _request: httpx.Response(200, json=payload)), **kwargs))
+    result = await public_x_profile("Dniuis")
+    assert result["bio"] == "New bio" and result["avatar"].endswith("/abc.jpg")
+    payload["fetched_on"] = time.time() - 86400
+    with pytest.raises(ValueError, match="stale"):
+        await public_x_profile("Dniuis")
 
 
 @pytest.mark.asyncio
