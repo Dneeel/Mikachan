@@ -333,6 +333,14 @@ class Worker:
                 "SELECT file_id,media_kind FROM cache WHERE key=? AND owner_id=?",
                 (key, row["user_id"]),
             ).fetchone()
+            requested_video = source(url) == "youtube" and mode in {"360", "480", "720", "1080"}
+            if cached and requested_video and cached["media_kind"] != "video":
+                # Older runs could cache an audio artifact under a video choice.
+                # Drop that invalid reference before it can be sent again.
+                self.store.db.execute("DELETE FROM cache WHERE key=?", (key,))
+                self.store.db.execute("DELETE FROM cache_captions WHERE key=?", (key,))
+                self.store.db.execute("DELETE FROM cache_audio WHERE key=?", (key,))
+                cached = None
             if cached:
                 self.store.transition(jid, "RESOLVING", "DELIVERING")
                 try:
@@ -606,6 +614,8 @@ class Worker:
                 paths = await self._prepare_media(paths, max_bytes)
             checks = [await verify(path, max_bytes) for path in paths]
             kinds = [media_kind(path, check) for path, check in zip(paths, checks)]
+            if requested_video and (len(kinds) != 1 or kinds[0] != "video"):
+                raise ValueError("Selected YouTube video quality did not produce a video file")
             if mode == "document":
                 kinds = ["document" for _ in kinds]
             meta = self._extract_meta(job_dir)
@@ -878,7 +888,7 @@ class Worker:
         async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
             for _ in range(5):
                 validate_dns(current)
-                for attempt in range(2):
+                for attempt in range(3):
                     try:
                         async with client.stream("GET", current) as response:
                             if response.status_code not in {301, 302, 303, 307, 308}:
@@ -889,10 +899,13 @@ class Worker:
                                 raise ValueError("short link has no redirect destination")
                             current = clean_url(urljoin(current, location))
                             break
-                    except httpx.RequestError:
-                        if attempt:
+                    except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+                        if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code \
+                                not in {429, 500, 502, 503, 504}:
+                            raise ValueError("Short-link source rejected the request") from None
+                        if attempt == 2:
                             raise ValueError("Short-link source temporarily unavailable") from None
-                        await asyncio.sleep(1)
+                        await asyncio.sleep(attempt + 1)
         raise ValueError("too many short-link redirects")
 
     async def _browse_profile_gallery(self, url: str) -> tuple[list[dict[str, str]], str]:

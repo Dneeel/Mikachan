@@ -126,6 +126,7 @@ class UserbotBridge:
         self.last_request = 0.0
         self.cooldown_until = 0.0
         self.file_peer = None
+        self.proxy_peer = None
 
     async def _ready(self) -> None:
         if time.monotonic() < self.cooldown_until:
@@ -142,6 +143,71 @@ class UserbotBridge:
                 raise ValueError("File service username did not resolve to a bot")
             self.file_peer = peer
         return self.file_peer
+
+    async def _proxy_peer(self):
+        if self.proxy_peer is None:
+            peer = await self.client.get_entity("Dnproxbot")
+            if (not getattr(peer, "bot", False)
+                    or str(getattr(peer, "username", "")).casefold() != "dnproxbot"):
+                raise ValueError("Proxy provider identity could not be verified")
+            self.proxy_peer = peer
+        return self.proxy_peer
+
+    async def proxy_request(self):
+        """Request the provider's own menu through the existing MTProto account."""
+        try:
+            async with asyncio.timeout(40):
+                async with self.lock:
+                    await self._ready()
+                    peer = await self._proxy_peer()
+                    async with self.client.conversation(peer, timeout=30, exclusive=True) as chat:
+                        sent = await chat.send_message("/proxy")
+                        for _ in range(3):
+                            answer = await chat.get_response()
+                            if (getattr(answer, "sender_id", None) == peer.id
+                                    and getattr(answer, "id", 0) > sent.id):
+                                return answer
+        except ValueError:
+            raise
+        except Exception as exc:
+            raise ValueError("Proxy provider is unavailable; try again shortly") from exc
+        raise ValueError("Proxy provider returned no verified response")
+
+    async def proxy_click(self, message_id: int, row: int, column: int):
+        """Press only a button selected from our bound, verified provider menu."""
+        def signature(message):
+            return tuple(tuple((button.text, button.url, button.data)
+                               for button in line) for line in (message.buttons or []))
+
+        try:
+            async with asyncio.timeout(25):
+                async with self.lock:
+                    await self._ready()
+                    peer = await self._proxy_peer()
+                    original = await self.client.get_messages(peer, ids=message_id)
+                    if (not original or getattr(original, "sender_id", None) != peer.id
+                            or not original.buttons or not 0 <= row < len(original.buttons)
+                            or not 0 <= column < len(original.buttons[row])
+                            or getattr(original.buttons[row][column], "data", None) is None):
+                        raise ValueError("Proxy menu is no longer available; send /proxy again")
+                    response = await original.click(row, column)
+                    original_signature = signature(original)
+                    for _ in range(4):
+                        await asyncio.sleep(0.5)
+                        latest = await self.client.get_messages(peer, limit=1)
+                        if (latest and getattr(latest[0], "sender_id", None) == peer.id
+                                and latest[0].id > message_id):
+                            return latest[0], ""
+                        edited = await self.client.get_messages(peer, ids=message_id)
+                        if (edited and getattr(edited, "sender_id", None) == peer.id
+                                and (edited.raw_text != original.raw_text
+                                     or signature(edited) != original_signature)):
+                            return edited, ""
+                    return original, str(getattr(response, "message", "") or "")[:300]
+        except ValueError:
+            raise
+        except Exception as exc:
+            raise ValueError("Proxy provider did not answer; send /proxy to refresh") from exc
 
     async def file_to_link(self, bot: Bot, source_chat: int, source_message: int,
                            message: Message | None = None) -> str:

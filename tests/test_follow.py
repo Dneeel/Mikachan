@@ -242,6 +242,20 @@ async def test_failed_follow_alert_is_cooled_down(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_one_transient_follow_outage_does_not_alert(tmp_path):
+    store = Store(tmp_path / "db.sqlite")
+    bot = type("Bot", (), {"send_message": AsyncMock()})()
+    service = FollowService(store, bot)
+    for failures in (0, 1):
+        await service._failed({"id": "follow", "chat_id": 42,
+                               "handle": "alice", "failures": failures})
+    bot.send_message.assert_not_awaited()
+    await service._failed({"id": "follow", "chat_id": 42,
+                           "handle": "alice", "failures": 2})
+    bot.send_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_structured_bio_and_stable_avatar(monkeypatch):
     monkeypatch.setattr("mikachan.follow.validate_dns", lambda _url: None)
     async def local_thread(fn, *args):

@@ -20,11 +20,16 @@ async def _get(platform: str, path: str) -> dict:
     url = clean_url(_BASE[platform] + path)
     await asyncio.to_thread(validate_dns, url)
     async with httpx.AsyncClient(timeout=12, follow_redirects=False) as client:
-        response = await client.get(url, headers={"Accept": "application/json"})
-        response.raise_for_status()
-        if len(response.content) > 2_000_000:
-            raise ValueError("public social response is too large")
-        data = response.json()
+        for attempt in range(2):
+            response = await client.get(url, headers={"Accept": "application/json"})
+            if response.status_code in {404, 429, 500, 502, 503, 504} and attempt == 0:
+                await asyncio.sleep(0.5)
+                continue
+            response.raise_for_status()
+            if len(response.content) > 2_000_000:
+                raise ValueError("public social response is too large")
+            data = response.json()
+            break
     if not isinstance(data, dict) or data.get("code") != 200:
         raise ValueError("public social response is unavailable")
     return data

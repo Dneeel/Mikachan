@@ -1,9 +1,11 @@
 import asyncio
 import io
 import json
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from zoneinfo import ZoneInfo
 
 import pytest
 import zxingcpp
@@ -203,7 +205,8 @@ async def test_nasa_sends_bounded_image_and_short_caption(tmp_path):
     image = Image.new("RGB", (16, 16), "navy")
     output = io.BytesIO()
     image.save(output, "PNG")
-    utility.api = AsyncMock(return_value={"title": "A comet", "date": "2026-10-18",
+    today = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+    utility.api = AsyncMock(return_value={"title": "A comet", "date": today,
         "url": "https://apod.nasa.gov/test.png", "media_type": "image",
         "explanation": "A long story. " * 200, "copyright": "NASA"})
     utility.apod_page = AsyncMock(side_effect=ValueError("test fallback"))
@@ -220,7 +223,8 @@ async def test_nasa_uses_official_page_video_preview(tmp_path):
     utility = Utilities(SimpleNamespace(), Settings(bot_token="123:fake", owner_telegram_id=1,
         allowed_telegram_ids="1"), Store(tmp_path / "state.sqlite").db)
     utility.api = AsyncMock()
-    utility.apod_page = AsyncMock(return_value={"title": "Real APOD video", "date": "2026-10-18",
+    today = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+    utility.apod_page = AsyncMock(return_value={"title": "Real APOD video", "date": today,
         "url": "https://assets.science.nasa.gov/preview.jpeg", "media_type": "video",
         "explanation": "Real feature explanation", "copyright": "NASA", "preview": True})
     utility.apod_image = AsyncMock(return_value=qr_png("valid-image"))
@@ -233,24 +237,41 @@ async def test_nasa_uses_official_page_video_preview(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_nasa_does_not_send_previous_day_as_todays_picture(tmp_path):
+    utility = Utilities(SimpleNamespace(), Settings(bot_token="123:fake", owner_telegram_id=1,
+        allowed_telegram_ids="1"), Store(tmp_path / "state.sqlite").db)
+    utility.apod_page = AsyncMock(return_value={"title": "Old APOD", "date": "2020-01-01",
+        "url": "https://assets.science.nasa.gov/old.jpeg", "media_type": "image",
+        "explanation": "Old entry"})
+    utility.apod_image = AsyncMock()
+    message = SimpleNamespace(reply=AsyncMock(), reply_photo=AsyncMock())
+    await utility._command(message, "/nasa", "")
+    message.reply_photo.assert_not_awaited()
+    utility.apod_image.assert_not_awaited()
+    assert "2020-01-01" in message.reply.await_args.args[0]
+
+
+@pytest.mark.asyncio
 async def test_apod_page_parses_official_article(tmp_path, monkeypatch):
     import httpx
     utility = Utilities(SimpleNamespace(), Settings(bot_token="123:fake", owner_telegram_id=1,
         allowed_telegram_ids="1"), Store(tmp_path / "state.sqlite").db)
+    today = datetime.now(ZoneInfo("America/New_York")).date()
     html_page = '''<html><head><meta property="og:image"
-      content="https://assets.science.nasa.gov/apod.jpeg"></head><body>
-      <div class="media-detail-hero__media"><iframe src="https://www.youtube.com/embed/x"></iframe></div>
+      content="https://assets.science.nasa.gov/stale-june.jpeg"></head><body>
+      <div class="media-detail-hero__media"><iframe src="https://www.youtube.com/embed/x"></iframe>
+      <img src="https://assets.science.nasa.gov/current-preview.jpeg"></div>
       <h2 class="display-48">A real sky feature</h2>
       <p class="media-detail-hero__description">Explanation: Real observation.</p>
-      <table><tr class="media-detail-hero__meta-row"><th>Date:</th><td>October 18, 2026</td></tr>
+      <table><tr class="media-detail-hero__meta-row"><th>Date:</th><td>DATE_HERE</td></tr>
       <tr class="media-detail-hero__meta-row"><th>Credit:</th><td>NASA team</td></tr></table>
-      </body></html>'''
+      </body></html>'''.replace("DATE_HERE", today.strftime("%B %d, %Y"))
     real_client = httpx.AsyncClient
     monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: real_client(
         transport=httpx.MockTransport(lambda request: httpx.Response(200, text=html_page)), **kwargs))
     data = await utility.apod_page()
-    assert data["date"] == "2026-10-18" and data["media_type"] == "video"
-    assert data["copyright"] == "NASA team" and data["url"].endswith("apod.jpeg")
+    assert data["date"] == today.isoformat() and data["media_type"] == "video"
+    assert data["copyright"] == "NASA team" and data["url"].endswith("current-preview.jpeg")
     assert await utility.apod_page() is data  # One-hour in-memory metadata cache.
 
 

@@ -425,7 +425,7 @@ async def _extract(command: list[str], timeout: int) -> object:
                    if (value := os.environ.get(key))}
     network_env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + os.environ.get("PATH", "")
     proc = await asyncio.create_subprocess_exec(
-        *command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        *command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         start_new_session=True, env=network_env)
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout)
@@ -829,7 +829,9 @@ class FollowService:
         failures = row["failures"] + 1
         self.db.db.execute("UPDATE follows SET failures=?,next_check=? WHERE id=?",
                            (failures, time.time() + INTERVAL, row["id"]))
-        if self._alert_due(row["id"], "all"):
+        # A single blocked or transient check is not evidence that monitoring
+        # is down. Wait for three consecutive full failures before alerting.
+        if failures >= 3 and self._alert_due(row["id"], "all"):
             try:
                 await self.bot.send_message(row["chat_id"],
                     f"⚠️ Follow @{html.escape(row['handle'])}: no selected public source "

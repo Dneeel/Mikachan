@@ -38,6 +38,7 @@ from .store import Store
 from .community import Community, CommunityStore
 from .utilities import Utilities, _market_card, qr_png
 from .userbot import UserbotBridge, is_currency_query, send_currency_reply
+from .proxy_relay import ProxyRelay
 from .market_prices import parse_asset_query
 from .personality import Mode, mode_for, response
 from .public_social import public_x_media, public_x_post
@@ -195,6 +196,7 @@ HELP_TEXT = (
     "/st · /xst (reply to an image or sticker)\n"
     "/nasa · /translate en|fa TEXT\n\n"
     "💱 Toman quotes: send exactly دلار, سکه, طلا, تتر or ارز.\n"
+    "🛡 Proxies: /proxy or پروکسی (requires user account login).\n"
     "فارسی: عکس به استیکر · استیکر به عکس\n"
     "For file tools, reply to the file with a command."
 )
@@ -226,6 +228,7 @@ class App:
                                       user_session, int(settings.userbot_staging_chat_id or 0))
                         if user_session and settings.telegram_api_id and
                         settings.telegram_api_hash else None)
+        self.proxy_relay = ProxyRelay(self.userbot) if self.userbot else None
         self.worker = Worker(settings, self.store, self.bot)
         self.worker.userbot = self.userbot if settings.userbot_staging_chat_id else None
         self.store.db.execute("CREATE TABLE IF NOT EXISTS url_links ("
@@ -301,6 +304,10 @@ class App:
             return
         text = m.text.strip()
         normalized_text = " ".join(text.replace("ي", "ی").replace("ك", "ک").split())
+        if normalized_text == "پروکسی":
+            if self.module_enabled("utilities", m.chat.id):
+                await self.command(m, "/proxy")
+            return
         if normalized_text in {"عکس به استیکر", "استیکر به عکس"}:
             if not self.module_enabled("utilities", m.chat.id):
                 return
@@ -459,7 +466,7 @@ class App:
         follow_commands = {"/follow", "/following", "/twitter", "/instagram",
                            "/tiktok", "/youtube"}
         utility_commands = {"/qr", "/scan", "/ocr", "/st", "/xst", "/weather", "/now",
-                            "/nasa", "/translate", "/url", "/image", "/sticker", "/stickerimage",
+                            "/nasa", "/translate", "/url", "/proxy", "/image", "/sticker", "/stickerimage",
                             "/gif", "/pack", "/convert"}
         if (cmd in downloader_commands and not self.module_enabled("downloader", m.chat.id) or
                 cmd in follow_commands and not self.module_enabled("follow", m.chat.id) or
@@ -504,6 +511,16 @@ class App:
                     self.store.db.execute("INSERT INTO url_links VALUES (?,?,?,?,?,?)",
                                           (token, m.from_user.id, m.chat.id,
                                            sent.message_id, link, time.time() + 86400))
+                except ValueError as exc:
+                    await m.reply(html.escape(str(exc)))
+            return
+        if cmd == "/proxy":
+            if self.proxy_relay is None:
+                await m.reply("Proxy lists need a Telegram user account session. "
+                              "Run the QR userbot login from the server terminal first.")
+            elif self.store.rate(m.from_user.id, "proxy", 4):
+                try:
+                    await self.proxy_relay.open(m)
                 except ValueError as exc:
                     await m.reply(html.escape(str(exc)))
             return
@@ -1090,9 +1107,19 @@ class App:
         domain = ({"c": "downloader", "s": "downloader", "b": "downloader",
                    "f": "follow", "fm": "follow", "fu": "follow", "p": "follow",
                    "fn": "follow", "fd": "follow", "u": "community", "g": "community",
-                   "gs": "community", "gc": "community", "n": "utilities"}).get(prefix)
+                   "gs": "community", "gc": "community", "n": "utilities",
+                   "px": "utilities"}).get(prefix)
         if domain and not self.module_enabled(domain, q.message.chat.id):
             await acknowledge(q, "This module is currently unavailable")
+            return
+        if data.startswith("px:"):
+            if self.proxy_relay:
+                try:
+                    await self.proxy_relay.click(q)
+                except ValueError as exc:
+                    await self.bot.send_message(q.message.chat.id, html.escape(str(exc)))
+            else:
+                await acknowledge(q, "Proxy session unavailable")
             return
         if hasattr(self, "utilities") and hasattr(self.utilities, "now") and \
                 await self.utilities.now.callback(q, data):
@@ -1869,6 +1896,7 @@ class App:
                     ("weather", "Weather and forecast"),
                     ("now", "Local time and calendars"),
                     ("nasa", "NASA astronomy picture"),
+                    ("proxy", "Current Telegram proxies"),
                     ("translate", "Translate selected text"),
                 )
             ]

@@ -20,7 +20,7 @@ import urllib.request
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
@@ -518,8 +518,10 @@ class Utilities:
         return bytes(data)
 
     async def apod_page(self) -> dict[str, Any]:
-        """Read the latest official NASA page; its JSON endpoint can return a logo placeholder."""
-        if self._apod_cache and time.monotonic() < self._apod_cache[1]:
+        """Read the dated hero media, never the page's sometimes stale OG image."""
+        apod_today = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+        if (self._apod_cache and time.monotonic() < self._apod_cache[1]
+                and self._apod_cache[0].get("date") == apod_today):
             return self._apod_cache[0]
         async with httpx.AsyncClient(timeout=12, follow_redirects=False) as client:
             response = await client.get("https://science.nasa.gov/apod/")
@@ -527,8 +529,9 @@ class Utilities:
             if len(response.content) > 2_000_000:
                 raise ValueError("NASA APOD page is too large")
         soup = BeautifulSoup(response.text, "html.parser")
-        metadata = soup.select_one('meta[property="og:image"]')
-        media = str(metadata.get("content", "")) if metadata else ""
+        hero = soup.select_one(".media-detail-hero__media")
+        picture = hero.select_one("img") if hero else None
+        media = str(picture.get("src", "")) if picture else ""
         heading = soup.select_one("h2.display-48")
         description = soup.select_one(".media-detail-hero__description")
         date_header = next((cell for cell in soup.select(".media-detail-hero__meta-row th")
@@ -542,15 +545,17 @@ class Utilities:
         date = datetime.strptime(date_cell.get_text(" ", strip=True), "%B %d, %Y").date().isoformat()
         explanation = description.get_text(" ", strip=True).removeprefix("Explanation:").strip()
         explanation = explanation.split("Tomorrow's picture:", 1)[0].strip()
-        if not explanation or not media.startswith("https://") or "nasa-logo" in media.casefold():
-            raise ValueError("NASA APOD page has no valid media preview")
-        video = soup.select_one('.media-detail-hero__media iframe') is not None
+        video = hero.select_one("iframe, video") is not None if hero else False
+        if not explanation or (not video and not media.startswith("https://")) or \
+                media and (not media.startswith("https://") or "nasa-logo" in media.casefold()):
+            raise ValueError("NASA APOD page has no valid dated media")
         data: dict[str, Any] = {"title": heading.get_text(" ", strip=True), "date": date,
                                 "explanation": explanation, "url": media,
                                 "media_type": "video" if video else "image",
-                                "preview": video, "copyright": credit_cell.get_text(" ", strip=True)
+                                "preview": video and bool(media),
+                                "copyright": credit_cell.get_text(" ", strip=True)
                                 if credit_cell else "NASA APOD"}
-        self._apod_cache = data, time.monotonic() + 3600
+        self._apod_cache = data, time.monotonic() + (3600 if date == apod_today else 300)
         return data
 
     async def command(self, m: Message, cmd: str, arg: str) -> bool:
@@ -880,15 +885,13 @@ class Utilities:
             try:
                 data = await self.apod_page()
             except (httpx.HTTPError, ValueError, OSError):
-                try:
-                    data = await self.api("https://api.nasa.gov/planetary/apod",
-                                          {"api_key": self.settings.nasa_api_key})
-                except httpx.HTTPStatusError as exc:
-                    if exc.response.status_code != 500:
-                        raise
-                    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).date().isoformat()
-                    data = await self.api("https://api.nasa.gov/planetary/apod",
-                                          {"api_key": self.settings.nasa_api_key, "date": yesterday})
+                data = await self.api("https://api.nasa.gov/planetary/apod",
+                                      {"api_key": self.settings.nasa_api_key})
+            today = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+            if str(data.get("date", "")) != today:
+                await m.reply("NASA has not published today's APOD yet. "
+                              f"The latest verified entry is dated {html.escape(str(data.get('date', 'unknown')))}.")
+                return
             title = str(data["title"])
             date = datetime.strptime(str(data["date"]), "%Y-%m-%d").date().isoformat()
             media = str(data.get("url", ""))

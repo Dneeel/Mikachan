@@ -7,7 +7,27 @@ import pytest
 from mikachan.follow import command_target, public_items
 from mikachan.jobs import extractor_error, gallery_media_headers
 from mikachan.security import source
-from mikachan.public_social import public_statuses, public_tiktok_sound, public_x_media
+from mikachan.public_social import _get, public_statuses, public_tiktok_sound, public_x_media
+
+
+@pytest.mark.asyncio
+async def test_transient_public_timeline_failure_gets_one_bounded_retry(monkeypatch):
+    import httpx
+
+    calls = 0
+    def handle(_request):
+        nonlocal calls
+        calls += 1
+        return httpx.Response(404 if calls == 1 else 200,
+                              json={"code": 200, "results": []})
+
+    original = httpx.AsyncClient
+    monkeypatch.setattr("mikachan.public_social.validate_dns", lambda _url: None)
+    monkeypatch.setattr("mikachan.public_social.httpx.AsyncClient",
+                        lambda **kwargs: original(transport=httpx.MockTransport(handle), **kwargs))
+    assert await _get("twitter", "/2/profile/alice/statuses?count=15") == {
+        "code": 200, "results": []}
+    assert calls == 2
 
 
 @pytest.mark.asyncio
