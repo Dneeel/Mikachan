@@ -335,7 +335,8 @@ class Worker:
                 "SELECT file_id,media_kind FROM cache WHERE key=? AND owner_id=?",
                 (key, row["user_id"]),
             ).fetchone()
-            requested_video = source(url) == "youtube" and mode in {"360", "480", "720", "1080"}
+            requested_video = source(url) in {"youtube", "pornhub"} and mode in {
+                "360", "480", "720", "1080"}
             if cached and requested_video and cached["media_kind"] != "video":
                 # Older runs could cache an audio artifact under a video choice.
                 # Drop that invalid reference before it can be sent again.
@@ -627,7 +628,7 @@ class Worker:
             checks = [await verify(path, max_bytes) for path in paths]
             kinds = [media_kind(path, check) for path, check in zip(paths, checks)]
             if requested_video and (len(kinds) != 1 or kinds[0] != "video"):
-                raise ValueError("Selected YouTube video quality did not produce a video file")
+                raise ValueError("Selected video quality did not produce a video file")
             if mode == "document":
                 kinds = ["document" for _ in kinds]
             meta = self._extract_meta(job_dir)
@@ -662,9 +663,12 @@ class Worker:
                 sent_messages: list[Message] = []
                 visuals = [(p, k, c) for p, k, c in zip(paths, kinds, checks) if k in {"photo", "video"}]
                 others = [(p, k, c) for p, k, c in zip(paths, kinds, checks) if k not in {"photo", "video"}]
+                prefer_userbot = bool(self.userbot and (
+                    source(url) == "pornhub" or source(url) == "youtube" and mode == "1080"))
                 visual_chunks = ([[p] for p, _, _ in visuals]
-                                 if self.userbot and any(p.stat().st_size > 48 * 1024 * 1024
-                                                         for p, _, _ in visuals)
+                                 if self.userbot and (prefer_userbot or
+                                     any(p.stat().st_size > 48 * 1024 * 1024
+                                         for p, _, _ in visuals))
                                  else groups([p for p, _, _ in visuals]))
                 for chunk in visual_chunks:
                     if len(chunk) == 1:
@@ -676,7 +680,8 @@ class Worker:
                             bool(context.get("description")), False,
                             context=context,
                         )
-                        if self.userbot and path.stat().st_size > 48 * 1024 * 1024:
+                        if self.userbot and (prefer_userbot or
+                                             path.stat().st_size > 48 * 1024 * 1024):
                             sent = await self.userbot.upload_and_copy(
                                 self.bot, path, chat, caption if not sent_messages else None,
                                 markup, video=media_kind(path, check) == "video")
@@ -1655,6 +1660,16 @@ class Worker:
                  f"bv[height<={mode}][ext=mp4]+ba[ext=m4a]/"
                  f"b[height<={mode}][ext=mp4]/"
                  f"bv[height<={mode}]+ba/best[height<={mode}]"),
+                "--merge-output-format", "mp4",
+            ]
+        elif source(url) == "pornhub" and mode in {"480", "720", "1080"}:
+            # Prefer progressive HTTPS formats when the source's HLS playlist
+            # returns 410. Never select a height above the user's ceiling.
+            quality_args = [
+                "-f",
+                (f"b[height<={mode}][ext=mp4][protocol=https]/"
+                 f"b[height<={mode}][ext=mp4]/"
+                 f"b[height<={mode}]"),
                 "--merge-output-format", "mp4",
             ]
         proc = await asyncio.create_subprocess_exec(

@@ -145,3 +145,66 @@ async def test_media_is_deleted_and_second_delivery_uses_telegram_file_id(
         assert bot.send_document.await_args_list[1].args[1] == "telegram-file-id"
     else:
         assert bot.send_video.await_args_list[1].args[1] == "telegram-file-id"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
+                    reason="ffmpeg tools unavailable")
+@pytest.mark.parametrize("url,mode", [
+    ("https://www.youtube.com/watch?v=abcdefghijk", "1080"),
+    ("https://www.pornhub.com/view_video.php?viewkey=6ac5dd5aca7cb", "720"),
+])
+async def test_selected_video_uses_userbot_even_below_public_upload_limit(tmp_path, url, mode):
+    fixture = tmp_path / "small.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                    "testsrc2=size=320x180:rate=24", "-t", "1", "-c:v", "libx264",
+                    str(fixture)], check=True)
+    settings = Settings(bot_token="123:abc", owner_telegram_id=42,
+                        allowed_telegram_ids="42", data_dir=tmp_path / "data")
+    store = Store(settings.data_dir / "bot.sqlite")
+    sent = SimpleNamespace(message_id=300, video=SimpleNamespace(file_id="staged-file-id"),
+                           document=None, audio=None, photo=None)
+    bot = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=200)),
+                          edit_message_text=AsyncMock(), delete_message=AsyncMock(),
+                          send_video=AsyncMock(), send_document=AsyncMock())
+    worker = Worker(settings, store, bot)
+    worker.userbot = SimpleNamespace(upload_and_copy=AsyncMock(return_value=sent))
+
+    async def local_download(_url, directory, _max_bytes, _mode):
+        target = directory / "01.mp4"
+        shutil.copyfile(fixture, target)
+        return [target]
+
+    worker._ytdlp = AsyncMock(side_effect=local_download)
+    jid = store.create_job(42, 42, url, mode=mode)
+    assert store.transition(jid, "QUEUED", "RESOLVING")
+    await worker._run(jid)
+    assert store.job(jid)["state"] == "COMPLETED"
+    worker.userbot.upload_and_copy.assert_awaited_once()
+    bot.send_video.assert_not_awaited()
+    assert not (settings.data_dir / "jobs" / jid).exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("height", [480, 720, 1080])
+async def test_pornhub_format_selection_caps_height_and_prefers_https(
+        tmp_path, monkeypatch, height):
+    import mikachan.jobs as jobs
+
+    monkeypatch.setattr(jobs, "validate_dns", lambda _url: None)
+    seen = []
+
+    async def launch(*args, **_kwargs):
+        seen.extend(args)
+        (tmp_path / "01.mp4").write_bytes(b"fixture")
+        return SimpleNamespace(communicate=AsyncMock(return_value=(b"", b"")), returncode=0)
+
+    monkeypatch.setattr(jobs.asyncio, "create_subprocess_exec", launch)
+    worker = Worker(SimpleNamespace(), SimpleNamespace(), SimpleNamespace())
+    paths = await worker._ytdlp(
+        "https://www.pornhub.com/view_video.php?viewkey=6ac5dd5aca7cb",
+        tmp_path, 10_000_000, str(height))
+    assert paths == [tmp_path / "01.mp4"]
+    fmt = seen[seen.index("-f") + 1]
+    assert fmt.startswith(f"b[height<={height}][ext=mp4][protocol=https]")
+    assert f"[height<={height}]" in fmt

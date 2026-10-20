@@ -28,6 +28,43 @@ def test_youtube_prompt_asks_quality_and_collections_can_close():
     assert "✖ Close" in button_data(menu)
 
 
+def test_pornhub_prompt_asks_for_bounded_video_quality():
+    url = "https://www.pornhub.com/view_video.php?viewkey=6ac5dd5aca7cb"
+    buttons = button_data(download_prompt_markup("request", url))
+    assert buttons["✅ Yes"] == "c:request:q"
+    assert buttons["❌ No"] == "c:request:n"
+
+
+@pytest.mark.asyncio
+async def test_pornhub_quality_choice_is_owned_and_bound_to_job(tmp_path):
+    store = Store(tmp_path / "bot.sqlite")
+    cid = store.confirm_create(
+        42, 42, 100, 0,
+        "https://www.pornhub.com/view_video.php?viewkey=6ac5dd5aca7cb", 900)
+    assert store.claim_prompt(cid)
+    store.set_prompt(cid, 101)
+    edits = []
+
+    async def edit_text(body, **kwargs):
+        edits.append((body, kwargs))
+
+    q = SimpleNamespace(from_user=SimpleNamespace(id=42),
+                        message=SimpleNamespace(chat=SimpleNamespace(id=42, type="private"),
+                                                message_id=101, edit_text=edit_text),
+                        answer=AsyncMock(), data=f"c:{cid}:q")
+    app = App.__new__(App)
+    app.store = store
+    app.authorized = lambda *_args: True
+    await app.callback(q)
+    buttons = button_data(edits[0][1]["reply_markup"])
+    assert {"🎬 480p", "🎬 720p", "🎬 Up to 1080p", "✖ Cancel"} == set(buttons)
+    q.data = f"c:{cid}:720"
+    await app.callback(q)
+    jobs = store.jobs(42)
+    assert len(jobs) == 1
+    assert store.job_mode(jobs[0]["id"]) == "720"
+
+
 @pytest.mark.asyncio
 async def test_youtube_quality_choice_is_bound_to_confirmed_job(tmp_path):
     store = Store(tmp_path / "bot.sqlite")

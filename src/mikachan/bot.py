@@ -101,8 +101,8 @@ async def profile_photo(url: str) -> BufferedInputFile:
 
 
 def download_prompt_markup(cid: str, url: str) -> InlineKeyboardMarkup:
-    youtube_video = youtube_video_url(url)
-    rows = [[("✅ Yes", f"c:{cid}:{'q' if youtube_video else 'y'}"),
+    quality_choice = youtube_video_url(url) or source(url) == "pornhub"
+    rows = [[("✅ Yes", f"c:{cid}:{'q' if quality_choice else 'y'}"),
              ("❌ No", f"c:{cid}:n")]]
     if source(url) in SOCIAL_PLATFORMS and profile_target(url) is None:
         rows.append([("👤 Profile", f"c:{cid}:p")])
@@ -1472,15 +1472,23 @@ class App:
                     (parts[1], q.from_user.id, q.message.chat.id,
                      q.message.message_id, time.time())).fetchone()
                 await acknowledge(q, "Request expired" if not row else None)
-                if row and youtube_video_url(row["url"]):
-                    await q.message.edit_text(
-                        "🎛 <b>YouTube quality</b>\nChoose video quality or MP3.",
-                        reply_markup=kb([[("🎬 360p", f"c:{parts[1]}:360"),
-                                          ("🎬 480p", f"c:{parts[1]}:480")],
-                                         [("🎬 720p", f"c:{parts[1]}:720"),
-                                          ("🎬 Up to 1080p", f"c:{parts[1]}:1080")],
-                                         [("🎵 MP3", f"c:{parts[1]}:audio")],
-                                         [("✖ Cancel", f"c:{parts[1]}:n")]]))
+                if row and (youtube_video_url(row["url"]) or source(row["url"]) == "pornhub"):
+                    if source(row["url"]) == "pornhub":
+                        await q.message.edit_text(
+                            "🎛 <b>Pornhub quality</b>\nChoose the maximum video resolution.",
+                            reply_markup=kb([[("🎬 480p", f"c:{parts[1]}:480"),
+                                              ("🎬 720p", f"c:{parts[1]}:720")],
+                                             [("🎬 Up to 1080p", f"c:{parts[1]}:1080")],
+                                             [("✖ Cancel", f"c:{parts[1]}:n")]]))
+                    else:
+                        await q.message.edit_text(
+                            "🎛 <b>YouTube quality</b>\nChoose video quality or MP3.",
+                            reply_markup=kb([[("🎬 360p", f"c:{parts[1]}:360"),
+                                              ("🎬 480p", f"c:{parts[1]}:480")],
+                                             [("🎬 720p", f"c:{parts[1]}:720"),
+                                              ("🎬 Up to 1080p", f"c:{parts[1]}:1080")],
+                                             [("🎵 MP3", f"c:{parts[1]}:audio")],
+                                             [("✖ Cancel", f"c:{parts[1]}:n")]]))
                 return
             if parts[2] == "p":
                 row = self.store.db.execute(
