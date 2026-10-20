@@ -37,5 +37,6 @@ allow-direct-references = true
 packages = ["src/mikachan"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+pythonpath = ["."]
 [tool.ruff]
 line-length = 100

@@ -14,6 +14,16 @@ from deploy.manager_ui import Entry, MikachanMenu
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_pytest_console_entrypoint_can_collect_manager_tests() -> None:
+    """The release manager invokes .venv/bin/pytest, not python -m pytest."""
+    pytest_command = Path(sys.executable).with_name("pytest")
+    run = subprocess.run(
+        [str(pytest_command), "--collect-only", "-q", "tests/test_installer_versions.py"],
+        cwd=ROOT, capture_output=True, text=True, check=False,
+    )
+    assert run.returncode == 0, run.stdout + run.stderr
+
+
 @pytest.fixture
 def fake_git(tmp_path: Path) -> dict[str, str]:
     bindir = tmp_path / "bin"
