@@ -615,6 +615,24 @@ def test_setup_again_retains_database_and_updates_allowlist(
     assert manager.config()["MOMMY_TELEGRAM_IDS"] == ""
 
 
+def test_setup_repairs_unreadable_virtualenv_console_script(
+        deployment: tuple[FakeManager, Path, str]) -> None:
+    manager, _, _ = deployment
+    manager.install()
+    script = manager.paths.current / ".venv/bin/mikachan"
+    script.parent.mkdir(parents=True)
+    script.write_text("#!/bin/sh\n")
+    script.chmod(0o711)
+    assert not stat.S_IMODE(script.stat().st_mode) & stat.S_IRGRP
+
+    manager.setup({"BOT_TOKEN": "12345:" + "x" * 30,
+                   "OWNER_TELEGRAM_ID": "42", "ALLOWED_TELEGRAM_IDS": "42",
+                   "ALLOWED_GROUP_IDS": ""})
+
+    assert stat.S_IMODE(script.stat().st_mode) & stat.S_IRGRP
+    assert stat.S_IMODE(script.stat().st_mode) & stat.S_IXGRP
+
+
 def test_failed_repeat_setup_restores_config_database_and_service(
         deployment: tuple[FakeManager, Path, str]) -> None:
     manager, _, _ = deployment

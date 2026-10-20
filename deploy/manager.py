@@ -916,6 +916,11 @@ class Manager:
             self._validate_config(values, self.paths.current)
             undo, was_active = self._stop_and_snapshot(reason="before setup")
             try:
+                # A staged virtualenv can leave its console script executable but
+                # unreadable by the service account (for example, mode 0711).
+                # Python opens that script after exec, so repair release access
+                # immediately before the first service start as well.
+                self._grant_release_access(self.paths.current.resolve())
                 _atomic(self.paths.env, _render_env(values), 0o640)
                 self._set_file_group(self.paths.env)
                 if (self.paths.state / "mikachan.sqlite").exists():
@@ -927,7 +932,8 @@ class Manager:
                 self._systemctl("enable")
                 self._systemctl("start")
                 if not self._healthy():
-                    raise ManagerError("Bot service did not stay active after setup")
+                    raise ManagerError("Bot service did not stay active after setup; "
+                                       "run sudo mikachan logs for the service error")
             except BaseException:
                 self._systemctl("stop", check=False)
                 self._restore_snapshot(undo)
