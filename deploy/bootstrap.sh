@@ -190,8 +190,20 @@ printf 'Mikachan manager schema 1\n' > "$install_root/.managed-by-mikachan"
 install -m 0644 "$source_dir/deploy/__init__.py" "$panel_root/deploy/__init__.py"
 install -m 0644 "$source_dir/deploy/manager.py" "$panel_root/deploy/manager.py"
 install -m 0644 "$source_dir/deploy/manager_ui.py" "$panel_root/deploy/manager_ui.py"
+for panel_module in terminal_assets.py terminal_intro.py; do
+  if [[ -f "$source_dir/deploy/$panel_module" ]]; then
+    install -m 0644 "$source_dir/deploy/$panel_module" "$panel_root/deploy/$panel_module"
+  fi
+done
 install -m 0644 "$source_dir/deploy/manager-requirements.txt" "$panel_root/deploy/manager-requirements.txt"
 install -m 0755 "$source_dir/deploy/manage.sh" "$panel_root/deploy/manage.sh"
+asset_root="$install_root/assets/terminal"
+mkdir -p "$asset_root/intro" "$asset_root/artwork"
+for asset in intro/intro.txt README.md; do
+  if [[ ! -e "$asset_root/$asset" && -f "$source_dir/assets/terminal/$asset" ]]; then
+    install -m 0644 "$source_dir/assets/terminal/$asset" "$asset_root/$asset"
+  fi
+done
 printf 'Managed by Mikachan bootstrap\n' > "$panel_root/.managed-by-mikachan"
 chmod 0600 "$panel_root/.managed-by-mikachan"
 python3 - "$repo_url" "$install_root/config/manager.json" <<'PYCONFIG'

@@ -30,7 +30,7 @@ curl -fsSL https://raw.githubusercontent.com/Dneeel/Mikachan/v2/deploy/bootstrap
 
 Read the [bootstrap script](../deploy/bootstrap.sh) before running it if you prefer. It installs Git, Python venv support, FFmpeg, Tesseract with Persian language data, and Cairo; copies the panel to a stable location; retrieves the locked `v2` release; runs pytest and Ruff; creates a disabled service; and opens the panel. Setup then collects the two required Telegram values and starts the service. Installation stops if systemd is unavailable, an unmanaged service is present, or an existing service has the new managed unit name.
 
-The first installation can take several minutes because Python packages and media tools must be fetched. The panel reports progress and errors. Run `mikachan` to reopen it. The console panel now uses the Python standard-library `curses` interface (no Textual); the ASCII header supplied for Mikachan appears at full size in sufficiently wide terminals and automatically uses a compact version on smaller screens.
+The first installation can take several minutes because Python packages and media tools must be fetched. The panel reports progress and errors. Run `mikachan` to reopen it. The console panel uses the Python standard-library `curses` interface (no Textual). Optional owner-supplied artwork appears at full size when the terminal has enough room; a compact Mikachan title appears on smaller screens.
 
 ## Private repository: read-only deploy key
 
@@ -78,27 +78,32 @@ The manager validates the complete configuration, saves a SQLite/configuration s
 
 The API fields also appear near the top of **Configuration → Telegram user account · userbot**. After entering both fields, run `cd /opt/Mikachan/current && sudo ./.venv/bin/mikachan userbot-login` in a private interactive SSH terminal. Enter the same API ID and hash, then scan the displayed QR code in Telegram on your phone via **Settings → Devices → Link Desktop Device**. If your account uses two-step verification, enter that password in the terminal. On a managed VPS, this root command saves `USERBOT_SESSION` through the deployment manager, takes a configuration snapshot, and restarts the service. An unprivileged or unmanaged run prints the secret session for manual entry into the panel; scanning the QR alone does not configure the running bot. Configure `USERBOT_STAGING_CHAT_ID` there when large uploads or `/url` are needed. Do not paste a session or API hash into a Telegram chat. The QR code expires and refreshes automatically; run the command again if all five attempts expire.
 
-The server's panel is a separate bootstrap copy from the active bot release. The first update from an older panel needs a one-time panel refresh: update the `v2` release, then install its `deploy/manager.py` and `deploy/manager_ui.py` into `/opt/Mikachan/panel/deploy/` using `install -m 0644`. Subsequent release activations refresh the bootstrap-owned panel automatically.
+The server's panel is a separate bootstrap copy from the active bot release. A verified release activation refreshes the bootstrap-owned panel. During the first upgrade from an older panel, newly introduced UI helpers are loaded from the verified active release until the panel copy is refreshed; appearance changes do not restart the bot.
 
 After startup, the protected Owner opens `/settings` in their private bot conversation to register people with required internal names, approve groups, assign Mikachan Admins to specific groups and set global module policy. ADMIN and USER may interact only in approved groups, even when Telegram has delivered them an outbound direct notice. Native Telegram administrator status alone does not grant Mikachan permissions. Editing the legacy allowlist/group ID fields in the VPS panel applies only the explicit difference from their previous values and preserves other people/groups registered inside the bot. Changing the primary Owner through the authenticated VPS panel updates the protected Owner registry with a snapshot.
 
-A protected primary Owner may request promotion or removal of an additional Owner in the private `/settings` registry. The request cannot approve itself inside Telegram. On the VPS, inspect **Settings & Access → Review pending co-owner requests**, select the desired request and confirm it, or run `sudo mikachan owner-approval list` followed by `sudo mikachan owner-approval approve TOKEN USER_ID`. The latter asks for a typed confirmation. Approval stops the service, saves a consistent database snapshot, checks the request and target again, applies the change and restarts the service. Never paste a bot token or user-session secret into these commands.
+A protected primary Owner may request promotion or removal of an additional Owner in the private `/settings` registry. The request cannot approve itself inside Telegram. On the VPS, inspect **Configuration → Review pending co-owner requests**, select the desired request and confirm it, or run `sudo mikachan owner-approval list` followed by `sudo mikachan owner-approval approve TOKEN USER_ID`. The latter asks for a typed confirmation. Approval stops the service, saves a consistent database snapshot, checks the request and target again, applies the change and restarts the service. Never paste a bot token or user-session secret into these commands.
 
 ## Everyday controls
 
-Run `mikachan` from an interactive SSH terminal. The interface is a single-column, arrow/Enter menu with the ASCII Mikachan header. **Up/Down** moves the selection; **Enter** opens it or submits a field; **Esc/Left** goes back; **Q** quits the main screen; **R** refreshes server status. Form fields use Enter only for the current field; setup automatically advances to the next field. Backspace edits; Esc cancels.
+Run `mikachan` from an interactive SSH terminal. The interface plays a skippable startup animation, then opens a full-screen menu. **Space/Enter** skips the intro; **Up/Down** moves the selection; **Enter** opens it or submits a field; **Esc/Left** goes back; **Q** quits the main screen; **R** refreshes server status. Form fields use Enter only for the current field; setup automatically advances to the next field. Backspace edits; Esc cancels. Exiting the panel leaves the bot service running.
 
 | Menu | Actions |
 | --- | --- |
-| Bot & Health | Read status, start, stop, restart, queue, logs, diagnostics |
-| Releases & Updates | Browse remote version branches and choose one, update active branch, target a full commit SHA, rollback code + data, preview/prune old releases |
-| Backups & Recovery | Create, browse and select backup IDs, restore, inspect storage, recover interrupted release, cleanup abandoned media |
-| Settings & Access | Guided setup, grouped setting picker (secret values masked), pending Co-owner requests and explicit VPS operator approval |
-| Host & Maintenance | Host preflight, dependency installation, first installation, remove code, purge all managed project data |
+| Overview | Service/version/health summary, host resources, queue, diagnostics and storage |
+| Services | Start, stop and restart the bot; inspect queue and integrated userbot configuration |
+| Deployment | Browse version branches, install/update/switch, rollback, preview/prune releases |
+| Configuration | Guided setup, masked setting picker, pending co-owner approvals |
+| Integrations | Userbot, translation/data and music configuration; no separate userbot daemon |
+| Logs | Scroll recent journal entries, show recent warnings/errors, filter literal text |
+| Data & Backups | Create, browse and restore snapshots; inspect storage and recovery |
+| Appearance | Intro mode/skip, artwork preview/reload/default, layout and alignment |
+| Maintenance | Host preflight, dependencies, recovery, cleanup, remove and purge |
+| Exit | Close the panel without stopping the bot |
 
 **Safety:** Every destructive command displays its consequences and requires its own exact typed phrase. In particular, **Rollback restores a historical database as well as the code**; it can permanently discard changes recorded since that snapshot. Do not use rollback merely to change releases. Backups are SQLite/config snapshots, **not** a complete archive of all project code, cache and temporary media. Secrets are never displayed as setting values.
 
-The full user-provided ASCII art requires a terminal approximately 140 columns wide and at least 26 rows; the panel uses a readable compact header on narrow SSH and phone screens. There is no web server, graphical dashboard, long-running panel daemon or continuous idle CPU/RAM requirement. Installation/update work still runs only after a user selects it, using the existing verified Manager backend.
+Place optional artwork at `/opt/Mikachan/assets/terminal/artwork/header.txt` and an optional MP4 or GIF at `/opt/Mikachan/assets/terminal/intro/intro.mp4` or `intro.gif`. The panel reads them on the next launch, or immediately after **Appearance → Reload**. The built-in text intro and compact header work without uploads. Terminal media is silent monochrome rendering; terminals smaller than 80×24, without color, or without FFmpeg use the native text intro. See the [asset guide](../assets/terminal/README.md) for limits and preview steps. There is no web server, graphical dashboard, long-running panel daemon or continuous idle CPU/RAM requirement. Installation/update work still runs only after a user selects it, using the existing verified Manager backend.
 
 A version switch takes a consistent SQLite snapshot after stopping the bot. A failed activation restores the previous code and data. A rollback intentionally restores the earlier snapshot and discards later database changes. Regular backups contain the SQLite database and runtime settings; large downloaded job artifacts are not duplicated. Review a target branch before switching to it, especially across major schema changes.
 
@@ -112,6 +117,7 @@ Every Mikachan-managed file lives under **`/opt/Mikachan`**:
 | `/opt/Mikachan/state/mikachan.sqlite*`, `/opt/Mikachan/state/jobs` | SQLite WAL state and transient download artifacts |
 | `/opt/Mikachan/cache`, `/opt/Mikachan/tmp`, `/opt/Mikachan/logs` | Dependency caches, isolated runtime/manager/panel/bootstrap temp and project logs |
 | `/opt/Mikachan/backups` | Operator-created SQLite/configuration snapshots |
+| `/opt/Mikachan/assets/terminal` | Persistent intro, artwork and appearance preferences |
 | `/opt/Mikachan/manifest.json`, `/opt/Mikachan/transaction.json` | Release history and interrupted-update recovery |
 
 The only paths outside the root are the small `/usr/local/bin/mikachan` launcher, `/etc/systemd/system/mikachan.service`, and operating-system-managed user, journal and packages. The bot service runs as an unprivileged `mikachan` system user. The panel needs sudo because it manages that service, private settings, and backups. **Remove bot code** keeps data and backups. **Delete managed project** removes the entire managed root after typed confirmation, including the panel, local backups and secrets. Keep an external backup before purging.

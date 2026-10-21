@@ -842,9 +842,28 @@ class Manager:
                     source.stat().st_size > 500_000:
                 raise ValueError("Panel source or target is unsafe")
             sources.append((name, target, source.read_text(encoding="utf-8")))
+        for name in ("terminal_assets.py", "terminal_intro.py"):
+            source = release / "deploy" / name
+            target = directory / name
+            if source.is_file():
+                if source.is_symlink() or target.is_symlink() or source.stat().st_size > 500_000:
+                    raise ValueError("Panel source or target is unsafe")
+                sources.append((name, target, source.read_text(encoding="utf-8")))
         for name, target, content in sources:
             _atomic(target, content,
                     0o755 if name == "manage.sh" else 0o644)
+        assets = self.paths.base / "assets" / "terminal"
+        for subdir in (assets, assets / "intro", assets / "artwork"):
+            if subdir.is_symlink():
+                raise ValueError("Terminal asset directory is unsafe")
+            subdir.mkdir(parents=True, exist_ok=True)
+        for name in ("intro/intro.txt", "README.md"):
+            source = release / "assets" / "terminal" / name
+            target = assets / name
+            if source.is_file() and not target.exists():
+                if source.is_symlink() or target.is_symlink() or source.stat().st_size > 64_000:
+                    raise ValueError("Terminal asset is unsafe")
+                _atomic(target, source.read_text(encoding="utf-8"), 0o644)
 
     def install(self, config: dict[str, str] | None = None, *, branch: str = "v2",
                 commit: str | None = None, checks: bool = True,

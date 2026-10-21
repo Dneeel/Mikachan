@@ -1,0 +1,14 @@
+[speed 12]
+$ whoami[pause 1]?[pause 0.3]
+[pause 1]
+Mikachan[pause 1].[pause 0.3].[pause 0.3].[pause 1]
+someone who thinks about you <3
+[pause 1.5]
+$ cat feelings.txt
+[slow]
+[pause 1]
+I like you.
+[pause 2]
+A lot.
+[glitch 3]
+[clear]

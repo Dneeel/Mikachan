@@ -35,7 +35,7 @@ Afterward, open the panel at any time with:
 mikachan
 ```
 
-The panel has six sections: Overview, Deployment, Service, Configuration, Data & Storage, and Maintenance. It shows the installed branch and exact commit, service state, host load, memory and free disk, queue activity, masked settings, and release actions. You can edit the bot token, owner ID, access lists, providers, and other supported settings individually. Same-branch updates work on any `vN` branch; you can switch to another version branch or a reviewed commit, roll back with a database snapshot, back up, restore, inspect logs, or remove the managed installation. See the [full operations guide](docs/INSTALL_UBUNTU.md).
+The panel has ten top-level choices: Overview, Services, Deployment, Configuration, Integrations, Logs, Data & Backups, Appearance, Maintenance, and Exit. It shows the installed branch and exact commit, service state, host CPU, memory and free disk, queue activity, masked settings, and release actions. You can edit the bot token, owner ID, access lists, providers, and other supported settings individually. Same-branch updates work on any `vN` branch; you can switch to another version branch or a reviewed commit, roll back with a database snapshot, back up, restore, inspect logs, or remove the managed installation. The interactive panel opens with a skippable cinematic text intro; appearance preferences and optional custom media/artwork live under `/opt/Mikachan/assets/terminal/`. See the [operations guide](docs/INSTALL_UBUNTU.md) and [asset guide](assets/terminal/README.md).
 
 ## What the bot does
 

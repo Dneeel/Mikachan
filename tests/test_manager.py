@@ -56,6 +56,16 @@ def test_panel_refresh_requires_bootstrap_marker_and_rejects_symlink(tmp_path):
     manager._refresh_panel(release)
     target = panel / "deploy" / "manager_ui.py"
     assert target.read_text() == (release / "deploy" / "manager_ui.py").read_text()
+    assert (panel / "deploy" / "terminal_assets.py").is_file()
+    assert (panel / "deploy" / "terminal_intro.py").is_file()
+    assets = paths.base / "assets" / "terminal"
+    assert (assets / "intro/intro.txt").is_file()
+    custom = assets / "artwork/header.txt"
+    custom.write_text("  USER ART  \n")
+    (assets / "intro/intro.txt").write_text("User introduction\n")
+    manager._refresh_panel(release)
+    assert custom.read_text() == "  USER ART  \n"
+    assert (assets / "intro/intro.txt").read_text() == "User introduction\n"
     assert stat.S_IMODE((panel / "deploy" / "manage.sh").stat().st_mode) == 0o755
     target.unlink()
     target.symlink_to(tmp_path / "outside")

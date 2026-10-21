@@ -41,27 +41,27 @@ class FakeWin:
         pass
 
 
-def test_supplied_banner_unchanged_and_responsive():
-    # The embedded art preserves whitespace and content in the 15 supplied lines.
-    assert len(BANNER.splitlines()) == 15
-    assert "8888" in BANNER
-    assert banner_lines(160, 40) == tuple(BANNER.splitlines())
-    assert len(banner_lines(80, 32)) < 10
-    assert banner_lines(36, 15) == ("[ M I K A C H A N ]",)
+def test_default_banner_and_custom_art_are_responsive():
+    assert BANNER == "M I K A C H A N"
+    custom = ("   /\\   ", "  /__\\  ")
+    assert banner_lines(160, 40, custom) == custom
+    assert banner_lines(80, 24, custom) == ("MIKACHAN",)
+    assert banner_lines(36, 15) == ("MIKACHAN",)
 
 
 def test_top_level_arrow_enter_and_back_navigation():
     ui = MikachanMenu(FakeManager)
     assert ui.page.title == "MAIN MENU"
     ui.handle_key(curses.KEY_DOWN)
+    ui.handle_key(curses.KEY_DOWN)
     ui.handle_key(10)
-    assert ui.page.title == "RELEASES & UPDATES"
+    assert ui.page.title == "DEPLOYMENT"
     ui.handle_key(27)
     assert ui.page.title == "MAIN MENU"
     ui.handle_key(curses.KEY_UP)
-    assert ui.page.selected == 0
+    assert ui.page.selected == 1
     ui.handle_key(10)
-    assert ui.page.title == "BOT & HEALTH"
+    assert ui.page.title == "SERVICES"
 
 
 def test_confirmation_cannot_run_without_exact_phrase():

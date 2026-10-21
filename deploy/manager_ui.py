@@ -1,7 +1,7 @@
-"""Minimal, keyboard-only Mikachan terminal control panel.
+"""Cinematic, keyboard-first Mikachan terminal control panel.
 
-Only uses Python's standard-library curses module. The independent deployment
-manager remains operational from CLI if the screen or bot runtime is broken.
+The dependency-free curses backend keeps management available over SSH even
+when the bot release or an optional rendering tool is broken.
 """
 
 from __future__ import annotations
@@ -14,21 +14,19 @@ import queue
 import re
 import textwrap
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any, Callable
 
 from deploy.manager import BRANCH, EDITABLE, PRIVATE_KEYS, Manager, ManagerError
+from deploy.terminal_assets import (COMPACT_HEADER, asset_root, ensure_assets,
+                                    load_appearance, project_root, read_header,
+                                    save_appearance, media_candidate)
+from deploy.terminal_intro import play_startup
 
-BANNER = '    ...     ..      ..        .          ..                                                                                               \n  x*8888x.:*8888: -"888:     @88>  < .z@8"`                              .uef^"                                              .x~~"*Weu.   \n X   48888X `8888H  8888     %8P    !@88E                              :d88E                      u.    u.                  d8Nu.  9888c  \nX8x.  8888X  8888X  !888>     .     \'888E   u          u           .   `888E             u      x@88k u@88c.                88888  98888  \nX8888 X8888  88888   "*8%-  .@88u    888E u@8NL     us888u.   .udR88N   888E .z8k     us888u.  ^"8888""8888"          .o@8  "***"  9888%  \n\'*888!X8888> X8888  xH8>   \'\'888E`   888E`"88*"  .@88 "8888" <888\'888k  888E~?888L .@88 "8888"   8888  888R       .o@8888%       ..@8*"   \n  `?8 `8888  X888X X888>     888E    888E .dN.   9888  9888  9888 \'Y"   888E  888E 9888  9888    8888  888R   .o@8888%"       ````"8Weu   \n  -^  \'888"  X888  8888>     888E    888E~8888   9888  9888  9888       888E  888E 9888  9888    8888  888R  8888R"          ..    ?8888L \n   dx \'88~x. !88~  8888>     888E    888E \'888&  9888  9888  9888       888E  888E 9888  9888    8888  888R  "*8888bu.     :@88N   \'8888N \n .8888Xf.888x:!    X888X.:   888&    888E  9888. 9888  9888  ?8888u../  888E  888E 9888  9888   "*88*" 8888"    ^"*8888bu. *8888~  \'8888F \n:""888":~"888"     `888*"    R888" \'"888*" 4888" "888*""888"  "8888P\'  m888N= 888> "888*""888"    ""   \'Y"          ^%*888 \'*8"`   9888%  \n    "~\'    "~        ""       ""      ""    ""    ^Y"   ^Y\'     "P\'     `Y"   888   ^Y"   ^Y\'                           ^%   `~===*%"`    \n                                                                             J88"                                                         \n                                                                             @%                                                           \n                                                                           :"                                                             '
-COMPACT_BANNER = (
-    ' __  __ ___ _  __    _    ____ _   _    _    _   _',
-    '|  \\/  |_ _| |/ /   / \\  / ___| | | |  / \\  | \\ | |',
-    "| |\\/| || || ' /   / _ \\| |   | |_| | / _ \\ |  \\| |",
-    '| |  | || || . \\  / ___ \\ |___|  _  |/ ___ \\| |\\  |',
-    '|_|  |_|___|_|\\_\\/_/   \\_\\____|_| |_/_/   \\_\\_| \\_|',
-)
-# Used for extremely narrow or shallow SSH terminals; never crop mid-character.
-TINY_BANNER = ("[ M I K A C H A N ]",)
+BANNER = "M I K A C H A N"
+COMPACT_BANNER = COMPACT_HEADER
+TINY_BANNER = ("MIKACHAN",)
 
 SETTING_GROUPS: dict[str, tuple[str, ...]] = {
     "Identity & Access": ("BOT_TOKEN", "OWNER_TELEGRAM_ID", "ALLOWED_TELEGRAM_IDS",
@@ -40,7 +38,8 @@ SETTING_GROUPS: dict[str, tuple[str, ...]] = {
     "Music": ("SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET"),
     "Download & Limits": ("MAX_ACTIVE_DOWNLOADS", "MAX_ACTIVE_PER_USER", "MAX_LINKS_PER_MESSAGE",
                           "SEARCH_PAGE_SIZE", "SEARCH_SESSION_TTL_SECONDS", "CONFIRMATION_TTL_SECONDS",
-                          "MIKACHAN_INSTAGRAM_COOKIES_FILE", "MIKACHAN_PORNHUB_COOKIES_FILE"),
+                          "MIKACHAN_INSTAGRAM_COOKIES_FILE", "MIKACHAN_PORNHUB_COOKIES_FILE",
+                          "MIKACHAN_TIKTOK_FOLLOW_COOKIES_FILE", "MIKACHAN_X_FOLLOW_COOKIES_FILE"),
     "Bot API": ("BOT_API_MODE", "LOCAL_BOT_API_URL"),
 }
 
@@ -57,14 +56,14 @@ def safe_setting_value(key: str, value: str) -> str:
     return value if value else "not set"
 
 
-def banner_lines(width: int, height: int) -> tuple[str, ...]:
-    """Prefer the exact supplied art; preserve navigation in small terminals."""
-    original = tuple(BANNER.splitlines())
-    if width >= max(map(len, original)) + 2 and height >= len(original) + 11:
-        return original
-    if width >= max(map(len, COMPACT_BANNER)) + 2 and height >= 22:
-        return COMPACT_BANNER
-    return TINY_BANNER
+def banner_lines(width: int, height: int, art: tuple[str, ...] | None = None,
+                 layout: str = "auto") -> tuple[str, ...]:
+    """Keep the full art only when navigation has sufficient room below it."""
+    original = art or tuple(BANNER.splitlines())
+    if layout != "compact" and (layout == "normal" or height >= 29):
+        if width >= max(map(len, original)) + 4 and height >= len(original) + 17:
+            return original
+    return COMPACT_BANNER if width >= 30 and height >= 18 else TINY_BANNER
 
 
 def clip(value: Any, width: int) -> str:
@@ -72,6 +71,7 @@ def clip(value: Any, width: int) -> str:
         return ""
     s = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", str(value))
     s = s.replace("\n", " ").replace("\r", " ").replace("\x1b", "")
+    s = re.sub(r"[\x00-\x1f\x7f]", "", s)
     return s if len(s) <= width else s[:max(0, width - 1)] + "…"
 
 
@@ -79,6 +79,19 @@ def format_result(result: Any) -> list[str]:
     if isinstance(result, (dict, list)):
         return json.dumps(result, ensure_ascii=False, indent=2, default=str).splitlines()
     return str(result).splitlines() or ["(no result)"]
+
+
+def safe_log_lines(raw: str) -> list[str]:
+    """Keep journal text inspectable without echoing likely credentials."""
+    lines = []
+    for line in raw.splitlines():
+        line = re.sub(r"\b[0-9]{7,12}:[A-Za-z0-9_-]{30,}\b", "[REDACTED BOT TOKEN]", line)
+        line = re.sub(r"(?i)\b(api[_ -]?hash|userbot[_ -]?session|bot[_ -]?token|"
+                      r"password|secret|api[_ -]?key)\s*[:=]\s*\S+",
+                      lambda found: str(found.group(1)) + "=[REDACTED]", line)
+        line = re.sub(r"(?i)\bBearer\s+\S+", "Bearer [REDACTED]", line)
+        lines.append(clip(line, 1000))
+    return lines
 
 
 @dataclass(frozen=True)
@@ -101,8 +114,14 @@ class Page:
 class MikachanMenu:
     """A self-contained up/down/enter navigator around the existing Manager."""
 
-    def __init__(self, manager_factory: Callable[..., Manager] = Manager):
+    def __init__(self, manager_factory: Callable[..., Manager] = Manager,
+                 *, root: Path | None = None):
         self.manager_factory = manager_factory
+        self.root = root or project_root()
+        ensure_assets(self.root)
+        self.appearance = load_appearance(self.root)
+        self.art, self.art_status = read_header(
+            self.root, use_custom=self.appearance.header == "custom")
         self.pages = [self._root_page()]
         self.notifications: collections.deque[str] = collections.deque(maxlen=8)
         self.events: queue.SimpleQueue[tuple[str, Any]] = queue.SimpleQueue()
@@ -116,6 +135,7 @@ class MikachanMenu:
         self.form_guidance = ""
         self.state: dict[str, Any] = {}
         self._pending_result: str | None = None
+        self._intro_preview_requested = False
 
     @property
     def page(self) -> Page:
@@ -123,48 +143,71 @@ class MikachanMenu:
 
     def _root_page(self) -> Page:
         return Page("MAIN MENU", [
-            Entry("Bot & Health", "go:bot"),
-            Entry("Releases & Updates", "go:releases"),
-            Entry("Backups & Recovery", "go:backups"),
-            Entry("Settings & Access", "go:settings"),
-            Entry("Host & Maintenance", "go:host"),
-            Entry("Exit", "quit"),
+            Entry("01   Overview", "go:overview"),
+            Entry("02   Services", "go:services"),
+            Entry("03   Deployment", "go:deployment"),
+            Entry("04   Configuration", "go:configuration"),
+            Entry("05   Integrations", "go:integrations"),
+            Entry("06   Logs", "go:logs"),
+            Entry("07   Data & Backups", "go:backups"),
+            Entry("08   Appearance", "go:appearance"),
+            Entry("09   Maintenance", "go:maintenance"),
+            Entry("10   Exit", "quit"),
         ])
 
     @staticmethod
     def submenu(which: str) -> Page:
         menus: dict[str, tuple[str, list[tuple[str, str]]]] = {
-            "bot": ("BOT & HEALTH", [
-                ("Service status", "op:status"), ("Start bot", "op:start"),
-                ("Stop bot", "confirm:stop"), ("Restart bot", "op:restart"),
-                ("Queue activity", "op:queue"), ("Recent logs", "op:logs"),
+            "overview": ("OVERVIEW", [
+                ("Dashboard / refresh", "op:status"), ("Queue activity", "op:queue"),
                 ("Live diagnostics", "op:diagnostics"),
+                ("Storage overview", "op:storage"),
             ]),
-            "releases": ("RELEASES & UPDATES", [
+            "services": ("SERVICES", [
+                ("Bot service status", "op:status"), ("Start bot", "op:start"),
+                ("Stop bot", "confirm:stop"), ("Restart bot", "op:restart"),
+                ("Userbot integration status", "op:userbot"),
+                ("Queue activity", "op:queue"),
+            ]),
+            "deployment": ("DEPLOYMENT", [
                 ("Available branches / Select version", "op:versions"),
                 ("Update active branch", "confirm:update"),
                 ("Switch to a specific commit", "input:commit_branch"),
                 ("Rollback code + data", "confirm:rollback"),
                 ("Preview release cleanup", "op:prune-preview"),
                 ("Prune old releases", "confirm:prune"),
+                ("Install bot release (choose version)", "op:versions"),
             ]),
-            "backups": ("BACKUPS & RECOVERY", [
+            "backups": ("DATA & BACKUPS", [
                 ("Create a backup", "op:backup"),
                 ("Browse / restore backups", "op:backups"),
                 ("Storage overview", "op:storage"),
                 ("Recover interrupted update", "confirm:recover"),
                 ("Clear interrupted media", "confirm:cleanup"),
             ]),
-            "settings": ("SETTINGS & ACCESS", [
+            "configuration": ("CONFIGURATION", [
                 ("Guided initial setup", "setup"),
                 ("Edit settings", "go:categories"),
                 ("Review pending co-owner requests", "op:owner-requests"),
                 ("Configuration summary", "op:config"),
             ]),
-            "host": ("HOST & MAINTENANCE", [
+            "integrations": ("INTEGRATIONS", [
+                ("Userbot readiness", "op:userbot"),
+                ("Telegram user account settings", "category:Telegram Userbot"),
+                ("Translation & data providers", "category:Translation & Data"),
+                ("Music provider settings", "category:Music"),
+                ("Current configuration", "op:config"),
+            ]),
+            "logs": ("LOGS", [
+                ("Recent service logs", "op:logs"),
+                ("Recent warnings and errors", "op:log-errors"),
+                ("Filter recent logs", "input:log_filter"),
+            ]),
+            "maintenance": ("MAINTENANCE", [
                 ("Host preflight", "op:preflight"),
                 ("Install missing host tools", "confirm:deps"),
-                ("Install bot release (choose version)", "op:versions"),
+                ("Recover interrupted update", "confirm:recover"),
+                ("Clear interrupted media", "confirm:cleanup"),
                 ("Remove bot code (keep data)", "confirm:remove"),
                 ("Permanently delete managed project", "confirm:purge"),
             ]),
@@ -174,6 +217,92 @@ class MikachanMenu:
 
     def push(self, page: Page) -> None:
         self.pages.append(page)
+
+    def _appearance_page(self) -> Page:
+        current = self.appearance
+        return Page("APPEARANCE", [
+            Entry(f"Startup intro                 {'On' if current.intro_enabled else 'Off'}",
+                  "appearance:intro"),
+            Entry(f"Playback mode                 {current.playback.title()}",
+                  "appearance:playback"),
+            Entry(f"Allow startup skip            {'On' if current.allow_skip else 'Off'}",
+                  "appearance:skip"),
+            Entry("Preview startup intro", "appearance:preview_intro"),
+            Entry("Reload startup assets", "appearance:reload"),
+            Entry(f"Header                        {current.header.title()}",
+                  "appearance:header"),
+            Entry("Preview current artwork", "appearance:preview_header"),
+            Entry("Reload artwork from file", "appearance:reload"),
+            Entry("Restore default header", "appearance:default_header"),
+            Entry(f"Header alignment              {current.alignment.title()}",
+                  "appearance:alignment"),
+            Entry(f"Layout                        {current.layout.title()}",
+                  "appearance:layout"),
+            Entry("Asset paths and media compatibility", "appearance:paths"),
+            Entry("Back", "back"),
+        ])
+
+    def _reload_assets(self) -> None:
+        self.appearance = load_appearance(self.root)
+        self.art, self.art_status = read_header(
+            self.root, use_custom=self.appearance.header == "custom")
+        if self.page.title == "APPEARANCE":
+            selected, offset = self.page.selected, self.page.offset
+            self.pages[-1] = self._appearance_page()
+            self.page.selected, self.page.offset = selected, offset
+
+    def _set_appearance(self, **changes: Any) -> None:
+        setting = replace(self.appearance, **changes)
+        try:
+            save_appearance(self.root, setting)
+            self._reload_assets()
+            self.notify("Appearance saved. Bot service was not restarted.")
+        except (OSError, ValueError) as exc:
+            self.notify(f"Appearance could not be saved: {type(exc).__name__}")
+
+    def _appearance_action(self, action: str) -> None:
+        current = self.appearance
+        if action == "intro":
+            self._set_appearance(intro_enabled=not current.intro_enabled)
+        elif action == "playback":
+            choices = ("auto", "native", "media")
+            self._set_appearance(playback=choices[(choices.index(current.playback) + 1) % 3])
+        elif action == "skip":
+            self._set_appearance(allow_skip=not current.allow_skip)
+        elif action == "header":
+            self._set_appearance(header="default" if current.header == "custom" else "custom")
+        elif action == "default_header":
+            self._set_appearance(header="default")
+        elif action == "alignment":
+            self._set_appearance(alignment="left" if current.alignment == "center" else "center")
+        elif action == "layout":
+            choices = ("auto", "normal", "compact")
+            self._set_appearance(layout=choices[(choices.index(current.layout) + 1) % 3])
+        elif action == "reload":
+            self._reload_assets()
+            self.notify(self.art_status)
+        elif action == "preview_header":
+            self.push(Page("ARTWORK PREVIEW", [Entry("Back", "back")], kind="artwork",
+                           text=list(self.art)))
+        elif action == "preview_intro":
+            self._intro_preview_requested = True
+        elif action == "paths":
+            root = asset_root(self.root)
+            size = os.get_terminal_size(1) if os.isatty(1) else None
+            columns, rows = (size.columns, size.lines) if size else (80, 24)
+            try:
+                colors = curses.COLORS if curses.has_colors() else 0
+            except curses.error:
+                colors = 0
+            _, media_status = media_candidate(self.root, columns=columns, rows=rows,
+                                              colors=colors)
+            self.push(Page("ASSETS & COMPATIBILITY", [Entry("Back", "back")], kind="report",
+                           text=[f"Header: {root / 'artwork/header.txt'}",
+                                 f"Native intro: {root / 'intro/intro.txt'}",
+                                 f"MP4: {root / 'intro/intro.mp4'}",
+                                 f"GIF: {root / 'intro/intro.gif'}", "",
+                                 self.art_status, media_status,
+                                 "Media plays silently as monochrome terminal characters."]))
 
     def back(self) -> None:
         if self.form_label is not None:
@@ -198,13 +327,32 @@ class MikachanMenu:
 
     def _status_line(self) -> str:
         if not self.status:
-            return "SERVER: status not checked"
+            return "BOT  UNKNOWN     VERSION  —     HEALTH  UNCHECKED"
         if not self.status.get("installed"):
-            return "SERVER: not installed"
+            return "BOT  NOT INSTALLED     VERSION  —     HEALTH  SETUP REQUIRED"
         state = self.status.get("service", "unknown")
         branch = self.status.get("branch", "?")
         sha = self.status.get("commit", "")[:12]
-        return f"SERVER: {state.upper()}  |  {branch}@{sha}  |  {'OK' if self.status.get('consistent') else 'INSPECT'}"
+        health = ("INSPECT" if not self.status.get("consistent") else
+                  "SETUP REQUIRED" if self.status.get("setup_required") else
+                  "READY" if state == "active" else "ATTENTION")
+        return f"BOT  {state.upper()}     VERSION  {branch}@{sha}     HEALTH  {health}"
+
+    def _host_line(self) -> str:
+        host = self.status.get("host") or {}
+        cpu = host.get("cpu_percent")
+        used, total = host.get("memory_used"), host.get("memory_total")
+        free = host.get("disk_free")
+        try:
+            uptime = float(Path("/proc/uptime").read_text(encoding="ascii").split()[0])
+            up = f"{int(uptime // 86400)}d {int(uptime % 86400 // 3600)}h"
+        except (OSError, ValueError, IndexError):
+            up = "unknown"
+        ram = f"{used / 2**30:.1f}/{total / 2**30:.1f} GiB" if used is not None and total else "—"
+        disk = f"{free / 2**30:.1f} GiB free" if free is not None else "—"
+        userbot = self.state.get("userbot_state", "unverified")
+        return (f"CPU {cpu if cpu is not None else '—'}%   RAM {ram}   DISK {disk}"
+                f"   UP {up}   USERBOT CFG {userbot}")
 
     def open_form(self, label: str, callback: Callable[[str], None], *, secret: bool = False,
                   guidance: str = "", default: str = "") -> None:
@@ -305,11 +453,8 @@ class MikachanMenu:
                        + [Entry("Back", "back")]))
 
     def select(self) -> None:
-        if self.worker and self.worker.is_alive():
-            self.notify("Operation still in progress; changes are locked")
-            return
         page = self.page
-        if page.kind == "report":
+        if page.kind in {"report", "artwork"}:
             self.back()
             return
         if not page.entries:
@@ -317,6 +462,9 @@ class MikachanMenu:
             return
         entry = page.entries[page.selected]
         cmd = entry.action
+        if self.worker and self.worker.is_alive() and cmd not in {"back"} and not cmd.startswith("go:"):
+            self.notify("Operation running; navigation remains available")
+            return
         if cmd == "back":
             self.back()
         elif cmd == "quit":
@@ -325,10 +473,16 @@ class MikachanMenu:
             target = cmd.partition(":")[2]
             if target == "categories":
                 self._open_categories()
+            elif target == "appearance":
+                self.push(self._appearance_page())
             else:
                 self.push(self.submenu(target))
         elif cmd == "category":
             self._open_category(entry.payload)
+        elif cmd.startswith("category:"):
+            self._open_category(cmd.partition(":")[2])
+        elif cmd.startswith("appearance:"):
+            self._appearance_action(cmd.partition(":")[2])
         elif cmd == "setting":
             self._choose_setting(entry.payload)
         elif cmd == "snapshot":
@@ -344,13 +498,17 @@ class MikachanMenu:
         elif cmd.startswith("confirm:"):
             self._confirm(cmd.partition(":")[2], entry.payload)
         elif cmd == "input:commit_branch":
-            self.open_form("Existing branch (e.g. v2 or v2-test)", self._commit_branch)
+            self.open_form("Existing major branch (e.g. v2)", self._commit_branch)
         elif cmd == "input:commit":
             self._commit_input(entry.payload)
+        elif cmd == "input:log_filter":
+            self.open_form("Filter recent logs (literal text)",
+                           lambda value: self.execute("logs-filter", value[:60]),
+                           guidance="Case-insensitive text; no regular expressions.")
 
     def _commit_branch(self, branch: str) -> None:
         if not BRANCH.fullmatch(branch):
-            self.notify("Expected a branch such as v2 or v2-test")
+            self.notify("Expected an existing major branch such as v2")
             return
         self._commit_input(branch)
 
@@ -439,6 +597,7 @@ class MikachanMenu:
             self.events.put(("progress", message))
         try:
             manager = self.manager_factory(on_event=progress)
+            result: Any
             if action == "status":
                 result = manager.status()
             elif action == "start":
@@ -450,7 +609,31 @@ class MikachanMenu:
             elif action == "queue":
                 result = manager.queue()
             elif action == "logs":
-                result = manager.logs()
+                result = safe_log_lines(manager.logs())
+            elif action == "log-errors":
+                result = [line for line in safe_log_lines(manager.logs(200))
+                          if re.search(r"error|failed|warning|critical|traceback", line, re.I)]
+                if not result:
+                    result = ["No matching warnings or errors in the latest 200 lines."]
+            elif action == "logs-filter":
+                phrase = str(payload or "").casefold()
+                result = [line for line in safe_log_lines(manager.logs(200))
+                          if phrase in line.casefold()]
+                if not result:
+                    result = ["No matching lines in the latest 200 entries."]
+            elif action == "userbot":
+                config = manager.config()
+                result = {
+                    "architecture": "Userbot runs inside the bot service; there is no separate service",
+                    "bot_service": manager.status().get("service", "unknown"),
+                    "api_credentials": "configured" if config.get("TELEGRAM_API_ID") and
+                    config.get("TELEGRAM_API_HASH") else "not configured",
+                    "user_session": "configured" if config.get("USERBOT_SESSION") or
+                    config.get("COINPJ_SESSION") else "not configured",
+                    "private_staging_chat": "configured" if
+                    config.get("USERBOT_STAGING_CHAT_ID") else "not configured",
+                    "live_authentication": "not checked by this screen",
+                }
             elif action == "diagnostics":
                 result = manager.diagnostics(live=True)
             elif action == "versions":
@@ -525,12 +708,14 @@ class MikachanMenu:
                                        name="mikachan-manager-operation", daemon=False)
         self.worker.start()
 
-    def drain_events(self) -> None:
+    def drain_events(self) -> bool:
+        changed = False
         while True:
             try:
                 kind, data = self.events.get_nowait()
             except queue.Empty:
-                return
+                return changed
+            changed = True
             if kind == "progress":
                 self.notify(clip(data, 140))
             elif kind == "failure":
@@ -573,6 +758,41 @@ class MikachanMenu:
             except curses.error:
                 pass
 
+    def _style(self, role: str) -> int:
+        if not getattr(self, "_colors_ready", False):
+            return curses.A_BOLD if role in {"title", "selected", "accent"} else \
+                curses.A_DIM if role in {"muted", "separator"} else curses.A_NORMAL
+        pair = {"title": 4, "selected": 3, "accent": 3, "muted": 2,
+                "separator": 5, "normal": 1, "warning": 3}.get(role, 1)
+        return curses.color_pair(pair) | (curses.A_BOLD if role in {"title", "selected"} else 0)
+
+    def _init_palette(self, win: Any) -> None:
+        self._colors_ready = False
+        try:
+            if not curses.has_colors():
+                return
+            curses.start_color()
+            if curses.can_change_color() and curses.COLORS >= 24:
+                for number, red, green, blue in ((16, 35, 35, 43), (17, 930, 930, 930),
+                                                  (18, 540, 540, 576), (19, 725, 110, 110),
+                                                  (20, 935, 267, 267), (21, 153, 153, 165)):
+                    curses.init_color(number, red, green, blue)
+                background, text, muted, red, active, border = 16, 17, 18, 19, 20, 21
+            else:
+                background, text, muted, red, active, border = (
+                    curses.COLOR_BLACK, curses.COLOR_WHITE, curses.COLOR_WHITE,
+                    curses.COLOR_RED, curses.COLOR_RED, curses.COLOR_RED)
+            curses.init_pair(1, text, background)
+            curses.init_pair(2, muted, background)
+            curses.init_pair(3, active, background)
+            curses.init_pair(4, text, background)
+            curses.init_pair(5, border if curses.COLORS >= 24 else red, background)
+            self._colors_ready = True
+            if hasattr(win, "bkgd"):
+                win.bkgd(" ", curses.color_pair(1))
+        except curses.error:
+            self._colors_ready = False
+
     def draw(self, win: Any) -> None:
         win.erase()
         height, width = win.getmaxyx()
@@ -580,27 +800,44 @@ class MikachanMenu:
             self._safe_add(win, 0, 0, "Enlarge terminal (min 30x10)")
             win.refresh()
             return
-        header = banner_lines(width, height)
+        header = banner_lines(width, height, self.art, self.appearance.layout)
         y = 1
         for line in header:
-            self._safe_add(win, y, max(0, (width - len(line.rstrip())) // 2), line.rstrip(),
-                           curses.A_BOLD)
+            x = (max(2, (width - len(line)) // 2) if self.appearance.alignment == "center"
+                 else 4)
+            self._safe_add(win, y, x, line, self._style("title"))
             y += 1
+        y += 1 if height >= 32 else 0
+        self._safe_add(win, y, 4, "MIKACHAN / SYSTEM CONTROL", self._style("muted"))
         y += 1
+        self._safe_add(win, y, 4, "─" * max(1, min(width - 8, 92)), self._style("separator"))
+        y += 2 if height >= 32 else 1
+        self._safe_add(win, y, 4, self._status_line(), self._style("normal"))
+        y += 1
+        if height >= 28 or self.page.title == "OVERVIEW":
+            self._safe_add(win, y, 4, self._host_line(), self._style("muted"))
+            y += 1
         page = self.page
-        self._safe_add(win, y, 2, page.title, curses.A_BOLD)
+        y += 1 if height >= 28 else 0
+        self._safe_add(win, y, 4, page.title, self._style("accent"))
         y += 2
-        # reserve two footer rows for navigation / progress
+        # Preserve menu navigation before decorative artwork on short terminals.
         available = max(1, height - y - 4)
-        if page.kind == "report":
+        left = 4 if width < 110 else max(4, (width - 82) // 2)
+        if page.kind in {"report", "artwork"}:
             lines = []
             for raw in (page.text or []):
-                lines.extend(textwrap.wrap(raw, width=max(8, width - 8),
-                                           replace_whitespace=False, drop_whitespace=False,
-                                           break_long_words=True, break_on_hyphens=False) or [""])
+                if page.kind == "artwork":
+                    lines.append(raw)
+                else:
+                    lines.extend(textwrap.wrap(raw, width=max(8, width - 10),
+                                               replace_whitespace=False, drop_whitespace=False,
+                                               break_long_words=True, break_on_hyphens=False) or [""])
             page.offset = min(page.offset, max(0, len(lines) - available))
             for line in lines[page.offset:page.offset + available]:
-                self._safe_add(win, y, 4, line)
+                style = ("warning" if re.search(r"error|failed|warning|critical", line, re.I)
+                         else "normal")
+                self._safe_add(win, y, left, line, self._style(style))
                 y += 1
         else:
             page.selected = min(page.selected, len(page.entries) - 1) if page.entries else 0
@@ -611,24 +848,26 @@ class MikachanMenu:
             for index in range(page.offset, min(page.offset + available, len(page.entries))):
                 entry = page.entries[index]
                 selected = index == page.selected
-                style = curses.A_REVERSE | curses.A_BOLD if selected else curses.A_NORMAL
-                self._safe_add(win, y, 4, ("> " if selected else "  ") + entry.label, style)
+                self._safe_add(win, y, left, ("▌ " if selected else "  ") + entry.label,
+                               self._style("selected" if selected else "normal"))
                 y += 1
         if self.form_label is not None:
             line = height - 4
-            self._safe_add(win, line - 1, 2, self.form_guidance, curses.A_DIM)
+            self._safe_add(win, line - 1, 4, self.form_guidance, self._style("muted"))
             visible = "*" * len(self.form_value) if self.form_secret else self.form_value
             label = clip(self.form_label + ": ", max(15, width // 2))
             tail = visible[-max(1, width - len(label) - 5):]
-            self._safe_add(win, line, 2, label + tail, curses.A_REVERSE)
+            self._safe_add(win, line, 4, label + tail, self._style("selected"))
             footer = "Enter Confirm   Esc Cancel   Backspace Edit"
         else:
-            footer = "↑ ↓ Move    Enter Select    Esc Back    Q Exit"
-        self._safe_add(win, height - 2, 2, footer, curses.A_DIM)
+            footer = "↑ ↓ Navigate    Enter Select    Esc Back    Q Exit    R Refresh"
+        self._safe_add(win, height - 2, 4, footer, self._style("muted"))
         if self.worker and self.worker.is_alive():
-            self._safe_add(win, height - 1, 2, "Working — do not close terminal during update/restore", curses.A_BOLD)
+            self._safe_add(win, height - 1, 4,
+                           "Operation in progress. Navigation remains available.",
+                           self._style("accent"))
         elif self.notifications:
-            self._safe_add(win, height - 1, 2, self.notifications[-1], curses.A_DIM)
+            self._safe_add(win, height - 1, 4, self.notifications[-1], self._style("muted"))
         win.refresh()
 
     def handle_key(self, key: int) -> None:
@@ -646,16 +885,14 @@ class MikachanMenu:
             elif 32 <= key <= 126 and len(self.form_value) < 4096:
                 self.form_value += chr(key)
             return
-        if self.worker and self.worker.is_alive():
-            return
         page = self.page
         if key in (curses.KEY_UP, ord("k")):
-            if page.kind == "report":
+            if page.kind in {"report", "artwork"}:
                 page.offset = max(0, page.offset - 1)
             elif page.entries:
                 page.selected = max(0, page.selected - 1)
         elif key in (curses.KEY_DOWN, ord("j")):
-            if page.kind == "report":
+            if page.kind in {"report", "artwork"}:
                 page.offset += 1
             elif page.entries:
                 page.selected = min(len(page.entries) - 1, page.selected + 1)
@@ -666,7 +903,10 @@ class MikachanMenu:
                 self.back()
         elif key in (ord("q"), ord("Q")):
             if len(self.pages) == 1:
-                self.running = False
+                if self.worker and self.worker.is_alive():
+                    self.notify("Wait for the active operation before exiting")
+                else:
+                    self.running = False
             else:
                 self.back()
         elif key in (ord("r"), ord("R")) and self.form_label is None:
@@ -677,15 +917,39 @@ class MikachanMenu:
             curses.curs_set(0)
         except curses.error:
             pass
+        self._init_palette(win)
         win.keypad(True)
         win.timeout(125)
         try:
-            self.status = self.manager_factory().status()
+            manager = self.manager_factory()
+            self.status = manager.status()
+            if self.status.get("config"):
+                config = manager.config()
+                self.state["userbot_state"] = (
+                    "configured" if config.get("USERBOT_SESSION") or
+                    config.get("COINPJ_SESSION") else "off")
         except (ManagerError, OSError, ValueError) as exc:
             self.notify(f"Status unavailable: {type(exc).__name__}")
+        try:
+            play_startup(win, self.root, self.appearance)
+        except (OSError, ValueError, curses.error) as exc:
+            self.notify(f"Intro unavailable: {type(exc).__name__}")
+        needs_draw = True
+        was_busy = False
         while self.running:
-            self.drain_events()
-            self.draw(win)
+            needs_draw = self.drain_events() or needs_draw
+            if self._intro_preview_requested:
+                self._intro_preview_requested = False
+                try:
+                    play_startup(win, self.root, replace(self.appearance, intro_enabled=True))
+                except (OSError, ValueError, curses.error) as exc:
+                    self.notify(f"Intro preview failed: {type(exc).__name__}")
+                needs_draw = True
+            busy = bool(self.worker and self.worker.is_alive())
+            if needs_draw or busy != was_busy:
+                self.draw(win)
+                needs_draw = False
+            was_busy = busy
             try:
                 key = win.getch()
             except KeyboardInterrupt:
@@ -694,6 +958,7 @@ class MikachanMenu:
                 continue
             if key != -1:
                 self.handle_key(key)
+                needs_draw = True
         if self.worker and self.worker.is_alive():
             self.worker.join()
 

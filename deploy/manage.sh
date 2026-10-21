@@ -12,7 +12,7 @@ if (( EUID != 0 )); then
   exit 1
 fi
 
-# Read-only commands work even when Textual, uv, or the bot environment is broken.
+# Read-only commands work even when the interactive panel, uv, or bot runtime is broken.
 case "${1:-}" in
   status|preflight|diagnostics|logs|config|backups|queue|storage)
     exec python3 "$script_dir/manager.py" "$@"

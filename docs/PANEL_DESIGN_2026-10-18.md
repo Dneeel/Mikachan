@@ -1,5 +1,10 @@
 # Terminal panel design review — 2026-10-18
 
+Historical research note. The current panel navigation and appearance controls
+are documented in [INSTALL_UBUNTU.md](INSTALL_UBUNTU.md) and the
+[terminal asset guide](../assets/terminal/README.md). The implemented UI uses
+Python `curses`; references below to Textual describe a considered option.
+
 The panel is an operator interface for one Mikachan installation. The primary tasks are confirming health, updating an existing `vN` branch, safely switching releases, controlling one polling service, changing numeric access, and protecting SQLite state. A second application server, dashboard daemon, or separate database would add idle resource use without improving those tasks.
 
 ## GitHub interface research
