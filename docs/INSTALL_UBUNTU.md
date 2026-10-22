@@ -86,6 +86,15 @@ A protected primary Owner may request promotion or removal of an additional Owne
 
 ## Everyday controls
 
+For MikaSub, use **Configuration → MikaSub** to set the optional
+`MIKASUB_WORKER_URL` and `MIKASUB_ADMIN_TOKEN` after deploying the existing
+Cloudflare Worker. The Admin token is masked and separate from the
+Cloudflare deployment API token. An already created personal link may be
+imported via masked `MIKASUB_PUBLIC_URL`. MikaSub needs no Telegram user API ID/hash.
+The [MikaSub guide](MIKASUB.md) gives the Worker migration, binding and
+Owner Telegram source-management steps. If these values are unset, the
+rest of Mikachan can still run; `/vpn` reports that publication is not ready.
+
 Run `mikachan` from an interactive SSH terminal. The interface plays a skippable startup animation, then opens a full-screen menu. **Space/Enter** skips the intro; **Up/Down** moves the selection; **Enter** opens it or submits a field; **Esc/Left** goes back; **Q** quits the main screen; **R** refreshes server status. Form fields use Enter only for the current field; setup automatically advances to the next field. Backspace edits; Esc cancels. Exiting the panel leaves the bot service running.
 
 | Menu | Actions |

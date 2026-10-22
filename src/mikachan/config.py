@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     navasan_refresh_seconds: int = 28_800
     translation_api_url: str = ""
     translation_api_key: str = ""
+    mikasub_worker_url: str = ""
+    mikasub_admin_token: str = ""
+    mikasub_public_url: str = ""
 
     @field_validator("owner_telegram_id")
     @classmethod
@@ -84,6 +87,21 @@ class Settings(BaseSettings):
             raise ValueError("invalid message/search limits")
         if not 60 <= self.navasan_refresh_seconds <= 86_400:
             raise ValueError("Navasan refresh must be 60–86400 seconds")
+        if bool(self.mikasub_worker_url) != bool(self.mikasub_admin_token):
+            raise ValueError("MikaSub needs both Worker URL and Admin token")
+        if self.mikasub_worker_url:
+            parsed = urlsplit(self.mikasub_worker_url)
+            if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password \
+                    or parsed.query or parsed.fragment or parsed.path.rstrip("/"):
+                raise ValueError("MikaSub Worker URL must be an HTTPS origin")
+            if len(self.mikasub_admin_token) < 32:
+                raise ValueError("MikaSub Admin token is too short")
+        if self.mikasub_public_url:
+            prefix = self.mikasub_worker_url.rstrip("/") + "/sub/"
+            if not self.mikasub_public_url.startswith(prefix) or \
+                    len(self.mikasub_public_url) != len(prefix) + 64 or \
+                    any(char not in "0123456789abcdef" for char in self.mikasub_public_url[len(prefix):]):
+                raise ValueError("MikaSub public URL must match the configured Worker")
         return self
 
     @property

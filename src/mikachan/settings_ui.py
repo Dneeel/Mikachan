@@ -24,9 +24,10 @@ def markup(rows: list[list[tuple[str, str]]]) -> InlineKeyboardMarkup:
 
 class SettingsUI:
     def __init__(self, db: sqlite3.Connection, access: AccessRegistry, now: NowService,
-                 bot: Bot | None = None, local_sources=None):
+                 bot: Bot | None = None, local_sources=None, mikasub=None):
         self.db, self.access, self.now, self.bot = db, access, now, bot
         self.local_sources = local_sources
+        self.mikasub = mikasub
         self.broadcast_tasks: dict[str, asyncio.Task[None]] = {}
         db.executescript("""
         CREATE TABLE IF NOT EXISTS settings_sessions (
@@ -78,6 +79,8 @@ class SettingsUI:
             ]
             if self.local_sources is not None:
                 sections.append([button("📂 Local Sources", "locals")])
+            if self.mikasub is not None:
+                sections.append([button("🏴‍☠️ MikaSub", "mikasub")])
             sections += [
                 [button("📝 Global Message Studio", "messages")],
                 [button("🎭 Personality & Identity", "identity")],
@@ -312,6 +315,9 @@ class SettingsUI:
         if not owner and action not in {"personal", "location", "city", "clearcity",
                                        "confirm", "cancel", "close"}:
             await q.answer("Unavailable")
+            return True
+        if action == "mikasub" and owner and self.mikasub is not None:
+            await self.mikasub.open_owner(q, token)
             return True
         # Keep Identity as a transient notice; the owner must remain on Home.
         if action == "identity":

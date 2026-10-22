@@ -39,6 +39,8 @@ from .community import Community, CommunityStore
 from .utilities import Utilities, _market_card, qr_png
 from .userbot import UserbotBridge, is_currency_query, send_currency_reply
 from .proxy_relay import ProxyRelay
+from .mikasub_core import MikaSubCore
+from .mikasub_ui import MikaSubUI
 from .instagram_relay import InstagramRelay
 from .local_sources import LocalSources
 from .market_prices import parse_asset_query
@@ -199,6 +201,7 @@ HELP_TEXT = (
     "/nasa · /translate en|fa TEXT\n\n"
     "💱 Toman quotes: send exactly دلار, سکه, طلا, تتر or ارز.\n"
     "🛡 Proxies: /proxy or پروکسی (requires user account login).\n"
+    "🏴‍☠️ MikaSub and private subscription converter: /vpn. Configs are untested.\n"
     "فارسی: عکس به استیکر · استیکر به عکس\n"
     "For file tools, reply to the file with a command."
 )
@@ -251,8 +254,12 @@ class App:
         self.local_sources = LocalSources(self.store.db, self.userbot, self.bot,
                                           settings.data_dir)
         assert self.store.access_registry is not None
+        self.mikasub_core = MikaSubCore(settings, self.store.db)
+        self.mikasub = MikaSubUI(self.mikasub_core, self.store, self.bot,
+                                self.store.access_registry)
         self.settings_ui = SettingsUI(self.store.db, self.store.access_registry,
-                                      self.utilities.now, self.bot, self.local_sources)
+                                      self.utilities.now, self.bot, self.local_sources,
+                                      self.mikasub)
         self.group_status = GroupStatus(self.store.db, self.store.access_registry)
         self.router = Router()
         self.router.message.register(self.message)
@@ -331,6 +338,8 @@ class App:
                 return
             await self.utilities.command(m, "/st" if normalized_text == "عکس به استیکر"
                                          else "/xst", "")
+            return
+        if hasattr(self, "mikasub") and await self.mikasub.reply(m):
             return
         if hasattr(self, "settings_ui") and await self.settings_ui.reply(m):
             return
@@ -504,7 +513,7 @@ class App:
         if cmd == "/rate":
             return  # Removed public command; currency phrases still use their existing provider.
         if cmd == "/vpn":
-            await m.reply("🍆")
+            await self.mikasub.open_user(m)
             return
         if cmd == "/settings" and hasattr(self, "settings_ui"):
             await self.settings_ui.show(m)
@@ -1183,9 +1192,11 @@ class App:
                    "f": "follow", "fm": "follow", "fu": "follow", "p": "follow",
                    "fn": "follow", "fd": "follow", "u": "community", "g": "community",
                    "gs": "community", "gc": "community", "n": "utilities",
-                   "px": "utilities", "ir": "follow"}).get(prefix)
+                   "px": "utilities", "ms": "utilities", "ir": "follow"}).get(prefix)
         if domain and not self.module_enabled(domain, q.message.chat.id):
             await acknowledge(q, "This module is currently unavailable")
+            return
+        if hasattr(self, "mikasub") and await self.mikasub.callback(q, data):
             return
         if hasattr(self, "local_sources") and await self.local_sources.callback(q):
             return
@@ -2015,13 +2026,14 @@ class App:
                     ("now", "Local time and calendars"),
                     ("nasa", "NASA astronomy picture"),
                     ("proxy", "Current Telegram proxies"),
-                    ("vpn", "VPN status"),
+                    ("vpn", "MikaSub and subscription converter"),
                     ("translate", "Translate selected text"),
                 )
             ]
         )
         task = asyncio.create_task(self.worker.loop())
         follow_task = asyncio.create_task(self.follow.loop())
+        self.mikasub_core.background = asyncio.create_task(self.mikasub_core.periodic())
         try:
             await self.dp.start_polling(self.bot)
         finally:
@@ -2034,6 +2046,8 @@ class App:
             await self.worker.stop()
             task.cancel()
             await self.settings_ui.close()
+            await self.mikasub.close()
+            await self.mikasub_core.close()
             await self.utilities.close()
             if self.userbot:
                 await self.userbot.close()

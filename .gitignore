@@ -1,4 +1,6 @@
 .env
+.env.*
+.dev.vars*
 .venv/
 __pycache__/
 .pytest_cache/
@@ -9,3 +11,5 @@ dist/
 *.db
 *.sqlite*
 data/
+node_modules/
+.wrangler/

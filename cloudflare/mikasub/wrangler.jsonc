@@ -1,0 +1,19 @@
+{
+  "name": "mikachan-vpn-radar",
+  "main": "src/index.mjs",
+  "compatibility_date": "2026-10-21",
+  "workers_dev": true,
+  "preview_urls": false,
+  "observability": { "enabled": true, "logs": { "enabled": true } },
+  "kv_namespaces": [
+    { "binding": "VPN_KV", "id": "6b82665ed4c042a5a04483d0ef8f5698" }
+  ],
+  "d1_databases": [
+    {
+      "binding": "VPN_DB",
+      "database_name": "mikachan-vpn-db",
+      "database_id": "c873f5fd-7d87-4860-9b56-f69110e3a948",
+      "migrations_dir": "migrations"
+    }
+  ]
+}
