@@ -810,8 +810,13 @@ class Utilities:
             try:
                 data = await self.apod_page()
             except (httpx.HTTPError, ValueError, OSError):
+                try:
+                    row = self.db.execute("SELECT api_key FROM content_api_credentials "
+                                          "WHERE provider='nasa'").fetchone()
+                except sqlite3.OperationalError:
+                    row = None
                 data = await self.api("https://api.nasa.gov/planetary/apod",
-                                      {"api_key": self.settings.nasa_api_key})
+                                      {"api_key": str(row[0]) if row else self.settings.nasa_api_key})
             today = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
             if str(data.get("date", "")) != today:
                 await m.reply("NASA has not published today's APOD yet. "

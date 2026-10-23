@@ -261,7 +261,6 @@ class App:
         self.external_utilities = ExternalUtilities(self.userbot, self.bot)
         self.content_ui = ContentUI(self.store.db, self.bot,
                                     enabled=settings.mika_content_enabled,
-                                    cats_strict=settings.mika_content_cats_strict,
                                     authorize=lambda user, chat: self.authorized(
                                         user, chat, "private" if user == chat else "supergroup"))
         self.n8n_gateway = N8NGateway(enabled=settings.mika_n8n_enabled,
@@ -404,7 +403,7 @@ class App:
                 "help", "search", "music", "podcast", "pod", "book", "id", "twitter", "instagram",
                 "follow", "following",
                 "tiktok", "youtube", "settings", "queue", "status",
-                "fal", "poem", "quote", "pishi", "earth", "art", "xotd", "wiki",
+                "fal", "poem", "quote", "pishi", "phishi", "earth", "art", "xotd", "wiki",
                 "dice", "nickname", "rules", "setrules",
                 "notes", "setnote", "delrules", "welcome", "del",
                 "mute", "modlog", "groupstats", "groupstatus", "groupsettings", "qr", "scan", "ocr",
@@ -1195,7 +1194,7 @@ class App:
             await acknowledge(q)
             return
         data = q.data or ""
-        if (data.startswith(("ct:", "cr:")) and
+        if (data.startswith("ct:") and
                 not self.module_enabled("content", q.message.chat.id) or
                 data.startswith("au:") and
                 not self.module_enabled("utilities", q.message.chat.id)):
@@ -1230,11 +1229,6 @@ class App:
             return
         if hasattr(self, "content_ui") and await self.content_ui.callback(q, data):
             return
-        if hasattr(self, "content_ui") and await self.content_ui.review_callback(
-                q, data, owner=(q.message.chat.type == "private" and
-                    self.store.access_registry is not None and
-                    self.store.access_registry.role(q.from_user.id) == "OWNER")):
-            return
         if hasattr(self, "audio_ui") and await self.audio_ui.callback(q, data):
             return
         prefix = data.split(":", 1)[0]
@@ -1244,8 +1238,7 @@ class App:
                    "fn": "follow", "fd": "follow", "u": "community", "g": "community",
                    "gs": "community", "gc": "community", "n": "utilities",
                    "px": "utilities", "ms": "utilities", "uh": "utilities",
-                   "ir": "follow", "au": "utilities", "ct": "content",
-                   "cr": "content"}).get(prefix)
+                   "ir": "follow", "au": "utilities", "ct": "content"}).get(prefix)
         if domain and not self.module_enabled(domain, q.message.chat.id):
             await acknowledge(q, "This module is currently unavailable")
             return

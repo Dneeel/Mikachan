@@ -28,7 +28,7 @@ files. It is not a clean baseline. The pre-phase full regression suite passed
 | Interface | New responsibility | Existing boundary |
 |---|---|---|
 | `bot.py` | Route six content commands and `/tts`, `/stt` through the existing dispatcher | Numeric allowlist, group access, Downloader and Userbot routes retained |
-| `content_ui.py` | Actor/chat/message-bound content navigation and cat review pool | Same SQLite connection; no second polling process |
+| `content_ui.py` | Actor/chat/message-bound content navigation and owner-managed source key | Same SQLite connection; no second polling process |
 | `content_providers.py` | Source-verified media, article, quote and date lookups | HTTP host allowlist, bounded responses; no AI fabrication |
 | `n8n_gateway.py` | Single versioned authenticated workflow contract | n8n disabled by default; provider keys stay with owner workflow |
 | `audio_ui.py` | Explicit model-aware settings and request gating | No generation until verified catalog, reported free quota and Generate tap |
@@ -81,9 +81,16 @@ map an existing workflow's nodes to this contract; do not overwrite the
 existing workflow without the owner's handoff and authorization.
 
 `MIKA_TTS_ENABLED` and `MIKA_STT_ENABLED` remain false until the real workflow,
-catalogs, media transfer and free entitlement pass live tests. The cat pool is
-empty on first install; the owner can review and approve candidates under
-`/settings` → Cat Approval Pool. Unreviewed cat images are never shown.
+catalogs, media transfer and free entitlement pass live tests. The later owner
+decision removed individual cat-photo approval. `/pishi` and `/phishi` now fetch
+fresh photos from the free keyless CATAAS endpoint, with TheCatAPI first when
+its free key is stored in private Owner `/settings` → Content APIs. NASA and
+Navasan keys can be managed from the same owner panel; existing environment
+values remain fallbacks. Keys are stored in the private application SQLite
+database and never echoed in a bot message. TheCatAPI sends its key in an
+HTTPS header; NASA and Navasan use their documented HTTPS query parameter.
+Telegram may retain the owner's original key message if deletion is
+unavailable; the bot requests deletion.
 
 ## Open acceptance gaps
 

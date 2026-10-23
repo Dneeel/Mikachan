@@ -86,7 +86,7 @@ class SettingsUI:
             if self.mikasub is not None:
                 sections.append([button("🏴‍☠️ MikaSub", "mikasub")])
             if self.content_ui is not None:
-                sections.append([button("🐈 Cat Approval Pool", "catpool")])
+                sections.append([button("🔑 Content APIs", "sourceapis")])
             if self.n8n_gateway is not None:
                 sections.append([button("🎙 AI & Audio", "ai_audio")])
             sections += [
@@ -105,17 +105,23 @@ class SettingsUI:
                     [button("📍 My Location", "location")],
                     [button("◀ Back", "home" if chat == user else "close"),
                      button("✖ Close", "close")]]))
-        if page == "catpool" and self.content_ui is not None:
-            cats = self.content_ui.approved_cats()
-            cat_controls = [[button("👀 Review TheCatAPI candidate", "catreview:thecatapi")],
-                            [button("👀 Review CATAAS candidate", "catreview:cataas")]]
-            for item in cats[:20]:
-                cat_controls.append([button(f"⛔ Ban {item.provider} · {item.identifier[:16]}",
-                                            f"catban:{item.provider}:{item.identifier}")])
-            cat_controls.append([button("◀ Back", "home")])
-            return (f"🐈 <b>Approved Cats</b> · {len(cats)}\n"
-                    "Only reviewed IDs can appear in /pishi. Review photos before approval.",
-                    markup(cat_controls))
+        if page == "sourceapis" and self.content_ui is not None:
+            labels = {"thecatapi": "TheCatAPI", "nasa": "NASA", "navasan": "Navasan"}
+            statuses = [f"{label} · {'Owner key stored' if self.content_ui.source_api_key(provider) else 'No owner key'}"
+                        for provider, label in labels.items()]
+            controls = []
+            for provider, label in labels.items():
+                controls.append([button(f"✏️ Set {label} key", f"sourcekey_set:{provider}")])
+                if self.content_ui.source_api_key(provider):
+                    controls.append([button(f"🗑 Remove {label} key",
+                                            f"sourcekey_remove:{provider}")])
+            controls.append([button("◀ Back", "home")])
+            return ("🔑 <b>Content APIs</b>\n"
+                    + "\n".join(statuses) + "\n"
+                    "CATAAS · No key required\n\n"
+                    "/pishi requests a fresh photo. TheCatAPI is tried when its key "
+                    "is configured; CATAAS is the keyless fallback. Keys are never shown here.",
+                    markup(controls))
         if page == "ai_audio" and self.n8n_gateway is not None:
             ai_status = "Configured" if self.n8n_gateway.enabled else "Missing"
             tts = "Enabled" if self.audio_ui and self.audio_ui.tts_enabled else "Off"
@@ -131,11 +137,8 @@ class SettingsUI:
                             [button("🌍 Content Health", "content_health")],
                             [button("◀ Back", "home")]]))
         if page == "content_health" and self.content_ui is not None:
-            count = len(self.content_ui.approved_cats())
-            banned = int(self.db.execute("SELECT COUNT(*) FROM cat_approval WHERE status='BANNED'")
-                         .fetchone()[0])
-            return (f"🌍 <b>Content Health</b>\nApproved cat images · {count}\n"
-                    f"Banned cat IDs · {banned}\n"
+            status = "Configured" if self.content_ui.cat_api_key() else "Keyless fallback"
+            return (f"🌍 <b>Content Health</b>\nCat photos · {status}\n"
                     "Sources · TheCatAPI, CATAAS, iNaturalist, Cleveland Museum, "
                     "Wikimedia, Wikiquote, Wiktionary\n"
                     "Live source availability is measured only when a request runs.",
@@ -362,23 +365,34 @@ class SettingsUI:
         if action == "mikasub" and owner and self.mikasub is not None:
             await self.mikasub.open_owner(q, token)
             return True
-        if action.startswith("catreview:") and owner and self.content_ui is not None:
+        if action.startswith("sourcekey_set:") and owner and self.content_ui is not None:
+            provider = action.split(":", 1)[1]
+            if provider not in {"thecatapi", "nasa", "navasan"}:
+                await q.answer("Unknown source")
+                return True
             await q.answer()
-            try:
-                await self.content_ui.review_cat(q.from_user.id, q.message.chat.id,
-                                                 action.split(":", 1)[1])
-            except ValueError as exc:
-                await q.message.answer("⚠️ " + html.escape(str(exc)))
+            sent = await q.message.answer(f"Reply with your free {provider} API key. "
+                "The key message will be deleted after saving. Cancel with /cancelsettings.")
+            self.db.execute("INSERT INTO settings_captures VALUES (?,?,?,?,?,?) "
+                            "ON CONFLICT(user_id,chat_id) DO UPDATE SET "
+                            "prompt_id=excluded.prompt_id,token=excluded.token,"
+                            "kind=excluded.kind,expires=excluded.expires",
+                            (q.from_user.id, q.message.chat.id, sent.message_id,
+                             token, f"sourcekey_set:{provider}", time.time() + 300))
             return True
-        if action.startswith("catban:") and owner and self.content_ui is not None:
-            parts = action.split(":", 2)
-            if len(parts) == 3:
-                row = self.db.execute("SELECT item_json FROM cat_approval WHERE provider=? "
-                    "AND image_id=?", (parts[1], parts[2])).fetchone()
-                if row:
-                    from .content_providers import Item
-                    self.content_ui.approve_cat(Item(**json.loads(row[0])), False)
-            action = "catpool"
+        if action.startswith("sourcekey_remove:") and owner and self.content_ui is not None:
+            provider = action.split(":", 1)[1]
+            if provider not in {"thecatapi", "nasa", "navasan"}:
+                await q.answer("Unknown source")
+                return True
+            await q.answer()
+            self.db.execute("UPDATE settings_sessions SET pending=? WHERE token=?",
+                            (json.dumps({"kind": "sourcekey_remove", "page": "sourceapis",
+                                         "provider": provider}), token))
+            await q.message.edit_text(f"Remove the stored {provider} API key?",
+                reply_markup=markup([[("✅ Remove", f"z:{token}:confirm"),
+                                      ("❌ Cancel", f"z:{token}:cancel")]]))
+            return True
         if action == "ai_ping" and owner and self.n8n_gateway is not None:
             await q.answer()
             try:
@@ -574,7 +588,11 @@ class SettingsUI:
                         token, q.from_user.id, q.message.chat.id, q.message.message_id,
                         body, recipients))
                     return True
-                if kind == "local_delete" and selected.startswith("local:") and \
+                if kind == "sourcekey_remove" and selected == "sourceapis" and \
+                        self.content_ui is not None:
+                    self.content_ui.remove_source_api_key(str(pending["provider"]))
+                    action = "sourceapis"
+                elif kind == "local_delete" and selected.startswith("local:") and \
                         self.local_sources is not None:
                     self.local_sources.remove(int(selected.split(":", 1)[1]))
                     action = "locals"
@@ -683,6 +701,25 @@ class SettingsUI:
             if m.chat.type != "private" or self.access.role(m.from_user.id) != "OWNER":
                 return True
             pending: dict[str, object]
+            if kind.startswith("sourcekey_set:") and self.content_ui is not None:
+                provider = kind.split(":", 1)[1]
+                try:
+                    self.content_ui.set_source_api_key(provider, value)
+                except ValueError as exc:
+                    try:
+                        await m.delete()
+                    except TelegramAPIError:
+                        pass
+                    await m.answer(html.escape(str(exc)))
+                    return True
+                self.db.execute("DELETE FROM settings_captures WHERE user_id=? AND chat_id=?",
+                                (m.from_user.id, m.chat.id))
+                try:
+                    await m.delete()
+                except TelegramAPIError:
+                    pass
+                await m.answer(f"✅ {provider} API key saved.")
+                return True
             if kind in {"local_add", "local_edit"} and self.local_sources is not None:
                 fields = [part.strip() for part in value.split("|")]
                 if kind == "local_add" and len(fields) == 3:

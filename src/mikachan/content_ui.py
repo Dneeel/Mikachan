@@ -16,7 +16,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 from .content_providers import ContentError, ContentProviders, Item
 
-COMMANDS = frozenset({"/pishi", "/earth", "/art", "/xotd", "/quote", "/wiki"})
+COMMANDS = frozenset({"/pishi", "/phishi", "/earth", "/art", "/xotd", "/quote", "/wiki"})
 DAILY = {"picture": "🖼 Picture of the Day", "media": "🎬 Media of the Day",
          "word": "📖 Word of the Day", "featured": "⭐ Featured Article",
          "dyk": "💡 Did You Know?", "events": "🕰 On This Day",
@@ -34,24 +34,17 @@ def _markup(token: str, rows: list[list[tuple[str, str]]]) -> InlineKeyboardMark
 class ContentUI:
     def __init__(self, db: sqlite3.Connection, bot: Bot,
                  providers: ContentProviders | None = None, *, enabled: bool = True,
-                 cats_strict: bool = True,
                  authorize: Callable[[int, int], bool] | None = None):
         self.db, self.bot = db, bot
         self.providers = providers or ContentProviders()
-        self.enabled, self.cats_strict = enabled, cats_strict
+        self.enabled = enabled
         self.authorize = authorize or (lambda actor, chat: True)
-        # Never allow live, unreviewed cat candidates through /pishi.
         db.executescript("""
         CREATE TABLE IF NOT EXISTS content_sessions (
           token TEXT PRIMARY KEY, actor_id INTEGER NOT NULL, chat_id INTEGER NOT NULL,
           message_id INTEGER, state_json TEXT NOT NULL, expires REAL NOT NULL);
-        CREATE TABLE IF NOT EXISTS cat_approval (
-          provider TEXT NOT NULL, image_id TEXT NOT NULL, item_json TEXT NOT NULL,
-          status TEXT NOT NULL CHECK(status IN ('APPROVED','BANNED')),
-          reviewed_at REAL NOT NULL, PRIMARY KEY(provider,image_id));
-        CREATE TABLE IF NOT EXISTS cat_review_sessions (
-          token TEXT PRIMARY KEY, owner_id INTEGER NOT NULL, chat_id INTEGER NOT NULL,
-          message_id INTEGER NOT NULL, item_json TEXT NOT NULL, expires REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS content_api_credentials (
+          provider TEXT PRIMARY KEY, api_key TEXT NOT NULL, updated REAL NOT NULL);
         """)
 
     def _session(self, token: str, actor: int, chat: int, message: int) -> sqlite3.Row | None:
@@ -59,53 +52,51 @@ class ContentUI:
             "AND chat_id=? AND message_id=? AND expires>?",
             (token, actor, chat, message, time.time())).fetchone()
 
-    def approve_cat(self, item: Item, approved: bool) -> None:
-        if item.provider not in {"TheCatAPI", "CATAAS"} or not item.identifier:
-            raise ContentError("Invalid cat image candidate")
-        self.db.execute("INSERT INTO cat_approval VALUES (?,?,?,?,?) ON CONFLICT(provider,image_id) "
-            "DO UPDATE SET status=excluded.status,reviewed_at=excluded.reviewed_at,"
-            "item_json=excluded.item_json",
-            (item.provider, item.identifier, json.dumps(asdict(item)),
-             "APPROVED" if approved else "BANNED", time.time()))
+    def source_api_key(self, provider: str) -> str:
+        if provider not in {"thecatapi", "nasa", "navasan"}:
+            raise ContentError("Unknown source API")
+        row = self.db.execute("SELECT api_key FROM content_api_credentials "
+                              "WHERE provider=?", (provider,)).fetchone()
+        return str(row[0]) if row else ""
 
-    def approved_cats(self) -> list[Item]:
-        return [Item(**json.loads(row[0])) for row in self.db.execute(
-            "SELECT item_json FROM cat_approval WHERE status='APPROVED'")]
+    def set_source_api_key(self, provider: str, key: str) -> None:
+        self.source_api_key(provider)
+        if not 8 <= len(key) <= 256 or not key.isascii() or any(c.isspace() for c in key):
+            raise ContentError("API key must be 8–256 non-space ASCII characters")
+        self.db.execute("INSERT INTO content_api_credentials VALUES (?,?,?) "
+                        "ON CONFLICT(provider) DO UPDATE SET api_key=excluded.api_key,"
+                        "updated=excluded.updated", (provider, key, time.time()))
 
-    async def review_cat(self, owner: int, chat: int, provider: str) -> None:
-        self.db.execute("DELETE FROM cat_review_sessions WHERE expires<?", (time.time(),))
-        item = await self.providers.cat_candidate(provider)
-        token = secrets.token_urlsafe(9)
-        sent = await self.bot.send_photo(chat, item.image_url,
-            caption=f"🐈 Review a real {html.escape(item.provider)} candidate.\n"
-                    "Approve only if it is a safe domestic cat photo and you have display rights.",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text="✅ Approve", callback_data=f"cr:{token}:approve"),
-                InlineKeyboardButton(text="⛔ Ban", callback_data=f"cr:{token}:ban")]]))
-        self.db.execute("INSERT INTO cat_review_sessions VALUES (?,?,?,?,?,?)",
-            (token, owner, chat, sent.message_id, json.dumps(asdict(item)), time.time() + 900))
+    def remove_source_api_key(self, provider: str) -> None:
+        self.source_api_key(provider)
+        self.db.execute("DELETE FROM content_api_credentials WHERE provider=?", (provider,))
 
-    async def review_callback(self, q: CallbackQuery, data: str, *, owner: bool) -> bool:
-        if not data.startswith("cr:"):
-            return False
-        parts = data.split(":", 2)
-        if len(parts) != 3 or not isinstance(q.message, Message) or not owner:
-            await q.answer("Owner-only review")
-            return True
-        token, decision = parts[1:]
-        row = self.db.execute("SELECT * FROM cat_review_sessions WHERE token=? AND owner_id=? "
-            "AND chat_id=? AND message_id=? AND expires>?",
-            (token, q.from_user.id, q.message.chat.id, q.message.message_id,
-             time.time())).fetchone()
-        if not row or decision not in {"approve", "ban"}:
-            await q.answer("Review expired")
-            return True
-        item = Item(**json.loads(row["item_json"]))
-        self.approve_cat(item, decision == "approve")
-        self.db.execute("DELETE FROM cat_review_sessions WHERE token=?", (token,))
-        await q.answer("Image approved" if decision == "approve" else "Image banned")
-        await q.message.edit_reply_markup(reply_markup=None)
-        return True
+    def cat_api_key(self) -> str:
+        return self.source_api_key("thecatapi")
+
+    def set_cat_api_key(self, key: str) -> None:
+        self.set_source_api_key("thecatapi", key)
+
+    def remove_cat_api_key(self) -> None:
+        self.remove_source_api_key("thecatapi")
+
+    async def _cat(self, state: dict[str, Any]) -> None:
+        key = self.cat_api_key()
+        sources = [("thecatapi", key), ("cataas", "")] if key else [("cataas", "")]
+        prior = (state.get("item") or {}).get("identifier")
+        failure = "Cat photo sources are unavailable right now. Try again shortly."
+        for provider, credential in sources:
+            try:
+                for _ in range(2):
+                    item = await self.providers.cat_candidate(provider, credential)
+                    if item.identifier != prior:
+                        state.update(view="item", item=asdict(item))
+                        return
+                state.update(view="item", item=asdict(item))
+                return
+            except ContentError:
+                continue
+        raise ContentError(failure)
 
     async def command(self, message: Message, command: str, arg: str) -> bool:
         if command not in COMMANDS:
@@ -119,11 +110,12 @@ class ContentUI:
         self.db.execute("INSERT INTO content_sessions VALUES (?,?,?,NULL,?,?)",
             (token, message.from_user.id, message.chat.id, json.dumps(state), time.time() + 900))
         waiting = None
-        if arg and command != "/pishi":
+        if arg and command not in {"/pishi", "/phishi"}:
             waiting = await message.reply("⏳ Checking source records…")
         try:
-            if command == "/pishi":
-                self._cat(state)
+            if command in {"/pishi", "/phishi"}:
+                state["cmd"] = "/pishi"
+                await self._cat(state)
             elif arg:
                 await self._query(state, arg)
             await self._display(token, message.chat.id, state, previous=
@@ -138,14 +130,6 @@ class ContentUI:
                 previous=waiting.message_id if waiting else None,
                 reply_to=message.message_id)
         return True
-
-    def _cat(self, state: dict[str, Any]) -> None:
-        cats = self.approved_cats()
-        prior = state.get("item", {}).get("identifier")
-        choices = [cat for cat in cats if cat.identifier != prior]
-        if not choices:
-            raise ContentError("No approved cute-cat photo is available right now.")
-        state.update(view="item", item=asdict(random.choice(choices)))
 
     async def _query(self, state: dict[str, Any], query: str) -> None:
         cmd = state["cmd"]
@@ -230,7 +214,7 @@ class ContentUI:
             raise ContentError("No archived daily media was found after bounded attempts")
         if action == "another":
             if cmd == "/pishi":
-                self._cat(state)
+                await self._cat(state)
             elif cmd == "/art":
                 previous_id = (state.get("item") or {}).get("identifier")
                 state.update(view="item", item=asdict(await self.providers.art_random(
@@ -370,10 +354,10 @@ class ContentUI:
         if cmd == "/pishi":
             item = state.get("item")
             if item:
-                return ("🐈 <b>Mikachan · Cat</b>\nVerified by the owner · " +
+                return ("🐈 <b>Mikachan · Cat</b>\nSource · " +
                     html.escape(item["provider"]), [[("🎲 Another Cat", "another")],
                     [("🔗 Original Image", item["source_url"])], done], item["image_url"])
-            return "No approved cute-cat photo is available right now.", \
+            return "Cat photos are unavailable right now.", \
                 [[("🎲 Try Again", "another")], done], ""
         if view == "home":
             if cmd == "/earth":

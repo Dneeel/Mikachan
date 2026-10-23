@@ -51,7 +51,6 @@ class Settings(BaseSettings):
     mika_tts_enabled: bool = False
     mika_stt_enabled: bool = False
     mika_content_enabled: bool = True
-    mika_content_cats_strict: bool = True
 
     @field_validator("owner_telegram_id")
     @classmethod

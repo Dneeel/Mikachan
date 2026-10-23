@@ -42,13 +42,15 @@ class ContentProviders:
     async def close(self) -> None:
         await self.client.aclose()
 
-    async def json(self, url: str, params: dict[str, Any] | None = None) -> dict[str, Any] | list[Any]:
-        return await self._fetch(url, params, "json")
+    async def json(self, url: str, params: dict[str, Any] | None = None,
+                   headers: dict[str, str] | None = None) -> dict[str, Any] | list[Any]:
+        return await self._fetch(url, params, "json", headers)
 
     async def text(self, url: str, params: dict[str, Any] | None = None) -> str:
         return await self._fetch(url, params, "text")
 
-    async def _fetch(self, url: str, params: dict[str, Any] | None, kind: str) -> Any:
+    async def _fetch(self, url: str, params: dict[str, Any] | None, kind: str,
+                     headers: dict[str, str] | None = None) -> Any:
         host = urlsplit(url).hostname or ""
         if not url.startswith("https://") or host not in {
             "api.thecatapi.com", "cataas.com", "openaccess-api.clevelandart.org",
@@ -63,7 +65,7 @@ class ContentProviders:
         if stored and stored[0] > time.monotonic():
             return stored[1]
         try:
-            async with self.client.stream("GET", url, params=params) as response:
+            async with self.client.stream("GET", url, params=params, headers=headers) as response:
                 if response.status_code == 429:
                     raise ContentError("Content source rate limit reached; try later")
                 if response.status_code in {401, 403}:
@@ -98,10 +100,13 @@ class ContentProviders:
         except httpx.HTTPStatusError as exc:
             raise ContentError(f"Content source failed (HTTP {exc.response.status_code})") from exc
 
-    async def cat_candidate(self, provider: str) -> Item:
+    async def cat_candidate(self, provider: str, api_key: str = "") -> Item:
         if provider == "thecatapi":
+            if not api_key:
+                raise ContentError("TheCatAPI key is not configured")
             rows = await self.json("https://api.thecatapi.com/v1/images/search",
-                                   {"limit": 1, "mime_types": "jpg,png"})
+                                   {"limit": 1, "mime_types": "jpg,png"},
+                                   {"x-api-key": api_key})
             if not isinstance(rows, list) or not rows:
                 raise ContentError("TheCatAPI returned no candidate")
             row = rows[0]
@@ -109,7 +114,7 @@ class ContentProviders:
             if not re.fullmatch(r"[\w-]{3,80}", cat_id) or not url.startswith(
                     ("https://cdn2.thecatapi.com/images/", "https://cdn.thecatapi.com/images/")):
                 raise ContentError("TheCatAPI returned an invalid image")
-            return Item("Cat photo", "Review this image before it enters the approved pool.",
+            return Item("Cat photo", "A cat photo from a public source.",
                         url, "TheCatAPI", url, identifier=cat_id)
         if provider == "cataas":
             row = await self.json("https://cataas.com/cat", {"json": "true"})
@@ -119,7 +124,7 @@ class ContentProviders:
             if not re.fullmatch(r"[\w-]{3,80}", cat_id):
                 raise ContentError("CATAAS returned an invalid image ID")
             url = f"https://cataas.com/cat/{cat_id}"
-            return Item("Cat photo", "Review this image before it enters the approved pool.",
+            return Item("Cat photo", "A cat photo from a public source.",
                         url, "CATAAS", url, identifier=cat_id)
         raise ContentError("Unknown cat source")
 

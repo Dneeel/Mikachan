@@ -321,8 +321,18 @@ class MarketPrices:
             return quote, fetched_at
 
     async def navasan(self, symbol: str) -> MarketQuote | None:
-        if not self._navasan_key or symbol not in NAVASAN_ITEMS:
+        try:
+            row = self.db.execute("SELECT api_key FROM content_api_credentials "
+                                  "WHERE provider='navasan'").fetchone()
+        except sqlite3.OperationalError:
+            row = None  # Standalone market tests and installations predating ContentUI.
+        key = str(row[0]) if row else self._navasan_key
+        if not key or symbol not in NAVASAN_ITEMS:
             return None
+        if getattr(self, "_active_navasan_key", None) != key:
+            self._active_navasan_key = key
+            self._navasan = None
+            self._navasan_retry_after = 0.0
         cached = self._navasan
         if cached and time.monotonic() < cached[1]:
             return cached[0].get(symbol)
@@ -336,7 +346,7 @@ class MarketPrices:
                 return None
             try:
                 async with httpx.AsyncClient(timeout=8, follow_redirects=False) as client:
-                    response = await client.get(NAVASAN_URL, params={"api_key": self._navasan_key})
+                    response = await client.get(NAVASAN_URL, params={"api_key": key})
                     if response.status_code != 200:
                         raise ValueError(f"Navasan returned HTTP {response.status_code}")
                     if len(response.content) > 512_000:

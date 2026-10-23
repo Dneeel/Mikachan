@@ -6,6 +6,7 @@ import sqlite3
 import time
 from dataclasses import asdict
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -15,6 +16,10 @@ from mikachan.audio_ui import AudioUI
 from mikachan.content_providers import ContentError, ContentProviders, Item
 from mikachan.content_ui import ContentUI
 from mikachan.n8n_gateway import GatewayError, N8NGateway, SCHEMA_VERSION
+from mikachan.market_prices import MarketPrices
+from mikachan.now_service import NowService
+from mikachan.settings_ui import SettingsUI
+from mikachan.store import Store
 
 
 class FakeBot:
@@ -46,19 +51,101 @@ def _db():
     return db
 
 
-def test_cat_pool_is_strict_and_owner_reviewed():
-    content = ContentUI(_db(), FakeBot())
-    with pytest.raises(ContentError, match="No approved"):
-        content._cat({})
-    cat = Item("Cat", "Reviewed", "https://cataas.com/cat/abc123", "CATAAS",
-               "https://cataas.com/cat/abc123", identifier="abc123")
-    content.approve_cat(cat, True)
+@pytest.mark.asyncio
+async def test_pishi_fetches_fresh_keyless_photo_without_owner_review():
+    calls = 0
+
+    def handler(request):
+        nonlocal calls
+        assert request.url.host == "cataas.com"
+        calls += 1
+        return httpx.Response(200, json={"id": f"cat{calls:03}"})
+
+    content = ContentUI(_db(), FakeBot(), ContentProviders(httpx.MockTransport(handler)))
     state = {}
-    content._cat(state)
-    assert state["item"]["identifier"] == "abc123"
-    content.approve_cat(cat, False)
-    with pytest.raises(ContentError, match="No approved"):
-        content._cat({})
+    await content._cat(state)
+    assert state["item"]["identifier"] == "cat001"
+    assert state["item"]["provider"] == "CATAAS"
+    await content._cat(state)
+    assert state["item"]["identifier"] == "cat002"
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_owner_key_uses_header_and_keyless_fallback_on_provider_failure():
+    seen = []
+
+    def handler(request):
+        seen.append(request.url.host)
+        if request.url.host == "api.thecatapi.com":
+            assert request.headers["x-api-key"] == "free-owner-key-123456"
+            assert "free-owner-key" not in str(request.url)
+            return httpx.Response(503, json={})
+        return httpx.Response(200, json={"id": "fallback123"})
+
+    content = ContentUI(_db(), FakeBot(), ContentProviders(httpx.MockTransport(handler)))
+    content.set_cat_api_key("free-owner-key-123456")
+    assert content.cat_api_key() == "free-owner-key-123456"
+    await content._cat({})
+    assert seen == ["api.thecatapi.com", "cataas.com"]
+    content.remove_cat_api_key()
+    assert not content.cat_api_key()
+
+
+@pytest.mark.asyncio
+async def test_owner_sets_and_removes_cat_key_in_private_settings(tmp_path, monkeypatch):
+    class FakeMessage:
+        def __init__(self):
+            self.chat = SimpleNamespace(id=1, type="private")
+            self.message_id = 55
+            self.edit_text = AsyncMock()
+            self.answer = AsyncMock(return_value=SimpleNamespace(message_id=99))
+
+    monkeypatch.setattr("mikachan.settings_ui.Message", FakeMessage)
+    store = Store(tmp_path / "bot.sqlite")
+    store.seed_access({1, 2})
+    store.bootstrap_access(1)
+    content = ContentUI(store.db, FakeBot())
+    ui = SettingsUI(store.db, store.access_registry, NowService(store.db),
+                    content_ui=content)
+    store.db.execute("INSERT INTO settings_sessions(token,user_id,chat_id,message_id,page,expires) "
+                     "VALUES ('test',1,1,55,'home',?)", (time.time() + 900,))
+    msg = FakeMessage()
+    query = SimpleNamespace(from_user=SimpleNamespace(id=1), message=msg,
+                            answer=AsyncMock())
+    await ui.callback(query, "z:test:sourceapis")
+    assert "No owner key" in msg.edit_text.await_args.args[0]
+    await ui.callback(query, "z:test:sourcekey_set:thecatapi")
+    reply = SimpleNamespace(from_user=SimpleNamespace(id=1), chat=msg.chat,
+        text="free-owner-key-123456", reply_to_message=SimpleNamespace(message_id=99),
+        delete=AsyncMock(), answer=AsyncMock())
+    assert await ui.reply(reply)
+    reply.delete.assert_awaited_once()
+    assert content.cat_api_key() == "free-owner-key-123456"
+    assert "free-owner-key" not in reply.answer.await_args.args[0]
+    await ui.callback(query, "z:test:sourcekey_remove:thecatapi")
+    await ui.callback(query, "z:test:confirm")
+    assert not content.cat_api_key()
+
+
+@pytest.mark.asyncio
+async def test_navasan_uses_owner_panel_key_without_restarting(monkeypatch):
+    db = _db()
+    content = ContentUI(db, FakeBot())
+    prices = MarketPrices(db, navasan_key="legacy-env-key")
+    seen = []
+    original = httpx.AsyncClient
+
+    def transport(request):
+        seen.append(request.url.params["api_key"])
+        return httpx.Response(503)
+
+    monkeypatch.setattr("mikachan.market_prices.httpx.AsyncClient",
+                        lambda **kwargs: original(transport=httpx.MockTransport(transport),
+                                                  **kwargs))
+    content.set_source_api_key("navasan", "owner-key-123456")
+    assert await prices.navasan("USD") is None
+    assert seen == ["owner-key-123456"]
 
 
 @pytest.mark.asyncio
@@ -73,7 +160,8 @@ async def test_earth_root_exact_three_and_no_inaturalist_cat_path():
         return httpx.Response(200, json=[{"id": "abc123",
             "url": "https://cdn2.thecatapi.com/images/abc123.jpg"}])
 
-    candidate = await ContentProviders(httpx.MockTransport(handler)).cat_candidate("thecatapi")
+    candidate = await ContentProviders(httpx.MockTransport(handler)).cat_candidate(
+        "thecatapi", "free-owner-key-123456")
     assert candidate.provider == "TheCatAPI"
 
 

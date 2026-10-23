@@ -40,7 +40,7 @@ SETTING_GROUPS: dict[str, tuple[str, ...]] = {
                      "MIKA_N8N_AUTH_REF", "MIKA_N8N_WEBHOOK_TIMEOUT_S",
                      "MIKA_N8N_JOB_STATUS_POLL_S", "MIKA_AI_GLOBAL_CONCURRENCY",
                      "MIKA_TTS_ENABLED", "MIKA_STT_ENABLED", "MIKA_CONTENT_ENABLED",
-                     "MIKA_CONTENT_CATS_STRICT"),
+                     ),
     "Download & Limits": ("MAX_ACTIVE_DOWNLOADS", "MAX_ACTIVE_PER_USER", "MAX_LINKS_PER_MESSAGE",
                           "SEARCH_PAGE_SIZE", "SEARCH_SESSION_TTL_SECONDS", "CONFIRMATION_TTL_SECONDS",
                           "MIKACHAN_INSTAGRAM_COOKIES_FILE", "MIKACHAN_PORNHUB_COOKIES_FILE",
