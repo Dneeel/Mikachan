@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS owner_requests (
  CHECK(status IN ('PENDING','APPROVED','EXPIRED')));
 """
 
-MODULES = frozenset({"downloader", "community", "utilities", "follow"})
+MODULES = frozenset({"downloader", "community", "utilities", "follow", "content"})
 
 
 class AccessRegistry:

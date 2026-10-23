@@ -268,9 +268,9 @@ class Community:
                 return True
             parts = arg.lower().split()
             if len(parts) == 2 and parts[0] in {"culture", "notes", "utilities",
-                                                  "downloader", "follow"} and parts[1] in {"on", "off"}:
+                                                  "downloader", "follow", "content"} and parts[1] in {"on", "off"}:
                 if await self.admin(chat, user):
-                    ceiling = parts[0] if parts[0] in {"utilities", "downloader", "follow"} \
+                    ceiling = parts[0] if parts[0] in {"utilities", "downloader", "follow", "content"} \
                         else "community"
                     if parts[1] == "on" and self.access and not self.access.module_enabled(ceiling):
                         await m.reply("Global policy disables this module. The Owner must enable it first.")
@@ -427,7 +427,7 @@ class Community:
         if section == "modules":
             rows = [[button(f"{'✅' if self.store.enabled(chat, key) else '⬜'} {key.title()}",
                             f"toggle_{key}")]
-                    for key in ("downloader", "follow", "culture", "notes", "utilities")]
+                    for key in ("downloader", "follow", "culture", "notes", "utilities", "content")]
             body = "🧩 <b>Group Modules</b>\nChoose a module to enable or disable in this group."
         elif section == "welcome":
             enabled = self.store.setting(chat, "welcome_enabled") == "1"

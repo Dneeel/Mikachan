@@ -43,6 +43,9 @@ from .mikasub_core import MikaSubCore
 from .mikasub_ui import MikaSubUI
 from .instagram_relay import InstagramRelay
 from .external_utilities import ExternalUtilities
+from .content_ui import ContentUI, COMMANDS as CONTENT_COMMANDS
+from .n8n_gateway import N8NGateway
+from .audio_ui import AudioUI
 from .local_sources import LocalSources
 from .market_prices import parse_asset_query
 from .personality import Mode, mode_for, response
@@ -194,12 +197,14 @@ HELP_TEXT = (
     "/follow · /following · /queue\n\n"
     "👥 <b>Community</b>\n"
     "/fal · /poem · /quote · /dice\n"
+    "/pishi · /earth · /art · /xotd · /wiki\n"
     "Groups: /rules · /notes · /setnote · /groupstats · /groupsettings · /id (reply)\n\n"
     "🛠 <b>Utilities</b>\n"
     "/qr · /scan · /ocr (reply to an image) · /url or /link (reply to a file)\n"
     "/weather CITY · /now [CITY]\n"
     "/st · /xst (reply to an image or sticker)\n"
     "/nasa · /tr LANGUAGE TEXT · /pron WORD · /asr (reply to audio)\n"
+    "/tts · /stt (when the owner's n8n audio workflow is connected)\n"
     "/style TEXT · /ai TEXT (requires user account login)\n\n"
     "💱 Toman quotes: send exactly دلار, سکه, طلا, تتر or ارز.\n"
     "🛡 Proxies: /proxy or پروکسی (requires user account login).\n"
@@ -254,6 +259,23 @@ class App:
                                    self.store.access_registry)
         self.utilities = Utilities(self.bot, settings, self.store.db)
         self.external_utilities = ExternalUtilities(self.userbot, self.bot)
+        self.content_ui = ContentUI(self.store.db, self.bot,
+                                    enabled=settings.mika_content_enabled,
+                                    cats_strict=settings.mika_content_cats_strict,
+                                    authorize=lambda user, chat: self.authorized(
+                                        user, chat, "private" if user == chat else "supergroup"))
+        self.n8n_gateway = N8NGateway(enabled=settings.mika_n8n_enabled,
+            base_url=settings.mika_n8n_base_url,
+            webhook_path=settings.mika_n8n_webhook_path,
+            auth_ref=settings.mika_n8n_auth_ref,
+            timeout=settings.mika_n8n_webhook_timeout_s,
+            max_parallel=settings.mika_ai_global_concurrency)
+        self.audio_ui = AudioUI(self.store.db, self.bot, self.n8n_gateway,
+                                tts_enabled=settings.mika_tts_enabled,
+                                stt_enabled=settings.mika_stt_enabled,
+                                poll_seconds=settings.mika_n8n_job_status_poll_s,
+                                authorize=lambda user, chat: self.authorized(
+                                    user, chat, "private" if user == chat else "supergroup"))
         self.local_sources = LocalSources(self.store.db, self.userbot, self.bot,
                                           settings.data_dir)
         assert self.store.access_registry is not None
@@ -262,7 +284,8 @@ class App:
                                 self.store.access_registry)
         self.settings_ui = SettingsUI(self.store.db, self.store.access_registry,
                                       self.utilities.now, self.bot, self.local_sources,
-                                      self.mikasub)
+                                      self.mikasub, self.content_ui, self.n8n_gateway,
+                                      self.audio_ui)
         self.group_status = GroupStatus(self.store.db, self.store.access_registry)
         self.router = Router()
         self.router.message.register(self.message)
@@ -311,6 +334,9 @@ class App:
             await self.community.welcome(m, self.store.allowlist())
         if not m.from_user or not self.authorized(m.from_user.id, m.chat.id, m.chat.type):
             return
+        if (self.module_enabled("utilities", m.chat.id) and hasattr(self, "audio_ui")
+                and await self.audio_ui.reply(m)):
+            return
         if (m.chat.type in {"group", "supergroup"} and
                 await self.community.content.pending_message(m)):
             return
@@ -346,6 +372,9 @@ class App:
             return
         if hasattr(self, "settings_ui") and await self.settings_ui.reply(m):
             return
+        if (self.module_enabled("content", m.chat.id) and hasattr(self, "content_ui")
+                and await self.content_ui.reply(m)):
+            return
         if (m.chat.type in {"group", "supergroup"} and
                 self.module_enabled("community", m.chat.id) and
                 await self.community.content.keyword(m, normalized_text)):
@@ -375,10 +404,12 @@ class App:
                 "help", "search", "music", "podcast", "pod", "book", "id", "twitter", "instagram",
                 "follow", "following",
                 "tiktok", "youtube", "settings", "queue", "status",
-                "fal", "poem", "quote", "dice", "nickname", "rules", "setrules",
+                "fal", "poem", "quote", "pishi", "earth", "art", "xotd", "wiki",
+                "dice", "nickname", "rules", "setrules",
                 "notes", "setnote", "delrules", "welcome", "del",
                 "mute", "modlog", "groupstats", "groupstatus", "groupsettings", "qr", "scan", "ocr",
                 "st", "xst", "weather", "now", "nasa", "tr", "pron", "asr", "style", "ai",
+                "tts", "stt",
                 "url", "link", "vpn", "proxy"}
             if explicit_text or text.startswith("/") and builtin:
                 self.community.store.use(m.chat.id, m.from_user.id, "request")
@@ -490,18 +521,27 @@ class App:
         follow_commands = {"/follow", "/following", "/twitter", "/instagram",
                            "/tiktok", "/youtube"}
         utility_commands = {"/qr", "/scan", "/ocr", "/tr", "/pron", "/asr", "/style", "/ai",
+                            "/tts", "/stt",
                             "/st", "/xst", "/weather", "/now",
                             "/nasa", "/url", "/proxy", "/vpn", "/image", "/sticker", "/stickerimage",
                             "/gif", "/pack", "/convert"}
-        if (cmd in downloader_commands and not self.module_enabled("downloader", m.chat.id) or
+        if (cmd in CONTENT_COMMANDS and not self.module_enabled("content", m.chat.id) or
+                cmd in downloader_commands and not self.module_enabled("downloader", m.chat.id) or
                 cmd in follow_commands and not self.module_enabled("follow", m.chat.id) or
                 cmd in utility_commands and not self.module_enabled("utilities", m.chat.id) or
-                cmd not in downloader_commands | follow_commands | utility_commands |
+                cmd not in downloader_commands | follow_commands | utility_commands | CONTENT_COMMANDS |
                     {"/help", "/settings", "/queue", "/status"} and
                     not self.module_enabled("community", m.chat.id)):
             return
         if cmd == "/rate":
             return  # Removed public command; currency phrases still use their existing provider.
+        if cmd in CONTENT_COMMANDS and not self.store.rate(m.from_user.id, "content", 8):
+            await m.reply("Content requests are limited to 8 per minute. Try again shortly.")
+            return
+        if hasattr(self, "content_ui") and await self.content_ui.command(m, cmd, arg):
+            return
+        if hasattr(self, "audio_ui") and await self.audio_ui.command(m, cmd, arg):
+            return
         if hasattr(self, "external_utilities") and await self.external_utilities.command(m, cmd, arg):
             return
         if cmd == "/vpn":
@@ -1155,6 +1195,16 @@ class App:
             await acknowledge(q)
             return
         data = q.data or ""
+        if (data.startswith(("ct:", "cr:")) and
+                not self.module_enabled("content", q.message.chat.id) or
+                data.startswith("au:") and
+                not self.module_enabled("utilities", q.message.chat.id)):
+            await acknowledge(q, "This module is currently unavailable")
+            return
+        if data.startswith("ct:") and data.split(":")[-1] not in {"done", "back"} and \
+                not self.store.rate(q.from_user.id, "content", 15):
+            await acknowledge(q, "Content requests are temporarily rate limited")
+            return
         if data.startswith("url:"):
             entry = self.store.db.execute("SELECT url FROM url_links WHERE token=? AND "
                     "user_id=? AND chat_id=? AND message_id=? AND expires>?",
@@ -1178,6 +1228,15 @@ class App:
                     if not self.authorized(job["user_id"], job["chat_id"], kind):
                         active_task.cancel()
             return
+        if hasattr(self, "content_ui") and await self.content_ui.callback(q, data):
+            return
+        if hasattr(self, "content_ui") and await self.content_ui.review_callback(
+                q, data, owner=(q.message.chat.type == "private" and
+                    self.store.access_registry is not None and
+                    self.store.access_registry.role(q.from_user.id) == "OWNER")):
+            return
+        if hasattr(self, "audio_ui") and await self.audio_ui.callback(q, data):
+            return
         prefix = data.split(":", 1)[0]
         domain = ({"c": "downloader", "s": "downloader", "b": "downloader",
                    "lb": "downloader",
@@ -1185,7 +1244,8 @@ class App:
                    "fn": "follow", "fd": "follow", "u": "community", "g": "community",
                    "gs": "community", "gc": "community", "n": "utilities",
                    "px": "utilities", "ms": "utilities", "uh": "utilities",
-                   "ir": "follow"}).get(prefix)
+                   "ir": "follow", "au": "utilities", "ct": "content",
+                   "cr": "content"}).get(prefix)
         if domain and not self.module_enabled(domain, q.message.chat.id):
             await acknowledge(q, "This module is currently unavailable")
             return
@@ -1997,6 +2057,7 @@ class App:
     async def run(self) -> None:
         identity = await self.bot.get_me()
         self.bot_username = identity.username or ""
+        await self.audio_ui.recover()
         await self.bot.set_my_commands(
             [
                 BotCommand(command=x, description=y)
@@ -2016,6 +2077,14 @@ class App:
                     ("queue", "My jobs"),
                     ("status", "Status"),
                     ("fal", "Reviewed Hafez fortune"),
+                    ("pishi", "Reviewed domestic cat photos"),
+                    ("earth", "Species and nature"),
+                    ("art", "Open-access art"),
+                    ("xotd", "Daily sourced features"),
+                    ("quote", "Sourced Wikiquote excerpts"),
+                    ("wiki", "Wikipedia search and discovery"),
+                    ("tts", "Configure text to speech"),
+                    ("stt", "Configure speech to text"),
                     ("poem", "Poetry menu"),
                     ("dice", "Roll a Telegram die"),
                     ("rules", "Group rules"),
@@ -2034,7 +2103,6 @@ class App:
                     ("nasa", "NASA astronomy picture"),
                     ("proxy", "Current Telegram proxies"),
                     ("vpn", "MikaSub and subscription converter"),
-                    ("translate", "Translate selected text"),
                 )
             ]
         )
@@ -2056,6 +2124,9 @@ class App:
             await self.mikasub.close()
             await self.mikasub_core.close()
             await self.utilities.close()
+            await self.content_ui.providers.close()
+            await self.audio_ui.close()
+            await self.n8n_gateway.close()
             if self.userbot:
                 await self.userbot.close()
             await self.bot.session.close()

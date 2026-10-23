@@ -24,10 +24,14 @@ def markup(rows: list[list[tuple[str, str]]]) -> InlineKeyboardMarkup:
 
 class SettingsUI:
     def __init__(self, db: sqlite3.Connection, access: AccessRegistry, now: NowService,
-                 bot: Bot | None = None, local_sources=None, mikasub=None):
+                 bot: Bot | None = None, local_sources=None, mikasub=None, content_ui=None,
+                 n8n_gateway=None, audio_ui=None):
         self.db, self.access, self.now, self.bot = db, access, now, bot
         self.local_sources = local_sources
         self.mikasub = mikasub
+        self.content_ui = content_ui
+        self.n8n_gateway = n8n_gateway
+        self.audio_ui = audio_ui
         self.broadcast_tasks: dict[str, asyncio.Task[None]] = {}
         db.executescript("""
         CREATE TABLE IF NOT EXISTS settings_sessions (
@@ -81,6 +85,10 @@ class SettingsUI:
                 sections.append([button("📂 Local Sources", "locals")])
             if self.mikasub is not None:
                 sections.append([button("🏴‍☠️ MikaSub", "mikasub")])
+            if self.content_ui is not None:
+                sections.append([button("🐈 Cat Approval Pool", "catpool")])
+            if self.n8n_gateway is not None:
+                sections.append([button("🎙 AI & Audio", "ai_audio")])
             sections += [
                 [button("📝 Global Message Studio", "messages")],
                 [button("🎭 Personality & Identity", "identity")],
@@ -97,6 +105,41 @@ class SettingsUI:
                     [button("📍 My Location", "location")],
                     [button("◀ Back", "home" if chat == user else "close"),
                      button("✖ Close", "close")]]))
+        if page == "catpool" and self.content_ui is not None:
+            cats = self.content_ui.approved_cats()
+            cat_controls = [[button("👀 Review TheCatAPI candidate", "catreview:thecatapi")],
+                            [button("👀 Review CATAAS candidate", "catreview:cataas")]]
+            for item in cats[:20]:
+                cat_controls.append([button(f"⛔ Ban {item.provider} · {item.identifier[:16]}",
+                                            f"catban:{item.provider}:{item.identifier}")])
+            cat_controls.append([button("◀ Back", "home")])
+            return (f"🐈 <b>Approved Cats</b> · {len(cats)}\n"
+                    "Only reviewed IDs can appear in /pishi. Review photos before approval.",
+                    markup(cat_controls))
+        if page == "ai_audio" and self.n8n_gateway is not None:
+            ai_status = "Configured" if self.n8n_gateway.enabled else "Missing"
+            tts = "Enabled" if self.audio_ui and self.audio_ui.tts_enabled else "Off"
+            stt = "Enabled" if self.audio_ui and self.audio_ui.stt_enabled else "Off"
+            return ("🎙 <b>AI & Audio</b>\n"
+                    f"n8n connection · {ai_status}\n"
+                    "API contract · mika.n8n.v1\n"
+                    f"TTS · {tts} · STT · {stt}\n"
+                    "Provider entitlement · Unverified\n"
+                    "Generation also requires a real eligible catalog and measured free quota.",
+                    markup([[button("🩺 Test Safe Ping", "ai_ping")],
+                            [button("🎤 Check Model Catalog", "ai_catalog")],
+                            [button("🌍 Content Health", "content_health")],
+                            [button("◀ Back", "home")]]))
+        if page == "content_health" and self.content_ui is not None:
+            count = len(self.content_ui.approved_cats())
+            banned = int(self.db.execute("SELECT COUNT(*) FROM cat_approval WHERE status='BANNED'")
+                         .fetchone()[0])
+            return (f"🌍 <b>Content Health</b>\nApproved cat images · {count}\n"
+                    f"Banned cat IDs · {banned}\n"
+                    "Sources · TheCatAPI, CATAAS, iNaturalist, Cleveland Museum, "
+                    "Wikimedia, Wikiquote, Wiktionary\n"
+                    "Live source availability is measured only when a request runs.",
+                    markup([[button("◀ Back", "ai_audio")]]))
         if page == "messages":
             draft = self.db.execute("SELECT body,audience FROM message_drafts WHERE owner_id=?",
                                     (user,)).fetchone()
@@ -318,6 +361,44 @@ class SettingsUI:
             return True
         if action == "mikasub" and owner and self.mikasub is not None:
             await self.mikasub.open_owner(q, token)
+            return True
+        if action.startswith("catreview:") and owner and self.content_ui is not None:
+            await q.answer()
+            try:
+                await self.content_ui.review_cat(q.from_user.id, q.message.chat.id,
+                                                 action.split(":", 1)[1])
+            except ValueError as exc:
+                await q.message.answer("⚠️ " + html.escape(str(exc)))
+            return True
+        if action.startswith("catban:") and owner and self.content_ui is not None:
+            parts = action.split(":", 2)
+            if len(parts) == 3:
+                row = self.db.execute("SELECT item_json FROM cat_approval WHERE provider=? "
+                    "AND image_id=?", (parts[1], parts[2])).fetchone()
+                if row:
+                    from .content_providers import Item
+                    self.content_ui.approve_cat(Item(**json.loads(row[0])), False)
+            action = "catpool"
+        if action == "ai_ping" and owner and self.n8n_gateway is not None:
+            await q.answer()
+            try:
+                result = await self.n8n_gateway.get_capabilities()
+                await q.message.answer("✅ n8n responded with contract " +
+                                       html.escape(str(result.get("schema_version", "?"))))
+            except ValueError as exc:
+                await q.message.answer("⚠️ " + html.escape(str(exc)))
+            return True
+        if action == "ai_catalog" and owner and self.n8n_gateway is not None:
+            await q.answer()
+            try:
+                tts = await self.n8n_gateway.get_models("tts")
+                stt = await self.n8n_gateway.get_models("stt")
+                await q.message.answer("🎤 <b>Account catalog</b>\n"
+                    f"TTS models · {len(tts.get('result', {}).get('items', []))}\n"
+                    f"STT models · {len(stt.get('result', {}).get('items', []))}\n"
+                    "Availability does not by itself prove free entitlement.")
+            except ValueError as exc:
+                await q.message.answer("⚠️ " + html.escape(str(exc)))
             return True
         # Keep Identity as a transient notice; the owner must remain on Home.
         if action == "identity":

@@ -41,6 +41,17 @@ class Settings(BaseSettings):
     mikasub_worker_url: str = ""
     mikasub_admin_token: str = ""
     mikasub_public_url: str = ""
+    mika_n8n_enabled: bool = False
+    mika_n8n_base_url: str = ""
+    mika_n8n_webhook_path: str = ""
+    mika_n8n_auth_ref: str = ""
+    mika_n8n_webhook_timeout_s: float = 12
+    mika_n8n_job_status_poll_s: float = 3
+    mika_ai_global_concurrency: int = 2
+    mika_tts_enabled: bool = False
+    mika_stt_enabled: bool = False
+    mika_content_enabled: bool = True
+    mika_content_cats_strict: bool = True
 
     @field_validator("owner_telegram_id")
     @classmethod
@@ -100,6 +111,17 @@ class Settings(BaseSettings):
                     len(self.mikasub_public_url) != len(prefix) + 64 or \
                     any(char not in "0123456789abcdef" for char in self.mikasub_public_url[len(prefix):]):
                 raise ValueError("MikaSub public URL must match the configured Worker")
+        if self.mika_n8n_enabled:
+            from .n8n_gateway import _endpoint
+            _endpoint(self.mika_n8n_base_url, self.mika_n8n_webhook_path)
+            if not self.mika_n8n_auth_ref:
+                raise ValueError("n8n requires a private auth file reference")
+        if (self.mika_tts_enabled or self.mika_stt_enabled) and not self.mika_n8n_enabled:
+            raise ValueError("TTS and STT require a configured n8n gateway")
+        if not 1 <= self.mika_ai_global_concurrency <= 4 or not 2 <= self.mika_n8n_webhook_timeout_s <= 30:
+            raise ValueError("AI concurrency or webhook timeout is outside the safe range")
+        if not 1 <= self.mika_n8n_job_status_poll_s <= 30:
+            raise ValueError("n8n job poll interval must be 1–30 seconds")
         return self
 
     @property
