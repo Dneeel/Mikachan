@@ -1,5 +1,6 @@
 """Regressions for the reported Telegram navigation and download choices."""
 
+import asyncio
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -56,13 +57,51 @@ async def test_pornhub_quality_choice_is_owned_and_bound_to_job(tmp_path):
     app.store = store
     app.authorized = lambda *_args: True
     await app.callback(q)
-    buttons = button_data(edits[0][1]["reply_markup"])
+    assert "Pornhub quality" in edits[0][0]
+    assert "✖ Cancel" in button_data(edits[0][1]["reply_markup"])
+    buttons = button_data(edits[-1][1]["reply_markup"])
     assert {"🎬 480p", "🎬 720p", "🎬 Up to 1080p", "✖ Cancel"} == set(buttons)
     q.data = f"c:{cid}:720"
     await app.callback(q)
     jobs = store.jobs(42)
     assert len(jobs) == 1
     assert store.job_mode(jobs[0]["id"]) == "720"
+
+
+@pytest.mark.asyncio
+async def test_quality_menu_opens_before_slow_metadata_and_adds_only_known_sizes(tmp_path):
+    store = Store(tmp_path / "bot.sqlite")
+    cid = store.confirm_create(42, 42, 100, 0,
+        "https://www.youtube.com/watch?v=abcdefghijk", 900)
+    assert store.claim_prompt(cid)
+    store.set_prompt(cid, 101)
+    edits = []
+
+    async def edit_text(body, **kwargs):
+        edits.append((body, kwargs))
+
+    gate = asyncio.Event()
+
+    async def delayed_size(_url):
+        await gate.wait()
+        return {"720": 135_000_000}
+
+    q = SimpleNamespace(from_user=SimpleNamespace(id=42),
+                        message=SimpleNamespace(chat=SimpleNamespace(id=42, type="private"),
+                                                message_id=101, edit_text=edit_text),
+                        answer=AsyncMock(), data=f"c:{cid}:q")
+    app = App.__new__(App)
+    app.store = store
+    app.worker = SimpleNamespace(quality_sizes=delayed_size)
+    app._quality_tasks = set()
+    app.authorized = lambda *_args: True
+    await app.callback(q)
+    assert len(edits) == 1
+    assert "🎬 720p" in button_data(edits[0][1]["reply_markup"])
+    gate.set()
+    await asyncio.gather(*app._quality_tasks)
+    assert "🎬 720p · 135.0 MB" in button_data(edits[-1][1]["reply_markup"])
+    assert "🎬 480p" in button_data(edits[-1][1]["reply_markup"])
 
 
 @pytest.mark.asyncio
@@ -89,7 +128,7 @@ async def test_youtube_quality_choice_is_bound_to_confirmed_job(tmp_path):
     app.authorized = lambda *_args: True
     await app.callback(q)
     assert {"🎬 360p", "🎬 480p", "🎬 720p", "🎬 Up to 1080p", "🎵 MP3"} <= set(
-        button_data(edits[0][1]["reply_markup"]))
+        button_data(edits[-1][1]["reply_markup"]))
     q.data = f"c:{cid}:1080"
     await app.callback(q)
     jobs = store.jobs(42)

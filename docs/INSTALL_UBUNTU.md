@@ -1,23 +1,10 @@
 # Install and manage Mikachan on Ubuntu or Debian
 
-This guide covers a **systemd** host. Use an interactive SSH session with sudo. Have at least 2 GB of free space, internet access to GitHub/PyPI, and the BotFather token and numeric owner Telegram ID ready. The default public Telegram Bot API needs **neither** Telegram API ID nor API hash.
+This guide covers a **systemd** host with Python 3.12 or newer. Use an interactive SSH session with sudo. Have at least 2 GB of free space, internet access to GitHub/PyPI, and the BotFather token and numeric owner Telegram ID ready. The default public Telegram Bot API needs **neither** Telegram API ID nor API hash. An older distribution Python exits before installation; the installer does not upgrade the OS to change Python versions.
 
-## Experimental version-aware installer (`v2-test` only)
+## Version-aware installer
 
-The version-aware installer is currently available only on the `v2-test` branch.
-On a **fresh VPS**, run the interactive selector:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Dneeel/Mikachan/v2-test/deploy/bootstrap.sh | sudo bash
-```
-
-For a direct `v2-test` installation, use:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Dneeel/Mikachan/v2-test/deploy/bootstrap-test.sh | sudo bash
-```
-
-The installer refuses to replace any existing Mikachan installation. Without a private
+The supported development branch is `v2`. The installer refuses to replace any existing Mikachan installation. Without a private
 `--config` file, it stages the selected release and opens Guided setup; Telegram
 service activation occurs only after valid configuration. See
 [the Persian version-selection guide](INSTALL_VERSION_SELECTION_FA.md).
@@ -28,9 +15,13 @@ service activation occurs only after valid configuration. See
 curl -fsSL https://raw.githubusercontent.com/Dneeel/Mikachan/v2/deploy/bootstrap.sh | sudo bash
 ```
 
-Read the [bootstrap script](../deploy/bootstrap.sh) before running it if you prefer. It installs Git, Python venv support, FFmpeg, Tesseract with Persian language data, and Cairo; copies the panel to a stable location; retrieves the locked `v2` release; runs pytest and Ruff; creates a disabled service; and opens the panel. Setup then collects the two required Telegram values and starts the service. Installation stops if systemd is unavailable, an unmanaged service is present, or an existing service has the new managed unit name.
+Read the [bootstrap script](../deploy/bootstrap.sh) before running it if you prefer. It installs Git, Python venv support, FFmpeg and Cairo; copies the panel to a stable location; retrieves the selected release; runs its quality gates; creates a disabled service; offers independent n8n installation; and opens the panel. Setup then collects the required Telegram values and starts the bot service. Installation stops if systemd is unavailable, an unmanaged service is present, or an existing service has the managed unit name. The optional n8n choice needs neither bot credentials nor a running bot.
+
+See [independent n8n installation](N8N_INSTALL.md) for DNS, HTTPS, private access, recovery, lifecycle, and removal. Choosing **No, Mikachan Only** adds no n8n service. You can open the same n8n installer later through **Integrations → Independent n8n installer / manager**.
 
 The first installation can take several minutes because Python packages and media tools must be fetched. The panel reports progress and errors. Run `mikachan` to reopen it. The console panel uses the Python standard-library `curses` interface (no Textual). Optional owner-supplied artwork appears at full size when the terminal has enough room; a compact Mikachan title appears on smaller screens.
+
+If a first installation stops after the managed root was created but before its manifest was committed, rerun the same bootstrap command. It offers **Resume Installation**, **Review Previous Steps**, or **Cancel** after validating root ownership and the managed unit. Resume clears only incomplete managed code/unit files and preserves configuration, SQLite data and backups before retrying. A completed installation is never replaced by bootstrap; use `mikachan` for its updates. n8n has a separate journal and `sudo n8n-manage resume`.
 
 ## Private repository: read-only deploy key
 

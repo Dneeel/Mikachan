@@ -99,6 +99,60 @@ def test_three_slots_are_valid_configuration():
 
 
 @pytest.mark.asyncio
+async def test_heavy_progress_uses_measured_bytes_and_only_exact_percent(tmp_path, monkeypatch):
+    import mikachan.jobs as jobs
+
+    worker = Worker(SimpleNamespace(), SimpleNamespace(), SimpleNamespace())
+    jid = "heavy-job"
+    folder = tmp_path / jid
+    worker._heavy_progress[jid] = (42, 0, 0.0, 0)
+    emitted = []
+
+    async def capture(_jid, _chat, value):
+        emitted.append(value)
+
+    monkeypatch.setattr(worker, "_progress", capture)
+    monkeypatch.setattr(jobs.time, "monotonic", lambda: 10.0)
+    await worker._bytes_progress(folder, 13_500_000, 168_750_000)
+    assert emitted == ["⬇️ 13.5 MB · 8%"]
+    await worker._bytes_progress(folder, 13_600_000, 168_750_000)
+    assert len(emitted) == 1  # edits are bounded during fast downloads
+    await worker._bytes_progress(folder, 18_000_000, None)
+    assert emitted[-1] == "⬇️ 18.0 MB"
+
+
+@pytest.mark.asyncio
+async def test_ytdlp_progress_is_piped_and_updates_as_lines_arrive(tmp_path, monkeypatch):
+    import mikachan.jobs as jobs
+
+    monkeypatch.setattr(jobs, "validate_dns", lambda _url: None)
+    command = []
+    process = SimpleNamespace(
+        stdout=asyncio.StreamReader(), stderr=asyncio.StreamReader(), returncode=0,
+        wait=AsyncMock(return_value=0),
+    )
+    process.stdout.feed_data(b"MIKACHAN_PROGRESS:13500000:168750000\n")
+    process.stdout.feed_eof()
+    process.stderr.feed_eof()
+
+    async def launch(*args, **kwargs):
+        command.extend(args)
+        assert kwargs["stdout"] == asyncio.subprocess.PIPE
+        (tmp_path / "01.mp4").write_bytes(b"fixture")
+        return process
+
+    monkeypatch.setattr(jobs.asyncio, "create_subprocess_exec", launch)
+    worker = Worker(SimpleNamespace(), SimpleNamespace(), SimpleNamespace())
+    worker._heavy_progress[tmp_path.name] = (42, 0, 0.0, 0)
+    worker._progress = AsyncMock()
+    paths = await worker._ytdlp("https://www.youtube.com/watch?v=abcdefghijk",
+                                tmp_path, 200_000_000, "720")
+    assert paths == [tmp_path / "01.mp4"]
+    assert "--progress-template" in command
+    worker._progress.assert_awaited_once_with(tmp_path.name, 42, "⬇️ 13.5 MB · 8%")
+
+
+@pytest.mark.asyncio
 @pytest.mark.skipif(shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
                     reason="ffmpeg tools unavailable")
 @pytest.mark.parametrize("reject_video", [False, True])

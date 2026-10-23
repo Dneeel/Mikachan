@@ -78,6 +78,46 @@ def test_confirmation_cannot_run_without_exact_phrase():
     assert received == [("purge", None)]
 
 
+def test_mikachan_uninstall_offers_independent_n8n_keep_by_default(tmp_path, monkeypatch):
+    import deploy.manager_ui as panel
+
+    marker = tmp_path / ".managed-by-n8n-installer"
+    marker.write_text("owned")
+    monkeypatch.setattr(panel, "N8N_MARKER", marker)
+    ui = MikachanMenu(FakeManager)
+    received = []
+    ui.execute = lambda *args: received.append(args)
+    ui._confirm("purge")
+    assert ui.page.title == "n8n IS INSTALLED SEPARATELY"
+    assert "Keep n8n Running" in ui.page.entries[0].label
+    ui.select()
+    ui.form_value = "PURGE MIKACHAN"
+    ui.submit_form()
+    assert received == [("purge", "keep")]
+
+
+def test_removing_both_apps_needs_two_exact_confirmations(tmp_path, monkeypatch):
+    import deploy.manager_ui as panel
+
+    marker = tmp_path / ".managed-by-n8n-installer"
+    marker.write_text("owned")
+    monkeypatch.setattr(panel, "N8N_MARKER", marker)
+    ui = MikachanMenu(FakeManager)
+    received = []
+    ui.execute = lambda *args: received.append(args)
+    ui._confirm("remove")
+    ui.page.selected = 1
+    ui.select()
+    ui.page.selected = 1  # permanent n8n data removal
+    ui.select()
+    ui.form_value = "REMOVE MIKACHAN"
+    ui.submit_form()
+    assert received == []
+    ui.form_value = "PURGE N8N DATA"
+    ui.submit_form()
+    assert received == [("remove-n8n", ("remove", True))]
+
+
 def test_snapshot_version_and_owner_requests_use_structured_payload():
     ui = MikachanMenu(FakeManager)
     received = []

@@ -253,6 +253,7 @@ class App:
                               "url TEXT NOT NULL,expires REAL NOT NULL)")
         self.follow = FollowService(self.store, self.bot, settings.private_chats_only)
         self._check_all_tasks: dict[int, asyncio.Task[None]] = {}
+        self._quality_tasks: set[asyncio.Task[None]] = set()
         community_store = CommunityStore(self.store.db)
         community_store.seed_hafez(Path(__file__).parent / "content/hafez.json")
         self.community = Community(self.bot, community_store, settings.owner_telegram_id,
@@ -1532,22 +1533,63 @@ class App:
                      q.message.message_id, time.time())).fetchone()
                 await acknowledge(q, "Request expired" if not row else None)
                 if row and (youtube_video_url(row["url"]) or source(row["url"]) == "pornhub"):
-                    if source(row["url"]) == "pornhub":
-                        await q.message.edit_text(
-                            "🎛 <b>Pornhub quality</b>\nChoose the maximum video resolution.",
-                            reply_markup=kb([[("🎬 480p", f"c:{parts[1]}:480"),
-                                              ("🎬 720p", f"c:{parts[1]}:720")],
-                                             [("🎬 Up to 1080p", f"c:{parts[1]}:1080")],
-                                             [("✖ Cancel", f"c:{parts[1]}:n")]]))
-                    else:
-                        await q.message.edit_text(
-                            "🎛 <b>YouTube quality</b>\nChoose video quality or MP3.",
-                            reply_markup=kb([[("🎬 360p", f"c:{parts[1]}:360"),
-                                              ("🎬 480p", f"c:{parts[1]}:480")],
-                                             [("🎬 720p", f"c:{parts[1]}:720"),
-                                              ("🎬 Up to 1080p", f"c:{parts[1]}:1080")],
-                                             [("🎵 MP3", f"c:{parts[1]}:audio")],
-                                             [("✖ Cancel", f"c:{parts[1]}:n")]]))
+                    message = q.message
+                    assert message is not None and not isinstance(message, InaccessibleMessage)
+                    provider = source(row["url"])
+                    url = str(row["url"])
+
+                    async def render_quality(sizes: dict[str, int]) -> None:
+                        def quality_label(height: str, *, up_to: bool = False) -> str:
+                            title = f"🎬 {'Up to ' if up_to else ''}{height}p"
+                            return (f"{title} · {sizes[height] / 1_000_000:.1f} MB"
+                                    if height in sizes else title)
+
+                        size_note = ("Source-reported download bytes; final MP4 may differ after merging."
+                                     if sizes else "Exact size appears when the source reports it.")
+                        if provider == "pornhub":
+                            await message.edit_text(
+                                "🎛 <b>Pornhub quality</b>\nChoose the maximum video resolution.\n"
+                                + size_note,
+                                reply_markup=kb([[(quality_label("480"), f"c:{parts[1]}:480"),
+                                                  (quality_label("720"), f"c:{parts[1]}:720")],
+                                                 [(quality_label("1080", up_to=True), f"c:{parts[1]}:1080")],
+                                                 [("✖ Cancel", f"c:{parts[1]}:n")]]))
+                        else:
+                            await message.edit_text(
+                                "🎛 <b>YouTube quality</b>\nChoose video quality or MP3.\n"
+                                + size_note,
+                                reply_markup=kb([[(quality_label("360"), f"c:{parts[1]}:360"),
+                                                  (quality_label("480"), f"c:{parts[1]}:480")],
+                                                 [(quality_label("720"), f"c:{parts[1]}:720"),
+                                                  (quality_label("1080", up_to=True), f"c:{parts[1]}:1080")],
+                                                 [("🎵 MP3", f"c:{parts[1]}:audio")],
+                                                 [("✖ Cancel", f"c:{parts[1]}:n")]]))
+
+                    # Make quality choices available immediately. A slow source
+                    # metadata query can enrich the same menu without blocking a tap.
+                    await render_quality({})
+                    worker = getattr(self, "worker", None)
+                    if worker:
+                        async def enrich_quality() -> None:
+                            try:
+                                sizes = await worker.quality_sizes(url)
+                                if not sizes:
+                                    return
+                                pending = self.store.db.execute(
+                                    "SELECT 1 FROM confirmations WHERE id=? AND user_id=? AND chat_id=? "
+                                    "AND prompt_id=? AND state='PENDING' AND expires>?",
+                                    (parts[1], q.from_user.id, message.chat.id,
+                                     message.message_id, time.time())).fetchone()
+                                if pending:
+                                    await render_quality(sizes)
+                            except Exception:
+                                return  # Callback may have been used or message deleted.
+
+                        quality_task = asyncio.create_task(enrich_quality())
+                        quality_tasks = getattr(self, "_quality_tasks", None)
+                        if quality_tasks is not None:
+                            quality_tasks.add(quality_task)
+                            quality_task.add_done_callback(quality_tasks.discard)
                 return
             if parts[2] == "p":
                 row = self.store.db.execute(
@@ -2109,6 +2151,9 @@ class App:
             for check_task in self._check_all_tasks.values():
                 check_task.cancel()
             await asyncio.gather(*self._check_all_tasks.values(), return_exceptions=True)
+            for quality_task in self._quality_tasks:
+                quality_task.cancel()
+            await asyncio.gather(*self._quality_tasks, return_exceptions=True)
             follow_task.cancel()
             await asyncio.gather(follow_task, return_exceptions=True)
             await self.worker.stop()

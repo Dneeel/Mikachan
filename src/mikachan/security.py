@@ -135,6 +135,7 @@ def source(url: str) -> str:
         "deezer": ("deezer.com",),
         "castbox": ("castbox.fm",),
         "pornhub": ("pornhub.com",),
+        "xnxx": ("xnxx.com",),
         "danbooru": ("danbooru.donmai.us",),
     }
     for name, domains in mapping.items():

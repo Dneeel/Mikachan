@@ -9,6 +9,8 @@ selected_branch=''
 selected_commit=''
 config_file=''
 list_only=false
+resume_partial=false
+resume_bootstrap=false
 
 usage() {
   cat <<'HELP'
@@ -75,19 +77,90 @@ if ! $list_only; then
     exit 1
   fi
   install_root='/opt/Mikachan'
-  # Abort BEFORE apt, cloning, writing panel files or touching the systemd unit.
-  if [[ -e "$install_root/manifest.json" || -e "$install_root/.managed-by-mikachan" ||
-        -e /etc/systemd/system/mikachan.service || -e /opt/mikachan/manifest.json ||
+  # A completed installation is always managed through its existing panel.
+  if [[ -e "$install_root/manifest.json" || -e /opt/mikachan/manifest.json ||
         -e /var/lib/mikachan/mikachan.sqlite ]]; then
     echo 'Existing Mikachan installation detected. No files changed.' >&2
-    echo 'Use a separate fresh VPS for v2-test; this installer will not replace production.' >&2
+    echo 'Open the existing mikachan manager for updates; bootstrap will not replace it.' >&2
     exit 1
   fi
   if [[ -L "$install_root" ]]; then
     echo 'Installation root is a symlink; refusing to proceed.' >&2
     exit 1
   fi
-  if [[ -d "$install_root" && -n "$(find "$install_root" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+  if [[ -e "$install_root/.managed-by-mikachan" ]]; then
+    if [[ -L "$install_root/.managed-by-mikachan" ||
+          -L "$install_root/panel" || -L "$install_root/panel/deploy" ||
+          "$(cat "$install_root/.managed-by-mikachan")" != 'Mikachan manager schema 1' ||
+          -L "$install_root/panel/deploy/manager.py" ||
+          ! -f "$install_root/panel/deploy/manager.py" ||
+          -L /etc/systemd/system/mikachan.service ||
+          ( -e /etc/systemd/system/mikachan.service &&
+            "$(head -n 1 /etc/systemd/system/mikachan.service)" != '# Managed by Mikachan panel' ) ]]; then
+      echo 'Managed installation is incomplete but its ownership cannot be verified.' >&2
+      exit 1
+    fi
+    for managed_path in "$install_root" "$install_root/.managed-by-mikachan" \
+        "$install_root/panel" "$install_root/panel/deploy" \
+        "$install_root/panel/deploy/manager.py"; do
+      managed_mode="$(stat -c %a "$managed_path")"
+      if [[ "$(stat -c %u "$managed_path")" != 0 ]] ||
+          (( (8#$managed_mode & 8#22) != 0 )); then
+        echo 'Interrupted manager files are not exclusively root-controlled; manual inspection required.' >&2
+        exit 1
+      fi
+    done
+    printf 'An earlier Mikachan installation was interrupted. State and backups are preserved.\n' >/dev/tty
+    while :; do
+      printf '  1) Resume Installation\n  2) Review Previous Steps\n  3) Cancel\nChoose: ' >/dev/tty
+      IFS= read -r recovery_choice </dev/tty || exit 1
+      case "$recovery_choice" in
+        1) resume_partial=true; break ;;
+        2) python3 "$install_root/panel/deploy/manager.py" status >/dev/tty || true ;;
+        3) exit 0 ;;
+        *) printf 'Choose 1, 2 or 3.\n' >/dev/tty ;;
+      esac
+    done
+  elif [[ -e "$install_root/.bootstrap-in-progress" ]]; then
+    bootstrap_root_mode="$(stat -c %a "$install_root")"
+    bootstrap_marker_mode="$(stat -c %a "$install_root/.bootstrap-in-progress")"
+    if [[ -L "$install_root/.bootstrap-in-progress" ||
+          "$(cat "$install_root/.bootstrap-in-progress")" != 'Mikachan bootstrap schema 1' ||
+          -e /etc/systemd/system/mikachan.service ||
+          "$(stat -c %u "$install_root")" != 0 ||
+          "$(stat -c %u "$install_root/.bootstrap-in-progress")" != 0 ]] ||
+          (( (8#$bootstrap_root_mode & 8#22) != 0 ||
+             (8#$bootstrap_marker_mode & 8#22) != 0 )); then
+      echo 'Incomplete bootstrap cannot be safely identified; manual inspection required.' >&2
+      exit 1
+    fi
+    for managed_path in "$install_root/panel" "$install_root/tmp" \
+        "$install_root/cache" "$install_root/config" "$install_root/assets"; do
+      if [[ -L "$managed_path" ]]; then
+        echo 'Interrupted bootstrap contains a linked managed directory; refusing to overwrite it.' >&2
+        exit 1
+      fi
+    done
+    if [[ -d "$install_root/panel" &&
+          -n "$(find "$install_root/panel" -type l -print -quit)" ]]; then
+      echo 'Interrupted panel contains a linked file; manual inspection required.' >&2
+      exit 1
+    fi
+    printf 'Earlier bootstrap staging was interrupted. No running service was changed.\n' >/dev/tty
+    while :; do
+      printf '  1) Resume Installation\n  2) Review Previous Steps\n  3) Cancel\nChoose: ' >/dev/tty
+      IFS= read -r recovery_choice </dev/tty || exit 1
+      case "$recovery_choice" in
+        1) resume_bootstrap=true; break ;;
+        2) find "$install_root" -mindepth 1 -maxdepth 2 -type f -printf '%P\n' >/dev/tty ;;
+        3) exit 0 ;;
+        *) printf 'Choose 1, 2 or 3.\n' >/dev/tty ;;
+      esac
+    done
+  elif [[ -e /etc/systemd/system/mikachan.service ]]; then
+    echo 'An unmanaged Mikachan service unit exists; refusing to replace it.' >&2
+    exit 1
+  elif [[ -d "$install_root" && -n "$(find "$install_root" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
     # Private deploy-key staging is the only permitted preexisting root content.
     staged="$(realpath -m "$source_dir")"
     if [[ -z "$source_dir" || "$staged" != "$install_root/tmp/bootstrap/"* ]] || \
@@ -100,6 +173,36 @@ if ! $list_only; then
   fi
 fi
 
+if ! $list_only; then
+  printf '\nWelcome to Mikachan installation\n\nRead-only server preflight\n'
+  printf '  CPUs: %s · available RAM: %s MiB · free /opt disk: %s GiB\n' \
+    "$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf '?')" \
+    "$(awk '/^MemAvailable:/ {print int($2/1024)}' /proc/meminfo)" \
+    "$(df -Pk /opt | awk 'NR==2 {print int($4/1048576)}')"
+  printf '  Mikachan: /opt/Mikachan · optional independent n8n: /opt/n8n\n'
+  printf '  n8n needs at least 3 GB installed RAM, 1.2 GB available RAM, and 6 GB free disk.\n'
+  printf '  Existing Docker, containers, ports, DNS and firewall are checked before n8n changes.\n'
+  if command -v python3 >/dev/null 2>&1 && ! python3 -c \
+      'import sys; raise SystemExit(sys.version_info < (3, 12))'; then
+    echo 'Mikachan v2 requires Python 3.12+. This host Python is older; no packages changed.' >&2
+    exit 1
+  fi
+  if pgrep -f '(^|/)(apt-get|dpkg|unattended-upgrade)( |$)' >/dev/null 2>&1; then
+    echo 'A package-manager operation is active; retry installation later.' >&2
+    exit 1
+  fi
+fi
+
+safe_apt_install() {
+  local simulation
+  simulation="$(apt-get -s install --no-install-recommends "$@")"
+  if printf '%s\n' "$simulation" | grep -q '^Remv '; then
+    echo 'Package installation would remove existing software; cancelled.' >&2
+    exit 1
+  fi
+  NEEDRESTART_MODE=l apt-get install -y --no-install-recommends "$@"
+}
+
 if ! command -v git >/dev/null 2>&1; then
   if $list_only; then
     echo 'Git is required to list remote versions.' >&2
@@ -107,7 +210,7 @@ if ! command -v git >/dev/null 2>&1; then
   fi
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -y
-  apt-get install -y git ca-certificates
+  safe_apt_install git ca-certificates
 fi
 
 # Read the actual remote branches. No implicit 'latest' or default version.
@@ -164,11 +267,19 @@ printf '\nSelected version: %s\n' "$selected_branch"
 if [[ -n "$selected_commit" ]]; then printf 'Pinned commit: %s\n' "$selected_commit"; fi
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
-apt-get install -y git ca-certificates python3 python3-venv ffmpeg libcairo2
+safe_apt_install git ca-certificates python3 python3-venv ffmpeg libcairo2
+if ! python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 12))'; then
+  echo 'Mikachan v2 requires Python 3.12+; this distribution default is older.' >&2
+  exit 1
+fi
 
 panel_root="$install_root/panel"
 mkdir -p "$panel_root/deploy" "$install_root/tmp/bootstrap" "$install_root/cache/pip" \
          "$install_root/config"
+if ! $resume_partial && ! $resume_bootstrap; then
+  printf 'Mikachan bootstrap schema 1\n' > "$install_root/.bootstrap-in-progress"
+  chmod 0600 "$install_root/.bootstrap-in-progress"
+fi
 if getent group mikachan >/dev/null; then
   chgrp mikachan "$install_root/tmp" "$install_root/config"
   chmod 0750 "$install_root/tmp" "$install_root/config"
@@ -185,6 +296,10 @@ if [[ ! -f "$source_dir/deploy/manager.py" || ! -f "$source_dir/deploy/manage.sh
       ! -f "$source_dir/deploy/manager_ui.py" ]]; then
   echo 'Selected source does not contain the Mikachan release manager.' >&2
   exit 1
+fi
+if $resume_partial; then
+  printf '\nClearing incomplete managed code and service unit; preserving data and backups.\n'
+  printf 'ABORT INSTALL\n' | python3 "$panel_root/deploy/manager.py" abort-install
 fi
 printf 'Mikachan manager schema 1\n' > "$install_root/.managed-by-mikachan"
 install -m 0644 "$source_dir/deploy/__init__.py" "$panel_root/deploy/__init__.py"
@@ -235,5 +350,12 @@ else
   printf '\nStaging %s; Guided setup will activate the Telegram service\n' "$selected_branch"
 fi
 mikachan "${install_args[@]}"
+rm -f "$install_root/.bootstrap-in-progress"
+if [[ -f "$source_dir/deploy/n8n_manager.py" ]]; then
+  printf '\nOptional independent n8n setup; Mikachan stays installed if you skip or n8n fails.\n'
+  if ! python3 "$source_dir/deploy/n8n_manager.py" wizard </dev/tty >/dev/tty; then
+    printf 'n8n setup stopped. Mikachan is unaffected; retry later from Integrations or n8n-manage.\n' >&2
+  fi
+fi
 printf '\nOpening Mikachan panel; choose Guided setup if not configured yet\n'
 mikachan </dev/tty >/dev/tty

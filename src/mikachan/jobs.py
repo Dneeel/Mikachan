@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import sys
+import time
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -50,6 +51,20 @@ MIME_EXT = {
     "application/pdf": ".pdf",
     "application/zip": ".zip",
 }
+
+
+def quality_selector(provider: str, mode: str) -> str | None:
+    """One selector shared by delivery and source-size inspection."""
+    if provider == "youtube" and mode in {"360", "480", "720", "1080"}:
+        return (f"bv[height<={mode}][vcodec^=avc1][ext=mp4]+ba[ext=m4a]/"
+                f"b[height<={mode}][vcodec^=avc1][ext=mp4]/"
+                f"bv[height<={mode}][ext=mp4]+ba[ext=m4a]/"
+                f"b[height<={mode}][ext=mp4]/"
+                f"bv[height<={mode}]+ba/best[height<={mode}]")
+    if provider == "pornhub" and mode in {"480", "720", "1080"}:
+        return (f"b[height<={mode}][ext=mp4][protocol=https]/"
+                f"b[height<={mode}][ext=mp4]/b[height<={mode}]")
+    return None
 
 
 def gallery_media_headers(meta: dict[str, object]) -> dict[str, str]:
@@ -110,6 +125,7 @@ class Worker:
         self.tasks: dict[str, asyncio.Task[None]] = {}
         self.running_users: dict[int, int] = {}
         self.running = False
+        self._heavy_progress: dict[str, tuple[int, int, float, int]] = {}
 
     async def loop(self) -> None:
         self.running = True
@@ -179,6 +195,70 @@ class Worker:
                 await self.bot.delete_message(chat, message_id)
             except Exception:
                 pass
+
+    async def _bytes_progress(self, directory: Path, downloaded: int,
+                              total: int | None) -> None:
+        """Show measured bytes only for explicitly selected heavy video tasks."""
+        jid = directory.name
+        target = self._heavy_progress.get(jid)
+        if not target or downloaded <= 0:
+            return
+        chat, minimum, last_at, last_bytes = target
+        if downloaded < minimum or downloaded < last_bytes:
+            return
+        now = time.monotonic()
+        if now - last_at < 2.5 and downloaded - last_bytes < 4_000_000:
+            return
+        amount = f"{downloaded / 1_000_000:.1f} MB"
+        percent = f" · {min(100, downloaded * 100 // total)}%" if total and total > 0 else ""
+        self._heavy_progress[jid] = (chat, minimum, now, downloaded)
+        await self._progress(jid, chat, f"⬇️ {amount}{percent}")
+
+    async def quality_sizes(self, url: str) -> dict[str, int]:
+        """Return only exact source-reported byte sizes for the actual quality selectors."""
+        provider = source(url)
+        if provider not in {"youtube", "pornhub"}:
+            return {}
+        validate_dns(url)
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", "yt_dlp", "--ignore-config", *site_cookie_args(url),
+            "--no-playlist", "--dump-single-json", "--skip-download", "--no-warnings", url,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            start_new_session=True, env=extractor_env())
+        try:
+            output, _ = await asyncio.wait_for(proc.communicate(), 25)
+        except (TimeoutError, asyncio.CancelledError) as exc:
+            import signal
+            os.killpg(proc.pid, signal.SIGTERM)
+            await proc.wait()
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            return {}
+        if proc.returncode or len(output) > 3_000_000:
+            return {}
+        try:
+            from yt_dlp import YoutubeDL  # type: ignore[import-untyped]
+            info = json.loads(output)
+            formats = info.get("formats")
+            if not isinstance(formats, list):
+                return {}
+            sizes: dict[str, int] = {}
+            with YoutubeDL({"quiet": True, "no_warnings": True}) as extractor:
+                for mode in (("480", "720", "1080") if provider == "pornhub" else
+                             ("360", "480", "720", "1080")):
+                    selector = quality_selector(provider, mode)
+                    if selector is None:
+                        continue
+                    chosen = list(extractor.build_format_selector(selector)({"formats": formats}))
+                    if len(chosen) != 1:
+                        continue
+                    parts = chosen[0].get("requested_formats") or [chosen[0]]
+                    values = [part.get("filesize") for part in parts]
+                    if values and all(isinstance(value, int) and value > 0 for value in values):
+                        sizes[mode] = sum(values)
+            return sizes
+        except (ValueError, KeyError, TypeError, OSError):
+            return {}
 
     @staticmethod
     def _extract_meta(directory: Path) -> dict[str, object]:
@@ -309,6 +389,12 @@ class Worker:
                 source(url) == "soundcloud" or urlsplit(url).hostname == "music.youtube.com"
             ):
                 mode = "audio"
+            provider = source(url)
+            if (provider == "youtube" and mode in {"480", "720", "1080"} or
+                    provider in {"pornhub", "xnxx"} and mode != "audio" or
+                    provider == "twitter" and mode != "audio"):
+                self._heavy_progress[jid] = (chat, 50_000_000 if provider == "twitter" else 0,
+                                             0.0, 0)
             sound_match = (re.search(r"/music/(?:[^/]*-)?(\d{10,22})/?$", urlsplit(url).path)
                            if source(url) == "tiktok" else None)
             if sound_match:
@@ -573,7 +659,7 @@ class Worker:
                         download_limit = (
                             min(240 * 1024 * 1024, max_bytes * 5)
                             if mode == "audio" or mode != "document" and source(url) in {
-                                "youtube", "pornhub", "instagram", "twitter", "tiktok"
+                                "youtube", "pornhub", "xnxx", "instagram", "twitter", "tiktok"
                             } else max_bytes
                         )
                         paths = await self._ytdlp_with_fresh_url(url, job_dir,
@@ -823,6 +909,7 @@ class Worker:
                 self.store.transition(jid, current["state"], "FAILED", error=safe)
                 await self._progress(jid, chat, f"⚠️ Download failed\n{html.escape(safe)}", active=False)
         finally:
+            self._heavy_progress.pop(jid, None)
             shutil.rmtree(job_dir, ignore_errors=True)
 
     async def _browse(self, url: str) -> tuple[list[dict[str, str]], str]:
@@ -1194,12 +1281,15 @@ class Worker:
                         suffix = ".bin"
                     path = directory / (stem + suffix)
                     total = 0
+                    expected = (int(resp.headers["content-length"])
+                                if resp.headers.get("content-length", "").isdigit() else None)
                     with path.open("wb") as f:
                         async for chunk in resp.aiter_bytes(65536):
                             total += len(chunk)
                             if total > max_bytes:
                                 raise ValueError("file exceeds Bot API mode limit")
                             f.write(chunk)
+                            await self._bytes_progress(directory, total, expected)
                     return path
         raise ValueError("too many redirects")
 
@@ -1671,27 +1761,8 @@ class Worker:
             if mode == "audio"
             else []
         )
-        quality_args: list[str] = []
-        if source(url) == "youtube" and mode in {"360", "480", "720", "1080"}:
-            quality_args = [
-                "-f",
-                (f"bv[height<={mode}][vcodec^=avc1][ext=mp4]+ba[ext=m4a]/"
-                 f"b[height<={mode}][vcodec^=avc1][ext=mp4]/"
-                 f"bv[height<={mode}][ext=mp4]+ba[ext=m4a]/"
-                 f"b[height<={mode}][ext=mp4]/"
-                 f"bv[height<={mode}]+ba/best[height<={mode}]"),
-                "--merge-output-format", "mp4",
-            ]
-        elif source(url) == "pornhub" and mode in {"480", "720", "1080"}:
-            # Prefer progressive HTTPS formats when the source's HLS playlist
-            # returns 410. Never select a height above the user's ceiling.
-            quality_args = [
-                "-f",
-                (f"b[height<={mode}][ext=mp4][protocol=https]/"
-                 f"b[height<={mode}][ext=mp4]/"
-                 f"b[height<={mode}]"),
-                "--merge-output-format", "mp4",
-            ]
+        selector = quality_selector(source(url), mode)
+        quality_args = ["-f", selector, "--merge-output-format", "mp4"] if selector else []
         proc = await asyncio.create_subprocess_exec(
             sys.executable,
             "-m", "yt_dlp",
@@ -1705,6 +1776,9 @@ class Worker:
             *(["--concurrent-fragments", "4"] if source(url) == "youtube" else []),
             *(["--no-playlist"] if not collection(url) else []),
             "--no-warnings",
+            "--newline",
+            "--progress-template",
+            "download:MIKACHAN_PROGRESS:%(progress.downloaded_bytes)s:%(progress.total_bytes)s",
             "--restrict-filenames",
             "--max-filesize",
             str(max_bytes),
@@ -1714,13 +1788,36 @@ class Worker:
             *audio_args,
             *quality_args,
             url,
-            stdout=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
             env=extractor_env(),
         )
         try:
-            _, stderr = await asyncio.wait_for(proc.communicate(), 600)
+            if getattr(proc, "stdout", None) is None or getattr(proc, "stderr", None) is None:
+                _, stderr = await asyncio.wait_for(proc.communicate(), 600)
+            else:
+                async def read_progress() -> None:
+                    assert proc.stdout is not None
+                    while line := await proc.stdout.readline():
+                        match = re.search(rb"MIKACHAN_PROGRESS:(\d+):([^:\s]+)", line)
+                        if not match:
+                            continue
+                        exact = int(match[2]) if match[2].isdigit() else None
+                        await self._bytes_progress(directory, int(match[1]), exact)
+
+                async def read_error() -> bytes:
+                    assert proc.stderr is not None
+                    chunks: list[bytes] = []
+                    size = 0
+                    while piece := await proc.stderr.read(65536):
+                        if size < 131_072:
+                            chunks.append(piece[:131_072 - size])
+                            size += len(chunks[-1])
+                    return b"".join(chunks)
+
+                _, stderr, _ = await asyncio.wait_for(asyncio.gather(
+                    read_progress(), read_error(), proc.wait()), 600)
         except (TimeoutError, asyncio.CancelledError) as exc:
             import signal
 

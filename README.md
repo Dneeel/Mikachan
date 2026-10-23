@@ -17,7 +17,7 @@ local unit test is not evidence of working live Telegram delivery.
 
 ## Install on a server
 
-Use a Debian or Ubuntu server with systemd, `sudo`, internet access, and at least 2 GB free disk. The installer installs host media tools, retrieves the locked `v2` release, runs offline tests, installs one systemd service, and opens the terminal panel. It **does not start the Telegram bot** until Guided setup is complete.
+Use a Debian or Ubuntu server with systemd, Python 3.12+, `sudo`, internet access, and at least 2 GB free disk for Mikachan alone. The installer installs host media tools, retrieves the selected `v2` release, runs offline tests, installs one systemd service, and opens the terminal panel. It **does not start the Telegram bot** until Guided setup is complete. An optional, independent n8n installation needs at least 6 GB free disk, 3 GB installed RAM, and 1.2 GB available RAM; its own preflight decides whether it can proceed safely.
 
 For a public repository, run this single line in an interactive SSH terminal:
 
@@ -36,6 +36,8 @@ mikachan
 ```
 
 The panel has ten top-level choices: Overview, Services, Deployment, Configuration, Integrations, Logs, Data & Backups, Appearance, Maintenance, and Exit. It shows the installed branch and exact commit, service state, host CPU, memory and free disk, queue activity, masked settings, and release actions. You can edit the bot token, owner ID, access lists, providers, and other supported settings individually. Same-branch updates work on any `vN` branch; you can switch to another version branch or a reviewed commit, roll back with a database snapshot, back up, restore, inspect logs, or remove the managed installation. The interactive panel opens with a skippable cinematic text intro; appearance preferences and optional custom media/artwork live under `/opt/Mikachan/assets/terminal/`. See the [operations guide](docs/INSTALL_UBUNTU.md) and [asset guide](assets/terminal/README.md).
+
+During the first installation, you may also install n8n under `/opt/n8n`. It has its own Docker Compose project, encryption key, backups, journal, and `n8n-manage` command. A verified domain receives Caddy HTTPS; otherwise access stays on `127.0.0.1:5678` through an SSH tunnel. No DuckDNS token, AI key, bot setup, or paid service is required. The [n8n guide](docs/N8N_INSTALL.md) explains the exact choices and recovery commands. Removing Mikachan preserves n8n unless you separately choose and confirm its removal.
 
 ## What the bot does
 
@@ -79,5 +81,7 @@ For Follow, the Owner may optionally configure private TikTok or X cookie files 
 Mikachan keeps downloader, community, and utility handlers inside one Telegram update consumer. SQLite WAL stores authorization, job state, group settings, and reusable Telegram file IDs. Media tools run on demand; utility files stay in memory and downloader artifacts are removed after delivery. Crash leftovers are cleared at the next bot start or through the panel with the service stopped. A managed installation keeps **all Mikachan-owned code, configuration, runtime data, cache, temporary work and local backups under `/opt/Mikachan`**. Only the systemd unit, launcher and OS-managed packages live outside it; the [operations guide](docs/INSTALL_UBUNTU.md) lists the exact paths.
 
 Downloader defaults to three concurrent jobs per user and three globally. A collection occupies one slot so a large playlist leaves room for two separate requests; its panel can stop all remaining queued items. The active item is allowed to finish. YouTube video delivery uses a longer upload timeout and fits oversized source files within the configured Telegram Bot API upload limit where usable quality can be retained. Repeated delivery of the same single item can use Telegram's saved `file_id` without keeping a local video copy. Existing installations with explicit `MAX_ACTIVE_DOWNLOADS` or `MAX_ACTIVE_PER_USER` settings should set both to `3` in Configuration to use the new concurrency default.
+
+For selected YouTube and Pornhub video quality prompts, Mikachan shows the source-reported exact download size when metadata provides it. During long YouTube, Pornhub, XNXX, and large X video transfers, it edits one progress message with measured downloaded MB and a percent only when an exact total is available. The final merged or converted file size may differ from source download bytes.
 
 [Security](docs/SECURITY.md) · [Dependencies and notices](docs/DEPENDENCIES.md) · [Architecture boundaries](docs/ARCHITECTURE_BOUNDARIES.md)

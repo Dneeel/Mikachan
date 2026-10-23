@@ -12,6 +12,8 @@ import json
 import os
 import queue
 import re
+import subprocess
+import sys
 import textwrap
 import threading
 from dataclasses import dataclass, replace
@@ -27,6 +29,25 @@ from deploy.terminal_intro import play_startup
 BANNER = "M I K A C H A N"
 COMPACT_BANNER = COMPACT_HEADER
 TINY_BANNER = ("MIKACHAN",)
+N8N_MARKER = Path("/opt/n8n/.managed-by-n8n-installer")
+
+
+def trusted_n8n_manager() -> Path | None:
+    """Never execute an arbitrary /opt/n8n/manager.py with panel root privileges."""
+    root = Path("/opt/n8n")
+    script = root / "manager.py"
+    if root.is_symlink() or script.is_symlink() or N8N_MARKER.is_symlink():
+        return None
+    if not (root.is_dir() and script.is_file() and N8N_MARKER.is_file()):
+        return None
+    if any(path.stat().st_uid != 0 for path in (root, script, N8N_MARKER)):
+        return None
+    if root.stat().st_mode & 0o022:
+        return None
+    if not N8N_MARKER.read_text(errors="replace").startswith(
+            "Mikachan optional n8n manager schema 1"):
+        return None
+    return script
 
 SETTING_GROUPS: dict[str, tuple[str, ...]] = {
     "Identity & Access": ("BOT_TOKEN", "OWNER_TELEGRAM_ID", "ALLOWED_TELEGRAM_IDS",
@@ -141,6 +162,7 @@ class MikachanMenu:
         self.state: dict[str, Any] = {}
         self._pending_result: str | None = None
         self._intro_preview_requested = False
+        self.external_request: str | None = None
 
     @property
     def page(self) -> Page:
@@ -197,6 +219,7 @@ class MikachanMenu:
                 ("Configuration summary", "op:config"),
             ]),
             "integrations": ("INTEGRATIONS", [
+                ("Independent n8n installer / manager", "external:n8n"),
                 ("Userbot readiness", "op:userbot"),
                 ("Telegram user account settings", "category:Telegram Userbot"),
                 ("Translation & data providers", "category:Translation & Data"),
@@ -381,6 +404,30 @@ class MikachanMenu:
             callback(answer)
 
     def _confirm(self, action: str, payload: Any = None) -> None:
+        if action in {"remove", "purge"} and payload is None and N8N_MARKER.is_file():
+            self.push(Page("n8n IS INSTALLED SEPARATELY", [
+                Entry("Keep n8n Running (Recommended)", f"confirm:{action}", "keep"),
+                Entry("Remove n8n Too", "n8n:remove-choice", action),
+                Entry("Cancel", "back"),
+            ]))
+            return
+        if action == "remove-n8n":
+            bot_action, purge_n8n = payload
+            first = "PURGE MIKACHAN" if bot_action == "purge" else "REMOVE MIKACHAN"
+            second = "PURGE N8N DATA" if purge_n8n else "REMOVE N8N SERVICE"
+
+            def next_confirmation(value: str) -> None:
+                if value != first:
+                    self.notify("Cancelled: confirmation mismatch")
+                    return
+                self.open_form("Type " + second + " to continue",
+                               lambda answer: self.execute("remove-n8n", payload)
+                               if answer == second else self.notify("Cancelled: confirmation mismatch"),
+                               guidance="This action affects both independent applications.")
+
+            self.open_form("Type " + first + " to continue", next_confirmation,
+                           guidance="Mikachan and n8n are independent applications.")
+            return
         words = {
             "stop": "STOP", "update": "UPDATE", "switch": "SWITCH", "rollback": "ROLLBACK",
             "prune": "PRUNE", "restore": "RESTORE", "recover": "RECOVER", "cleanup": "CLEAN",
@@ -498,6 +545,17 @@ class MikachanMenu:
             self._choose_owner_request(entry.payload)
         elif cmd == "setup":
             self.start_setup()
+        elif cmd == "external:n8n":
+            self.external_request = "n8n"
+            self.running = False
+        elif cmd == "n8n:remove-choice":
+            self.push(Page("n8n IS INDEPENDENT", [
+                Entry("Remove n8n service; preserve workflows, key and backups",
+                      "confirm:remove-n8n", (entry.payload, False)),
+                Entry("Permanently remove n8n service AND data",
+                      "confirm:remove-n8n", (entry.payload, True)),
+                Entry("Cancel", "back"),
+            ]))
         elif cmd.startswith("op:"):
             self.execute(cmd.partition(":")[2])
         elif cmd.startswith("confirm:"):
@@ -685,6 +743,22 @@ class MikachanMenu:
                 result = manager.remove()
             elif action == "purge":
                 result = manager.remove(purge=True)
+            elif action == "remove-n8n":
+                bot_action, purge_n8n = payload
+                if bot_action not in {"remove", "purge"}:
+                    raise ManagerError("Invalid removal choice")
+                script = trusted_n8n_manager()
+                if script is None:
+                    raise ManagerError("Managed n8n installer is unavailable; no application was removed")
+                phrase = "PURGE N8N DATA" if purge_n8n else "REMOVE N8N SERVICE"
+                completed = subprocess.run([sys.executable, str(script), "remove",
+                                            *(["--purge"] if purge_n8n else []),
+                                            "--confirm", phrase], capture_output=True,
+                                           text=True, timeout=240, check=False)
+                if completed.returncode:
+                    raise ManagerError("n8n removal failed; Mikachan was preserved. "
+                                       "Inspect n8n-manage diagnostics")
+                result = manager.remove(purge=bot_action == "purge")
             else:
                 raise ManagerError("Unsupported action")
             # status refresh is always separate from action result
@@ -973,10 +1047,23 @@ def main() -> None:
         raise SystemExit("Interactive terminal required; use `mikachan status` for CLI mode")
     if not os.environ.get("TERM") or os.environ.get("TERM") == "dumb":
         raise SystemExit("Terminal does not support cursor controls (TERM=dumb)")
-    try:
-        curses.wrapper(lambda win: MikachanMenu().run(win))
-    except curses.error as exc:
-        raise SystemExit(f"Unsupported terminal capability: {exc}") from exc
+    while True:
+        menu = MikachanMenu()
+        try:
+            curses.wrapper(menu.run)
+        except curses.error as exc:
+            raise SystemExit(f"Unsupported terminal capability: {exc}") from exc
+        if menu.external_request != "n8n":
+            break
+        installed = trusted_n8n_manager()
+        release = Path("/opt/Mikachan/current/deploy/n8n_manager.py")
+        source = installed or release
+        if not source.is_file():
+            print("n8n installer is unavailable in this release.")
+            input("Press Enter to return to Mikachan…")
+            continue
+        subprocess.run([sys.executable, str(source), "wizard"], check=False)
+        input("Press Enter to return to Mikachan…")
 
 
 if __name__ == "__main__":
