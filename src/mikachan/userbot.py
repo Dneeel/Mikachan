@@ -2,6 +2,7 @@
 
 import asyncio
 import html
+import io
 import mimetypes
 import re
 import tempfile
@@ -144,6 +145,8 @@ class UserbotBridge:
         self.instagram_peer = None
         self.instagram_last_sent = 0.0
         self.instagram_last_click = 0.0
+        self.external_locks = {"ocr": asyncio.Lock(), "util": asyncio.Lock()}
+        self.external_peers: dict[str, object] = {}
 
     async def _ready(self) -> None:
         if time.monotonic() < self.cooldown_until:
@@ -231,7 +234,7 @@ class UserbotBridge:
                         break
                     if profile_ready_at is None:
                         profile_ready_at = time.monotonic() + 4
-                if goal == "posts" and any(self._instagram_has_button(item, "next 5 posts")
+                if goal == "posts" and any(self._instagram_has_button(item, "next 5 post")
                                            for item in found.values()):
                     break
                 if goal == "menu" and any(getattr(item, "buttons", None) for item in fresh):
@@ -295,7 +298,7 @@ class UserbotBridge:
                     self.instagram_last_click = time.monotonic()
                     try:
                         watch = original if ("highlights" in expected_label.casefold()
-                                             or "next 5 posts" in expected_label.casefold()
+                                             or "next 5 post" in expected_label.casefold()
                                              or expected_label.casefold().startswith(
                                                  ("next", "previous", "prev"))) else None
                         goal = ("posts" if "posts" in expected_label.casefold() else
@@ -362,14 +365,16 @@ class UserbotBridge:
             raise ValueError("Instagram media download failed or exceeded the limit")
         return Path(result)
 
-    async def instagram_stage(self, message_id: int) -> int:
+    async def instagram_stage(self, message) -> int:
         """Forward to the shared private staging chat for Bot API server-side copy."""
         if self.staging_chat_id >= 0:
             raise ValueError("Instagram fast copy needs a private staging chat")
         async with self.instagram_transfer_lock:
             await self._ready()
             peer = await self._instagram_peer()
-            current = await self.client.get_messages(peer, ids=message_id)
+            current = message
+            if not hasattr(current, "sender_id"):
+                current = await self.client.get_messages(peer, ids=message)
             if not current or getattr(current, "sender_id", None) != peer.id or not current.media:
                 raise ValueError("Instagram media is no longer available")
             staged = await self.client.forward_messages(self.staging_chat_id, current)
@@ -383,6 +388,154 @@ class UserbotBridge:
         if self.staging_chat_id < 0:
             async with self.instagram_transfer_lock:
                 await self.client.delete_messages(self.staging_chat_id, message_id)
+
+    async def _external_peer(self, kind: str):
+        names = {"ocr": "OCRnerdBOT", "util": "UtilHubBot"}
+        if kind not in names:
+            raise ValueError("Unknown external utility")
+        if kind not in self.external_peers:
+            peer = await self.client.get_entity(names[kind])
+            if (not getattr(peer, "bot", False) or
+                    str(getattr(peer, "username", "")).casefold() != names[kind].casefold() or
+                    kind == "ocr" and int(getattr(peer, "id", 0)) != 8931851074):
+                raise ValueError("External utility identity could not be verified")
+            self.external_peers[kind] = peer
+        return self.external_peers[kind]
+
+    @staticmethod
+    def _external_pending(message) -> bool:
+        value = str(getattr(message, "raw_text", "") or "").strip().casefold()
+        return bool(not getattr(message, "media", None) and not getattr(message, "buttons", None)
+                    and len(value) < 160 and (value == "⏳" or value.startswith((
+                        "processing", "please wait", "thinking", "generating",
+                        "در حال پردازش", "لطفا صبر", "لطفاً صبر"))))
+
+    async def _external_wait(self, peer, after: int, *, timeout: float,
+                             edited=None, need_buttons: bool = False,
+                             need_media: bool = False) -> list:
+        found: dict[int, object] = {}
+        deadline = time.monotonic() + timeout
+        quiet = 0.0
+        while time.monotonic() < deadline:
+            rows = await self.client.get_messages(peer, limit=12)
+            for item in rows:
+                if getattr(item, "sender_id", None) != peer.id or getattr(item, "id", 0) <= after:
+                    continue
+                before = found.get(item.id)
+                if (before is None or getattr(before, "raw_text", None) != item.raw_text or
+                        self._button_signature(before) != self._button_signature(item)):
+                    found[item.id] = item
+                    quiet = time.monotonic() + (2.5 if timeout > 90 else 1.2)
+            if edited is not None:
+                item = await self.client.get_messages(peer, ids=edited.id)
+                if (item and getattr(item, "sender_id", None) == peer.id and
+                        (item.raw_text != edited.raw_text or
+                         self._button_signature(item) != self._button_signature(edited))):
+                    found[item.id] = item
+                    quiet = time.monotonic() + 1.2
+            ready = [item for item in found.values() if not self._external_pending(item)]
+            provider_error = any(any(word in str(getattr(item, "raw_text", "") or "").casefold()
+                                     for word in ("not found", "unsupported", "failed", "cannot", "error"))
+                                 for item in ready)
+            if ready and (not need_buttons or any(getattr(item, "buttons", None) for item in ready)) \
+                    and (not need_media or provider_error or
+                         any(getattr(item, "media", None) for item in ready)) \
+                    and time.monotonic() >= quiet:
+                return sorted(ready, key=lambda item: item.id)
+            await asyncio.sleep(0.35 if not found else 0.55)
+        raise ValueError("External utility did not finish in time")
+
+    async def external_request(self, kind: str, command: str, *, staged_id: int | None = None,
+                               reply_text: str | None = None, timeout: float = 65,
+                               media_data: bytes | None = None,
+                               media_name: str | None = None) -> list:
+        """Send one fixed-command interaction; verify every reply's real bot sender."""
+        if (not command and staged_id is None and media_data is None or len(command) > 3500 or
+                reply_text is not None and len(reply_text) > 3500):
+            raise ValueError("Utility input is too long")
+        if media_data is not None and (staged_id is not None or not 0 < len(media_data) <= 20_000_000):
+            raise ValueError("Invalid in-memory utility media")
+        if staged_id is not None and self.staging_chat_id >= 0:
+            raise ValueError("Set USERBOT_STAGING_CHAT_ID for media utilities")
+        try:
+            async with asyncio.timeout(timeout + 15):
+                async with self.external_locks[kind]:
+                    await self._ready()
+                    peer = await self._external_peer(kind)
+                    replied_to = None
+                    if staged_id is not None:
+                        source = None
+                        for _ in range(6):
+                            source = await self.client.get_messages(self.staging_chat_id, ids=staged_id)
+                            if source:
+                                break
+                            await asyncio.sleep(0.3)
+                        if not source or not getattr(source, "media", None):
+                            raise ValueError("Staged media is unavailable")
+                        sent = await self.client.forward_messages(peer, source,
+                            drop_author=True, drop_media_captions=True)
+                        if isinstance(sent, list):
+                            if len(sent) != 1:
+                                raise ValueError("External media relay returned an unexpected batch")
+                            sent = sent[0]
+                        replied_to = sent.id
+                    elif media_data is not None:
+                        buffer = io.BytesIO(media_data)
+                        buffer.name = media_name or "source.bin"
+                        sent = await self.client.send_file(peer, buffer, caption="")
+                        replied_to = sent.id
+                    elif reply_text is not None:
+                        sent = await self.client.send_message(peer, reply_text)
+                        replied_to = sent.id
+                    if command:
+                        sent = await self.client.send_message(peer, command, reply_to=replied_to)
+                    return await self._external_wait(peer, sent.id, timeout=timeout,
+                        need_buttons=command.startswith("/style "),
+                        need_media=command.startswith("/pron "))
+        except (ValueError, asyncio.CancelledError):
+            raise
+        except Exception as exc:
+            raise ValueError("External utility is unavailable; try again later") from exc
+
+    async def external_click(self, message_id: int, row: int, column: int,
+                             label: str) -> list:
+        try:
+            async with asyncio.timeout(45):
+                async with self.external_locks["util"]:
+                    await self._ready()
+                    peer = await self._external_peer("util")
+                    original = await self.client.get_messages(peer, ids=message_id)
+                    if (not original or original.sender_id != peer.id or
+                            not getattr(original, "buttons", None) or
+                            not 0 <= row < len(original.buttons) or
+                            not 0 <= column < len(original.buttons[row])):
+                        raise ValueError("Style menu expired; send /style again")
+                    button = original.buttons[row][column]
+                    if getattr(button, "data", None) is None or str(button.text) != label:
+                        raise ValueError("Style menu changed; send /style again")
+                    latest = await self.client.get_messages(peer, limit=1)
+                    after = max(original.id, latest[0].id if latest else original.id)
+                    await original.click(row, column)
+                    return await self._external_wait(peer, after, timeout=35, edited=original)
+        except ValueError:
+            raise
+        except Exception as exc:
+            raise ValueError("Style provider is unavailable; try again later") from exc
+
+    async def external_stage(self, kind: str, message) -> int:
+        if self.staging_chat_id >= 0:
+            raise ValueError("Set USERBOT_STAGING_CHAT_ID to relay audio")
+        await self._ready()
+        peer = await self._external_peer(kind)
+        if getattr(message, "sender_id", None) != peer.id or not getattr(message, "media", None):
+            raise ValueError("External media sender could not be verified")
+        staged = await self.client.forward_messages(self.staging_chat_id, message,
+            drop_author=True, drop_media_captions=True)
+        if isinstance(staged, list):
+            if len(staged) != 1:
+                raise ValueError("External audio relay returned an unexpected batch")
+            staged = staged[0]
+        return int(staged.id)
 
     async def proxy_request(self):
         """Request the provider's own menu through the existing MTProto account."""

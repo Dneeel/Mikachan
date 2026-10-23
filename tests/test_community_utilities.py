@@ -351,22 +351,3 @@ async def test_poetry_callback_rejects_other_actor(tmp_path):
     assert await community.callback(q, f"u:{sid}:random")
     q.answer.assert_awaited_once_with("This menu is unavailable.")
     q.message.answer.assert_not_awaited()
-
-
-def test_real_english_ocr_when_host_has_tesseract():
-    import shutil
-    from PIL import ImageDraw, ImageFont
-
-    if not shutil.which("tesseract"):
-        pytest.skip("Tesseract executable absent")
-    fontpath = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-    if not Path(fontpath).exists():
-        pytest.skip("Test font absent")
-    from mikachan.utilities import Utilities
-
-    image = Image.new("RGB", (500, 100), "white")
-    ImageDraw.Draw(image).text((15, 15), "HELLO 123", fill="black",
-                               font=ImageFont.truetype(fontpath, 42))
-    output = io.BytesIO()
-    image.save(output, format="PNG")
-    assert "HELLO 123" in Utilities._ocr(output.getvalue(), "eng")

@@ -2,23 +2,17 @@
 
 import asyncio
 import csv
-import hashlib
 import html
 import io
 import json
-import os
 import re
-import secrets
 import shutil
 import sqlite3
 import subprocess
 import sys
-import threading
 import time
 import unicodedata
-import urllib.request
 from decimal import Decimal, InvalidOperation
-from pathlib import Path
 from typing import Any
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -38,61 +32,12 @@ from .config import Settings
 from .market_prices import ASSETS, MarketPrices
 from .now_service import CITY_ALIASES, NowService
 from .geocoding import nominatim_places
-from .translator import translate_public
 from .coinpj import CoinPJ, coinpj_prompt
 from .userbot import send_currency_reply
 from .sticker_tools import to_static_sticker, to_transparent_png
 
 MAX_INPUT = 8 * 1024 * 1024
 Image.MAX_IMAGE_PIXELS = 20_000_000
-BEST_FAS_URL = ("https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/"
-                "e12c65a915945e4c28e237a9b52bc4a8f39a0cec/fas.traineddata")
-BEST_FAS_SHA256 = "99e420969b5ddd2cb135b416316a7ed417c59c4faf9e0d28941348f6448114df"
-_model_lock = threading.Lock()
-
-
-def best_persian_tessdata(directory: Path) -> Path | None:
-    """Install a pinned OCR model once under Mikachan's managed cache."""
-    with _model_lock:
-        model = directory / "fas.traineddata"
-        english = directory / "eng.traineddata"
-        if directory.is_symlink() or model.is_symlink() or english.is_symlink():
-            return None
-        try:
-            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-            if not model.is_file() or hashlib.sha256(model.read_bytes()).hexdigest() != BEST_FAS_SHA256:
-                with urllib.request.urlopen(BEST_FAS_URL, timeout=15) as response:
-                    data = response.read(3_400_000)
-                if len(data) != 3_325_955 or hashlib.sha256(data).hexdigest() != BEST_FAS_SHA256:
-                    raise ValueError("Persian OCR model checksum mismatch")
-                staged = directory / (".fas-" + secrets.token_hex(8))
-                try:
-                    staged.write_bytes(data)
-                    os.chmod(staged, 0o600)
-                    os.replace(staged, model)
-                finally:
-                    staged.unlink(missing_ok=True)
-            if not english.is_file():
-                listing = subprocess.run(["tesseract", "--list-langs"], capture_output=True,
-                                         text=True, timeout=5).stdout
-                match = re.search(r'List of available languages in "([^"]+)"', listing)
-                if not match:
-                    raise ValueError("Tesseract language directory is unavailable")
-                source = Path(match[1]) / "eng.traineddata"
-                if not source.is_file() or source.stat().st_size > 16_000_000:
-                    raise ValueError("English OCR model is unavailable")
-                staged = directory / (".eng-" + secrets.token_hex(8))
-                try:
-                    shutil.copyfile(source, staged)
-                    os.chmod(staged, 0o600)
-                    os.replace(staged, english)
-                finally:
-                    staged.unlink(missing_ok=True)
-            return directory
-        except (OSError, ValueError, TimeoutError, subprocess.SubprocessError):
-            return None
-
-
 def weather_label(code: int) -> str:
     groups = {
         "Clear sky": {0}, "Mainly clear": {1}, "Partly cloudy": {2}, "Overcast": {3},
@@ -559,8 +504,7 @@ class Utilities:
         return data
 
     async def command(self, m: Message, cmd: str, arg: str) -> bool:
-        if cmd not in {"/qr", "/scan", "/ocr", "/st", "/xst", "/weather", "/now",
-                       "/nasa", "/translate"}:
+        if cmd not in {"/qr", "/scan", "/st", "/xst", "/weather", "/now", "/nasa"}:
             return False
         await self._safe_command(m, cmd, arg)
         return True
@@ -592,31 +536,12 @@ class Utilities:
             async with self.media_slots:
                 image_bytes = await asyncio.to_thread(qr_png, value)
             await m.reply_photo(BufferedInputFile(image_bytes, "qr.png"))
-        elif cmd in {"/scan", "/ocr", "/image", "/sticker", "/stickerimage", "/convert"}:
+        elif cmd in {"/scan", "/image", "/sticker", "/stickerimage", "/convert"}:
             raw, filename = await self.reply_file(m)
             if cmd == "/scan":
                 async with self.media_slots:
                     codes = await asyncio.to_thread(decode_codes, raw)
                 await m.reply(html.escape("\n".join(codes)[:3500] if codes else "No readable code found."))
-            elif cmd == "/ocr":
-                async with self.media_slots:
-                    await asyncio.to_thread(open_image, raw)
-                    languages = (await asyncio.to_thread(
-                        subprocess.run, ["tesseract", "--list-langs"],
-                        capture_output=True, text=True, timeout=5)).stdout
-                    requested = arg.strip().lower()
-                    if requested not in {"", "fa", "fas", "en", "eng"}:
-                        raise ValueError("Use /ocr, /ocr fa, or /ocr en on a replied image")
-                    if requested in {"fa", "fas"} and "fas" not in languages:
-                        raise ValueError("Persian OCR data is not installed on this host")
-                    lang = ("fas+eng" if "fas" in languages else "eng") if not requested else \
-                        "fas+eng" if requested in {"fa", "fas"} else "eng"
-                    model_dir = self.settings.data_dir.parent / "cache" / "tessdata"
-                    data = await asyncio.to_thread(self._ocr, raw, lang, model_dir)
-                await m.reply(html.escape(data[:3500] or "No text recognized.") +
-                              ("\nEnglish OCR only on this host." if lang == "eng" else
-                               "\nStandard Persian OCR model used; accuracy may be lower."
-                               if not (model_dir / "fas.traineddata").exists() else ""))
             elif cmd == "/sticker":
                 if not m.reply_to_message or not m.reply_to_message.photo:
                     raise ValueError("Reply to a photo with /sticker")
@@ -929,50 +854,3 @@ class Utilities:
             else:
                 await m.reply(caption + "\n\nOpen the NASA page to view the media.",
                               reply_markup=button)
-        elif cmd == "/translate":
-            target, _, value = arg.partition(" ")
-            target = target.lower()
-            if target not in {"en", "fa"}:
-                raise ValueError("Use /translate en|fa TEXT (or reply to text)")
-            value = value or (m.reply_to_message.text if m.reply_to_message else "") or ""
-            if not value or len(value) > 2000:
-                raise ValueError("Translation text must be 1–2000 characters")
-            if self.settings.translation_api_url:
-                if not self.settings.translation_api_url.startswith("https://"):
-                    raise ValueError("Translation provider must use HTTPS")
-                async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
-                    translation_reply = await client.post(self.settings.translation_api_url, json={
-                        "q": value, "source": "auto", "target": target,
-                        "api_key": self.settings.translation_api_key})
-                    translation_reply.raise_for_status()
-                    translated = translation_reply.json().get("translatedText")
-            else:
-                try:
-                    translated = await translate_public(value, target)
-                except (ValueError, httpx.HTTPError) as exc:
-                    raise ValueError("Public translation is unavailable. Try again later.") from exc
-            if not isinstance(translated, str) or not translated:
-                raise ValueError("Translation provider returned no text")
-            await m.reply(html.escape(f"Translation · {target.upper()}\n\n{translated[:3500]}"))
-
-    @staticmethod
-    def _ocr(raw: bytes, lang: str, model_root: Path | None = None) -> str:
-        with Image.open(io.BytesIO(raw)) as image:
-            image.load()
-            gray = ImageOps.autocontrast(ImageOps.grayscale(image))
-            if max(gray.size) < 1800:
-                scale = min(3, 1800 / max(gray.size))
-                gray = gray.resize((max(1, int(gray.width * scale)),
-                                    max(1, int(gray.height * scale))), Image.Resampling.LANCZOS)
-            output = io.BytesIO()
-            gray.save(output, format="PNG")
-        best = best_persian_tessdata(model_root) if "fas" in lang and model_root else None
-        command = ["tesseract", "stdin", "stdout", "-l", lang,
-                   "--psm", "6" if "fas" in lang else "3"]
-        if best:
-            command.extend(["--tessdata-dir", str(best)])
-        result = subprocess.run(command, input=output.getvalue(),
-                                capture_output=True, timeout=20)
-        if result.returncode:
-            raise ValueError("OCR failed to read this image")
-        return result.stdout.decode("utf-8", errors="replace").strip()

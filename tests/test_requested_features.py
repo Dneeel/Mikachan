@@ -1,13 +1,11 @@
 """Focused regressions for public poetry, local cards, prices and private alerts."""
 
-import io
 from datetime import datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from PIL import Image, ImageDraw, ImageFont
 
 from mikachan.config import Settings
 from mikachan.follow import FollowService, command_target, public_items, public_profile
@@ -197,16 +195,6 @@ async def test_tiktok_legacy_avatar_url_rebaselines_without_false_alert(monkeypa
     row = follow.db.db.execute("SELECT * FROM follows WHERE id=?", (fid,)).fetchone()
     await follow.check(row)
     assert bot.send_message.await_count == 1
-
-
-def test_ocr_enhancement_recognizes_local_fixture():
-    image = Image.new("RGB", (300, 90), "white")
-    draw = ImageDraw.Draw(image)
-    font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 45)
-    draw.text((12, 12), "HELLO", fill="black", font=font)
-    output = io.BytesIO()
-    image.save(output, format="PNG")
-    assert "hello" in Utilities._ocr(output.getvalue(), "eng").lower()
 
 
 @pytest.mark.asyncio

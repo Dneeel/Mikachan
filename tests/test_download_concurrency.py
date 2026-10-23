@@ -208,3 +208,27 @@ async def test_pornhub_format_selection_caps_height_and_prefers_https(
     fmt = seen[seen.index("-f") + 1]
     assert fmt.startswith(f"b[height<={height}][ext=mp4][protocol=https]")
     assert f"[height<={height}]" in fmt
+
+
+@pytest.mark.asyncio
+async def test_pornhub_410_refetches_signed_cdn_url_once(tmp_path, monkeypatch):
+    import mikachan.jobs as jobs
+    worker = Worker(SimpleNamespace(), SimpleNamespace(), SimpleNamespace())
+    stale = tmp_path / "stale.part"
+    stale.write_bytes(b"partial")
+    replacement = tmp_path / "fresh.mp4"
+    async def download(*_args):
+        if download.calls == 0:
+            download.calls += 1
+            raise ValueError("Pornhub media CDN returned HTTP 410 to this server; the URL was refreshed once")
+        download.calls += 1
+        replacement.write_bytes(b"video")
+        return [replacement]
+    download.calls = 0
+    worker._ytdlp = download
+    monkeypatch.setattr(jobs.asyncio, "sleep", AsyncMock())
+    result = await worker._ytdlp_with_fresh_url(
+        "https://www.pornhub.com/view_video.php?viewkey=6ac5dd5aca7cb",
+        tmp_path, 10_000_000, "480")
+    assert result == [replacement] and download.calls == 2
+    assert not stale.exists()

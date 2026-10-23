@@ -164,7 +164,7 @@ printf '\nSelected version: %s\n' "$selected_branch"
 if [[ -n "$selected_commit" ]]; then printf 'Pinned commit: %s\n' "$selected_commit"; fi
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
-apt-get install -y git ca-certificates python3 python3-venv ffmpeg tesseract-ocr tesseract-ocr-fas libcairo2
+apt-get install -y git ca-certificates python3 python3-venv ffmpeg libcairo2
 
 panel_root="$install_root/panel"
 mkdir -p "$panel_root/deploy" "$install_root/tmp/bootstrap" "$install_root/cache/pip" \

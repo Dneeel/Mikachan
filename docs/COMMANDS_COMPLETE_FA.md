@@ -36,14 +36,18 @@
 |---|---|
 | `/qr TEXT` | ساخت QR؛ ریپلای به متن نیز پشتیبانی می‌شود |
 | `/scan` | خواندن QR/بارکد از تصویر ریپلای‌شده |
-| `/ocr [fa\|en]` | استخراج نوشته از تصویر ریپلای‌شده |
+| `/ocr` | ارسال تصویر ریپلای‌شده به @OCRnerdBOT با userbot و پاسخ به دستور |
 | **`/st`** | ریپلای به عکس یا فایل تصویری → استیکر WebP ایستا؛ کپشن عکس `/st` هم مجاز است |
 | **`/xst`** | ریپلای به استیکر → فایل PNG با شفافیت؛ استیکر متحرک/ویدیویی = فریم اول |
 | `/url` | ساخت لینک دریافت فایل ریپلای‌شده با Userbot مجاز و فعال |
 | `/weather [CITY]` | هواشناسی و پیش‌بینی؛ شهر ذخیره‌شده به‌عنوان پیش‌فرض |
 | `/now [CITY]` | زمان محلی و چند تقویم |
 | `/nasa` | تصویر نجومی روز ناسا |
-| `/translate en\|fa TEXT` | ترجمه متن یا متن ریپلای‌شده، مطابق پیکربندی |
+| `/tr LANG TEXT` | ترجمهٔ متن توسط @UtilHubBot؛ یا `/tr LANG` در پاسخ به متن |
+| `/pron WORD` | راهنمای تلفظ انگلیسی و صوت از @UtilHubBot |
+| `/asr` | تبدیل صوت ریپلای‌شده به متن با @UtilHubBot |
+| `/style TEXT` | پنل سبک‌دهی تعاملی @UtilHubBot |
+| `/ai TEXT` | پاسخ درخواستی @UtilHubBot |
 
 ### A4. فرهنگی، مدیریت گروه و آمار
 
@@ -106,9 +110,6 @@
 | `شعر` | `/poem` |
 | `هواشناسی`، `هواشناسی CITY` | `/weather` |
 | `اکنون`، `اکنون CITY` | `/now` |
-| `ترجمه انگلیسی`، `ترجمه انگلیسی TEXT` | `/translate en` |
-| `ترجمه فارسی`، `ترجمه فارسی TEXT` | `/translate fa` |
-| `ترجمه TEXT` | درخواست مشخص‌کردن زبان هدف |
 | `ارز` | کارت خلاصهٔ بازار |
 | `ارز ...` | مسیر داخلیِ استعلام دارایی، بدون نمایش دستور `/rate` |
 | `دلار`، `100 usd`، `2300 jpy to usd`، `تتر به لیر`، `12 xrp to eur` و سایر الگوهای تعریف‌شده | Userbot → CoinPJ در صورت راه‌اندازی؛ در بعضی ورودی‌ها fallback داخلی بازار |
@@ -121,7 +122,7 @@
 
 در `App.run()` **29 دستور** در `set_my_commands()` ثبت می‌شوند:
 
-`/help`, `/search`, `/music`, `/podcast`, `/twitter`, `/instagram`, `/tiktok`, `/youtube`, `/follow`, `/following`, `/settings`, `/queue`, `/status`, `/fal`, `/poem`, `/dice`, `/rules`, `/groupstatus`, `/notes`, `/qr`, `/url`, `/scan`, `/ocr`, `/st`, `/xst`, `/weather`, `/now`, `/nasa`, `/translate`.
+`/help`, `/search`, `/music`, `/podcast`, `/twitter`, `/instagram`, `/tiktok`, `/youtube`, `/follow`, `/following`, `/settings`, `/queue`, `/status`, `/fal`, `/poem`, `/dice`, `/rules`, `/groupstatus`, `/notes`, `/qr`, `/url`, `/scan`, `/ocr`, `/tr`, `/pron`, `/asr`, `/style`, `/ai`, `/st`, `/xst`, `/weather`, `/now`, `/nasa`.
 
 در منوی BotFather نام‌های فارسی قابل ثبت به‌عنوان Slash Command نیستند؛ عبارت‌های فارسی با متن عادی پشتیبانی می‌شوند. ثبت دستورها در `App.run()` فقط **پس از اجرای نسخهٔ جدید روی سرور** رخ می‌دهد.
 

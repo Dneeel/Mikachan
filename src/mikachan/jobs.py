@@ -82,7 +82,7 @@ def extractor_error(url: str, stderr: bytes) -> str:
                 "MIKACHAN_INSTAGRAM_COOKIES_FILE on the VPS" if provider == "instagram"
                 else "This source requires login or verification; anonymous access is unavailable")
     if provider == "pornhub" and "http error 410" in detail:
-        return "Pornhub rejected the request (HTTP 410); check availability and extractor version"
+        return "Pornhub media CDN returned HTTP 410 to this server; the URL was refreshed once"
     if provider == "pornhub" and ("http error 403" in detail or "forbidden" in detail):
         return ("Pornhub returned HTTP 403 to this server; check region, account access, "
                 "and the optional private cookie file")
@@ -482,8 +482,13 @@ class Worker:
             elif source(url) == "instagram":
                 if self.instagram_relay is None:
                     raise ValueError("Instagram downloads need a Telegram user account session")
-                paths, post_caption = await self.instagram_relay.fetch_url(
+                instagram_result = await self.instagram_relay.fetch_url(
                     url, job_dir, max_bytes, audio_only=mode == "audio")
+                paths, post_caption = instagram_result[:2]
+                creator_handle = instagram_result[2] if len(instagram_result) > 2 else None
+                if creator_handle:
+                    context["profile_url"] = f"https://www.instagram.com/{creator_handle}/"
+                    self.store.set_job_context(jid, context)
                 if mode == "audio":
                     paths = [await self._transcode_mp3(paths[0], max_bytes)]
                 elif post_caption:
@@ -571,7 +576,8 @@ class Worker:
                                 "youtube", "pornhub", "instagram", "twitter", "tiktok"
                             } else max_bytes
                         )
-                        paths = await self._ytdlp(url, job_dir, download_limit, mode)
+                        paths = await self._ytdlp_with_fresh_url(url, job_dir,
+                                                                 download_limit, mode)
                 except ValueError as extraction_error:
                     for artifact in job_dir.iterdir():
                         if artifact.is_file():
@@ -1640,6 +1646,20 @@ class Worker:
             paths.append(path)
             remaining -= path.stat().st_size
         return paths
+
+    async def _ytdlp_with_fresh_url(self, url: str, directory: Path,
+                                    max_bytes: int, mode: str) -> list[Path]:
+        """One new PH extraction after a CDN 410; preserve the original error otherwise."""
+        try:
+            return await self._ytdlp(url, directory, max_bytes, mode)
+        except ValueError as exc:
+            if source(url) != "pornhub" or "HTTP 410" not in str(exc):
+                raise
+            for item in directory.iterdir():
+                if item.is_file():
+                    item.unlink()
+            await asyncio.sleep(1)
+            return await self._ytdlp(url, directory, max_bytes, mode)
 
     async def _ytdlp(
         self, url: str, directory: Path, max_bytes: int, mode: str = "auto"

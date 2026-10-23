@@ -3,7 +3,6 @@ import asyncio
 import getpass
 import os
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 from typing import TextIO
@@ -108,12 +107,8 @@ def main() -> None:
         print(f"Imported {count} reviewed content items")
         return
     if args.command == "doctor":
-        for name in ("ffmpeg", "ffprobe", "yt-dlp", "gallery-dl", "deno", "tesseract"):
+        for name in ("ffmpeg", "ffprobe", "yt-dlp", "gallery-dl", "deno"):
             print(f"{name}: {shutil.which(name) or 'missing'}")
-        if shutil.which("tesseract"):
-            languages = subprocess.run(["tesseract", "--list-langs"], capture_output=True,
-                                       text=True, timeout=5).stdout
-            print("Persian OCR: " + ("available" if "fas" in languages else "language data missing"))
         try:
             import cairosvg  # type: ignore[import-untyped]  # noqa: F401
         except (ImportError, OSError):

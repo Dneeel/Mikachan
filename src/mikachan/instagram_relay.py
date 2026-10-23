@@ -20,6 +20,8 @@ _FOOTER = re.compile(r"(?im)^\s*🤖\s*Downloaded with @instaRoxinoBot\s*$")
 _OPEN_POST = re.compile(r"(?im)^\s*(?:\[🔗 Open post\]\((https://[^)]+)\)|🔗 Open post)\s*$")
 _IG_LINK = re.compile(r"https://(?:www\.)?instagram\.com/(?:p|reel|stories)/[^\s)<>]+", re.I)
 _SOUND_PATH = re.compile(r"/(?:audio|music)/", re.I)
+_HANDLE = re.compile(r"[A-Za-z0-9._]{1,30}\Z")
+_AUTHOR_LABEL = re.compile(r"(?im)^\s*(?:📸\s*\d+/\d+\s*[·•]\s*|🆔\s*Username:\s*)[`*]?@?([A-Za-z0-9._]{1,30})[`*]?\s*$")
 
 
 def instagram_media_link(raw: str) -> str | None:
@@ -62,6 +64,31 @@ def _message_link(message) -> str | None:
     return None
 
 
+def creator_handle(messages: list, source_url: str) -> str | None:
+    """Accept only explicit provider identity fields or a story URL owner."""
+    path = urlsplit(source_url).path.split("/")
+    if len(path) > 2 and path[1] == "stories" and _HANDLE.fullmatch(path[2]):
+        return path[2]
+    for message in messages:
+        text = str(getattr(message, "raw_text", "") or "")
+        for match in _AUTHOR_LABEL.finditer(text):
+            if _HANDLE.fullmatch(match[1]):
+                return match[1]
+        for row in getattr(message, "buttons", None) or []:
+            for button in row:
+                raw = str(getattr(button, "url", "") or "")
+                try:
+                    parts = urlsplit(raw)
+                except ValueError:
+                    continue
+                segments = [part for part in parts.path.split("/") if part]
+                if (parts.hostname in {"instagram.com", "www.instagram.com"}
+                        and len(segments) == 1 and _HANDLE.fullmatch(segments[0])
+                        and segments[0].casefold() not in {"p", "reel", "reels", "stories"}):
+                    return segments[0]
+    return None
+
+
 def _recognized_media(message) -> bool:
     raw = str(getattr(message, "raw_text", "") or "")
     if "Downloaded with @instaRoxinoBot" in raw:
@@ -91,7 +118,7 @@ def _action_for(label: str) -> str | None:
         return "highlights"
     if "download posts" in lowered:
         return "posts"
-    if "next 5 posts" in lowered:
+    if "next 5 post" in lowered:
         return "next_posts"
     if lowered.startswith(("next", "➡")):
         return "next_page"
@@ -143,7 +170,7 @@ class InstagramRelay:
         return int(getattr(file, "size", None) or getattr(document, "size", None) or 0)
 
     async def fetch_url(self, url: str, directory: Path, max_bytes: int,
-                        *, audio_only: bool = False) -> tuple[list[Path], str]:
+                        *, audio_only: bool = False) -> tuple[list[Path], str, str | None]:
         if not instagram_media_link(url):
             raise ValueError("Sorry, Instagram sound and unsupported links are not supported")
         messages = await self.bridge.instagram_request(url, settle=6)
@@ -154,17 +181,25 @@ class InstagramRelay:
             raise ValueError(_unsupported_response(messages))
         paths: list[Path] = []
         caption = ""
+        identity_sources = list(messages)
         for index, message in enumerate(media):
             if self._media_size(message) > max_bytes:
                 raise ValueError("Instagram media exceeds the Telegram upload limit")
             message = await self.bridge.instagram_caption(message)
+            identity_sources.append(message)
             content, _ = clean_instagram_caption(str(getattr(message, "raw_text", "") or ""))
             caption = caption or content
             path = await self.bridge.instagram_download(message, directory / f"ig-{index:02d}",
                                                         max_bytes)
             await verify(path, max_bytes)
             paths.append(path)
-        return paths, caption
+        return paths, caption, creator_handle(identity_sources, url)
+
+    async def resolve_creator(self, url: str) -> str | None:
+        if not instagram_media_link(url):
+            return None
+        messages = await self.bridge.instagram_request(url, settle=3)
+        return creator_handle(messages, url)
 
     @staticmethod
     def _profile_text(message, handle: str) -> str:
@@ -256,7 +291,7 @@ class InstagramRelay:
                 hasattr(self.bot, "copy_message")):
             staged = None
             try:
-                staged = await self.bridge.instagram_stage(photo.id)
+                staged = await self.bridge.instagram_stage(photo)
                 sent = await self.bot.copy_message(chat, self.bridge.staging_chat_id,
                     staged, caption=body, reply_markup=markup)
             except (TelegramBadRequest, TelegramForbiddenError):
@@ -315,7 +350,7 @@ class InstagramRelay:
                 hasattr(self.bot, "copy_message")):
             staged = None
             try:
-                staged = await self.bridge.instagram_stage(message.id)
+                staged = await self.bridge.instagram_stage(message)
                 sent = await self.bot.copy_message(chat, self.bridge.staging_chat_id,
                     staged, caption=safe_caption or "", reply_markup=markup)
             except (TelegramBadRequest, TelegramForbiddenError):
@@ -488,7 +523,7 @@ class InstagramRelay:
                         streamed_skipped += 1
                     finally:
                         stream_queue.task_done()
-            streaming = action == "stories" or action.startswith("h")
+            streaming = action in {"stories", "posts", "next_posts"} or action.startswith("h")
             if streaming:
                 stream_task = asyncio.create_task(stream_worker())
             messages = await self.bridge.instagram_click(menu.upstream, *selected[:2], selected[2],

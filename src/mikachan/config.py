@@ -38,8 +38,6 @@ class Settings(BaseSettings):
     nasa_api_key: str = "DEMO_KEY"
     navasan_api_key: str = ""
     navasan_refresh_seconds: int = 28_800
-    translation_api_url: str = ""
-    translation_api_key: str = ""
     mikasub_worker_url: str = ""
     mikasub_admin_token: str = ""
     mikasub_public_url: str = ""

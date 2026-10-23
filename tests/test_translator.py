@@ -6,31 +6,26 @@ import pytest
 
 from mikachan.config import Settings
 from mikachan.store import Store
-from mikachan.translator import translate_public
+from mikachan.external_utilities import ExternalUtilities
 from mikachan.utilities import Utilities
 
 
 @pytest.mark.asyncio
-async def test_public_translation_extracts_all_segments(monkeypatch):
-    original = httpx.AsyncClient
-
-    def client(*args, **kwargs):
-        return original(*args, transport=httpx.MockTransport(lambda _request:
-            httpx.Response(200, json=[[['سلام', 'Hello'], [' دنیا', ' world']]])), **kwargs)
-
-    monkeypatch.setattr("mikachan.translator.httpx.AsyncClient", client)
-    assert await translate_public("Hello world", "fa") == "سلام دنیا"
-
-
-@pytest.mark.asyncio
-async def test_translate_command_works_without_optional_libretranslate(monkeypatch, tmp_path):
+async def test_translation_routes_only_through_userbot(tmp_path):
     settings = Settings(bot_token="123:fake", owner_telegram_id=1,
                         allowed_telegram_ids="1")
     utility = Utilities(SimpleNamespace(), settings, Store(tmp_path / "db.sqlite").db)
-    monkeypatch.setattr("mikachan.utilities.translate_public", AsyncMock(return_value="سلام دنیا"))
     message = SimpleNamespace(reply=AsyncMock(), reply_to_message=None)
-    assert await utility.command(message, "/translate", "fa Hello world")
-    assert message.reply.await_args.args[0] == "Translation · FA\n\nسلام دنیا"
+    assert not await utility.command(message, "/translate", "fa Hello world")
+    bridge = SimpleNamespace(external_request=AsyncMock(return_value=[
+        SimpleNamespace(raw_text="سلام دنیا", media=None)]))
+    relay = ExternalUtilities(bridge, None)
+    request = SimpleNamespace(chat=SimpleNamespace(id=1), from_user=SimpleNamespace(id=1),
+                              reply_to_message=None, reply=AsyncMock())
+    assert await relay.command(request, "/tr", "fa Hello world")
+    bridge.external_request.assert_awaited_once_with("util", "/tr fa Hello world",
+        staged_id=None, reply_text=None, timeout=65, media_data=None, media_name=None)
+    request.reply.assert_awaited_once_with("سلام دنیا")
 
 
 @pytest.mark.asyncio

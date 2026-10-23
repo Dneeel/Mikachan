@@ -44,7 +44,6 @@ EDITABLE = {
     "MAX_LINKS_PER_MESSAGE", "SEARCH_PAGE_SIZE", "SEARCH_SESSION_TTL_SECONDS",
     "CONFIRMATION_TTL_SECONDS", "SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET",
     "NASA_API_KEY", "NAVASAN_API_KEY", "NAVASAN_REFRESH_SECONDS",
-    "TRANSLATION_API_URL", "TRANSLATION_API_KEY",
     "MIKASUB_WORKER_URL", "MIKASUB_ADMIN_TOKEN", "MIKASUB_PUBLIC_URL",
     "COINPJ_SESSION", "USERBOT_SESSION", "USERBOT_STAGING_CHAT_ID",
     "MIKACHAN_INSTAGRAM_COOKIES_FILE", "MIKACHAN_PORNHUB_COOKIES_FILE",
@@ -56,7 +55,7 @@ ENV_KEYS = EDITABLE | {
     "HTTPS_PROXY", "NO_PROXY", "SSL_CERT_FILE",
 }
 PRIVATE_KEYS = {"BOT_TOKEN", "SPOTIFY_CLIENT_SECRET", "NASA_API_KEY", "NAVASAN_API_KEY",
-                "TRANSLATION_API_KEY", "TELEGRAM_API_HASH", "COINPJ_SESSION", "USERBOT_SESSION",
+                "TELEGRAM_API_HASH", "COINPJ_SESSION", "USERBOT_SESSION",
                 "MIKACHAN_INSTAGRAM_COOKIES_FILE", "MIKACHAN_PORNHUB_COOKIES_FILE",
                 "MIKACHAN_TIKTOK_FOLLOW_COOKIES_FILE", "MIKACHAN_X_FOLLOW_COOKIES_FILE",
                 "FREESTYLE_API_KEY", "HTTP_PROXY", "HTTPS_PROXY", "MIKASUB_ADMIN_TOKEN",
@@ -271,17 +270,14 @@ class Manager:
 
     def preflight(self) -> dict[str, Any]:
         tools = {name: shutil.which(name) for name in
-                 ("git", "systemctl", "flock", "ffmpeg", "ffprobe", "tesseract")}
+                 ("git", "systemctl", "flock", "ffmpeg", "ffprobe")}
         # Read-only commands launch with the system Python, outside the panel
         # venv. Report the same uv executable that installation will use.
         tools["uv"] = shutil.which(self.uv)
         disk = shutil.disk_usage(self.paths.base.parent) if self.paths.base.parent.exists() else None
-        languages = self._run("tesseract", "--list-langs", check=False).stdout.splitlines() \
-            if tools["tesseract"] else []
         return {"platform": sys.platform, "root": os.geteuid() == 0,
                 "tools": tools, "free_bytes": disk.free if disk else None,
                 "systemd": Path("/run/systemd/system").exists(),
-                "persian_ocr": "fas" in languages,
                 "cairo": ctypes.util.find_library("cairo") is not None}
 
     def _require_host(self) -> None:
@@ -292,8 +288,8 @@ class Manager:
         if missing:
             raise ManagerError("Missing host tools: " + ", ".join(missing) +
                                ". Install OS dependencies first")
-        if not check["persian_ocr"] or not check["cairo"]:
-            raise ManagerError("Persian OCR language data or Cairo is missing; install OS dependencies")
+        if not check["cairo"]:
+            raise ManagerError("Cairo runtime is missing; install OS dependencies")
         if check["free_bytes"] is not None and check["free_bytes"] < 2_000_000_000:
             raise ManagerError("At least 2 GB free disk is required to stage a release")
 
@@ -306,9 +302,9 @@ class Manager:
             raise ManagerError("Automatic OS dependency installation supports Debian/Ubuntu only")
         self.on_event("Refreshing Debian/Ubuntu package index…")
         self._run("apt-get", "update", "-y", timeout=600)
-        self.on_event("Installing Git, media tools, OCR and Cairo runtime…")
-        self._run("apt-get", "install", "-y", "git", "ffmpeg", "tesseract-ocr",
-                  "tesseract-ocr-fas", "libcairo2", "python3-venv", timeout=900)
+        self.on_event("Installing Git, media tools and Cairo runtime…")
+        self._run("apt-get", "install", "-y", "git", "ffmpeg",
+                  "libcairo2", "python3-venv", timeout=900)
         return "Installed required Debian/Ubuntu OS packages; rerun preflight"
 
     def status(self) -> dict[str, Any]:

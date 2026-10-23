@@ -42,6 +42,7 @@ from .proxy_relay import ProxyRelay
 from .mikasub_core import MikaSubCore
 from .mikasub_ui import MikaSubUI
 from .instagram_relay import InstagramRelay
+from .external_utilities import ExternalUtilities
 from .local_sources import LocalSources
 from .market_prices import parse_asset_query
 from .personality import Mode, mode_for, response
@@ -195,10 +196,11 @@ HELP_TEXT = (
     "/fal · /poem · /quote · /dice\n"
     "Groups: /rules · /notes · /setnote · /groupstats · /groupsettings · /id (reply)\n\n"
     "🛠 <b>Utilities</b>\n"
-    "/qr · /scan · /ocr · /url or /link (reply to a file)\n"
+    "/qr · /scan · /ocr (reply to an image) · /url or /link (reply to a file)\n"
     "/weather CITY · /now [CITY]\n"
     "/st · /xst (reply to an image or sticker)\n"
-    "/nasa · /translate en|fa TEXT\n\n"
+    "/nasa · /tr LANGUAGE TEXT · /pron WORD · /asr (reply to audio)\n"
+    "/style TEXT · /ai TEXT (requires user account login)\n\n"
     "💱 Toman quotes: send exactly دلار, سکه, طلا, تتر or ارز.\n"
     "🛡 Proxies: /proxy or پروکسی (requires user account login).\n"
     "🏴‍☠️ MikaSub and private subscription converter: /vpn. Configs are untested.\n"
@@ -251,6 +253,7 @@ class App:
         self.community = Community(self.bot, community_store, settings.owner_telegram_id,
                                    self.store.access_registry)
         self.utilities = Utilities(self.bot, settings, self.store.db)
+        self.external_utilities = ExternalUtilities(self.userbot, self.bot)
         self.local_sources = LocalSources(self.store.db, self.userbot, self.bot,
                                           settings.data_dir)
         assert self.store.access_registry is not None
@@ -354,9 +357,9 @@ class App:
             await self.group_status.show(m, stats_kind)
             return
         if (text in {"فال", "شعر"} and not self.module_enabled("community", m.chat.id) or
-                (text in {"ارز", "هواشناسی", "اکنون", "ترجمه انگلیسی", "ترجمه فارسی"} or
+                (text in {"ارز", "هواشناسی", "اکنون"} or
                  parse_asset_query(text) is not None or
-                 text.startswith(("ارز ", "هواشناسی ", "اکنون ", "ترجمه "))) and
+                 text.startswith(("ارز ", "هواشناسی ", "اکنون "))) and
                 not self.module_enabled("utilities", m.chat.id)):
             return
         if text.startswith("/") and "@" in text.split(" ", 1)[0]:
@@ -366,7 +369,7 @@ class App:
         if m.chat.type in {"group", "supergroup"}:
             command_name = text.split(" ", 1)[0].split("@")[0].lower().lstrip("/")
             explicit_text = (text in {"فال", "شعر", "ارز"} or parse_asset_query(text) is not None or
-                             text.startswith(("ارز ", "ترجمه ", "هواشناسی ", "اکنون ")) or
+                             text.startswith(("ارز ", "هواشناسی ", "اکنون ")) or
                              text in {"هواشناسی", "اکنون"})
             builtin = command_name in {
                 "help", "search", "music", "podcast", "pod", "book", "id", "twitter", "instagram",
@@ -375,13 +378,14 @@ class App:
                 "fal", "poem", "quote", "dice", "nickname", "rules", "setrules",
                 "notes", "setnote", "delrules", "welcome", "del",
                 "mute", "modlog", "groupstats", "groupstatus", "groupsettings", "qr", "scan", "ocr",
-                "st", "xst", "weather", "now", "nasa", "translate", "url", "link", "vpn", "proxy"}
+                "st", "xst", "weather", "now", "nasa", "tr", "pron", "asr", "style", "ai",
+                "url", "link", "vpn", "proxy"}
             if explicit_text or text.startswith("/") and builtin:
                 self.community.store.use(m.chat.id, m.from_user.id, "request")
         if (m.chat.type in {"group", "supergroup"} and
                 not self.community.store.enabled(m.chat.id, "utilities") and
                 (text == "ارز" or parse_asset_query(text) is not None or
-                 text.startswith(("ارز ", "ترجمه ", "هواشناسی ", "اکنون ")) or
+                 text.startswith(("ارز ", "هواشناسی ", "اکنون ")) or
                  text in {"هواشناسی", "اکنون"})):
             return
         userbot = getattr(self, "userbot", None)
@@ -418,21 +422,6 @@ class App:
             return
         if text.startswith("ارز "):
             await self.utilities.asset_quote(m, text[4:].strip())
-            return
-        if text == "ترجمه انگلیسی":
-            await self.utilities.command(m, "/translate", "en")
-            return
-        if text == "ترجمه فارسی":
-            await self.utilities.command(m, "/translate", "fa")
-            return
-        if text.startswith("ترجمه انگلیسی "):
-            await self.utilities.command(m, "/translate", "en " + text[len("ترجمه انگلیسی "):])
-            return
-        if text.startswith("ترجمه فارسی "):
-            await self.utilities.command(m, "/translate", "fa " + text[len("ترجمه فارسی "):])
-            return
-        if text.startswith("ترجمه "):
-            await m.reply("Specify a target: ترجمه انگلیسی TEXT or ترجمه فارسی TEXT.")
             return
         if text.startswith("/"):
             self.store.clear_query(m.from_user.id, m.chat.id)
@@ -500,8 +489,9 @@ class App:
         downloader_commands = {"/search", "/music", "/podcast", "/pod", "/book"}
         follow_commands = {"/follow", "/following", "/twitter", "/instagram",
                            "/tiktok", "/youtube"}
-        utility_commands = {"/qr", "/scan", "/ocr", "/st", "/xst", "/weather", "/now",
-                            "/nasa", "/translate", "/url", "/proxy", "/vpn", "/image", "/sticker", "/stickerimage",
+        utility_commands = {"/qr", "/scan", "/ocr", "/tr", "/pron", "/asr", "/style", "/ai",
+                            "/st", "/xst", "/weather", "/now",
+                            "/nasa", "/url", "/proxy", "/vpn", "/image", "/sticker", "/stickerimage",
                             "/gif", "/pack", "/convert"}
         if (cmd in downloader_commands and not self.module_enabled("downloader", m.chat.id) or
                 cmd in follow_commands and not self.module_enabled("follow", m.chat.id) or
@@ -512,6 +502,8 @@ class App:
             return
         if cmd == "/rate":
             return  # Removed public command; currency phrases still use their existing provider.
+        if hasattr(self, "external_utilities") and await self.external_utilities.command(m, cmd, arg):
+            return
         if cmd == "/vpn":
             await self.mikasub.open_user(m)
             return
@@ -528,8 +520,8 @@ class App:
             return
         if (m.chat.type in {"group", "supergroup"} and
                 not self.community.store.enabled(m.chat.id, "utilities") and
-                cmd in {"/qr", "/scan", "/ocr", "/st", "/xst", "/weather", "/now",
-                        "/nasa", "/translate", "/url"}):
+                cmd in {"/qr", "/scan", "/st", "/xst", "/weather", "/now",
+                        "/nasa", "/url"}):
             return
         if cmd == "/url":
             if not self.userbot:
@@ -1192,11 +1184,14 @@ class App:
                    "f": "follow", "fm": "follow", "fu": "follow", "p": "follow",
                    "fn": "follow", "fd": "follow", "u": "community", "g": "community",
                    "gs": "community", "gc": "community", "n": "utilities",
-                   "px": "utilities", "ms": "utilities", "ir": "follow"}).get(prefix)
+                   "px": "utilities", "ms": "utilities", "uh": "utilities",
+                   "ir": "follow"}).get(prefix)
         if domain and not self.module_enabled(domain, q.message.chat.id):
             await acknowledge(q, "This module is currently unavailable")
             return
         if hasattr(self, "mikasub") and await self.mikasub.callback(q, data):
+            return
+        if hasattr(self, "external_utilities") and await self.external_utilities.callback(q):
             return
         if hasattr(self, "local_sources") and await self.local_sources.callback(q):
             return
@@ -1655,6 +1650,18 @@ class App:
                 url = str(context.get("source_url") or job["url"])
                 job_creator = profile_target(str(context.get("profile_url") or "")) or creator_from_post(
                     url, context)
+                if (not job_creator and source(url) == "instagram"
+                        and self.instagram_relay is not None
+                        and self.store.rate(q.from_user.id, "instagram_creator", 3)):
+                    try:
+                        handle = await self.instagram_relay.resolve_creator(url)
+                        if handle:
+                            job_creator = profile_target(f"https://www.instagram.com/{handle}/")
+                            if job_creator:
+                                context["profile_url"] = job_creator.url
+                                self.store.set_job_context(parts[1], context)
+                    except (ValueError, TimeoutError):
+                        pass
                 if not job_creator and self.store.rate(q.from_user.id, "profile", 8):
                     try:
                         if source(url) == "tiktok":

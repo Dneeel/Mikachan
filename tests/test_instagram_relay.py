@@ -8,7 +8,7 @@ import subprocess
 import pytest
 
 from mikachan.instagram_relay import (InstagramRelay, clean_instagram_caption,
-                                      instagram_media_link, _unsupported_response)
+                                      instagram_media_link, creator_handle, _unsupported_response)
 from mikachan.config import Settings
 from mikachan.jobs import Worker
 from mikachan.store import Store
@@ -38,6 +38,15 @@ def test_caption_and_source_link_are_cleaned_without_losing_post_text():
     assert cleaned == "📸 5/30548 · @cnn\n❤️ 4.1K   💬 977\nReal caption."
     assert link == "https://www.instagram.com/p/DetFd25iKlc/"
     assert clean_instagram_caption("🤖 Downloaded with @instaRoxinoBot") == ("", None)
+
+
+def test_creator_identity_needs_explicit_provider_evidence():
+    post = SimpleNamespace(raw_text="📸 5/30548 · @cnn\nA post mentioning @someoneelse",
+                           buttons=[])
+    assert creator_handle([post], "https://www.instagram.com/p/example/") == "cnn"
+    assert creator_handle([SimpleNamespace(raw_text="Hello @someoneelse", buttons=[])],
+                          "https://www.instagram.com/p/example/") is None
+    assert creator_handle([], "https://www.instagram.com/stories/alice/123/") == "alice"
 
 
 def test_instagram_sound_link_is_not_supported():
@@ -381,6 +390,73 @@ async def test_story_callback_sends_first_item_while_provider_is_still_uploading
     assert await asyncio.wait_for(relay.callback(query), 2)
     relay._send_media.assert_awaited_once()
     assert bot.send_message.await_args.args[1] == "✅ Done"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["posts", "next_posts"])
+async def test_posts_stream_before_upstream_batch_finishes_and_keep_next_five(action):
+    post = SimpleNamespace(id=30, photo=object(), document=None, video=None,
+                           raw_text="📸 1/20 · @cnn\n🤖 Downloaded with @instaRoxinoBot",
+                           buttons=[])
+    next_button = SimpleNamespace(id=31, photo=None, document=None, video=None,
+                                  raw_text="✅ Sent 5 posts.",
+                                  buttons=[[button("📥 Next 5 posts (15 left)")]])
+    delivered = asyncio.Event()
+    async def send_media(*_args, **_kwargs):
+        delivered.set()
+        return True
+    async def click(*_args, **kwargs):
+        assert kwargs["on_media"] is not None
+        await kwargs["on_media"](post)
+        await asyncio.wait_for(delivered.wait(), 1)
+        return [post, next_button]
+    bridge = SimpleNamespace(instagram_click=AsyncMock(side_effect=click))
+    bot = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=200)))
+    relay = InstagramRelay(bridge, bot, None, None)
+    relay._send_media = AsyncMock(side_effect=send_media)
+    source = card() if action == "posts" else next_button
+    _, actions = relay._menu_markup("profile", source, profile_handle="cnn" if action == "posts" else "")
+    relay._remember_menu("profile", 7, 70, 100, "cnn", source, actions)
+    query = SimpleNamespace(data=f"ir:profile:{action}", from_user=SimpleNamespace(id=7),
+                            message=SimpleNamespace(chat=SimpleNamespace(id=70),
+                                                    message_id=100, photo=object()),
+                            answer=AsyncMock())
+    assert await asyncio.wait_for(relay.callback(query), 2)
+    assert any("next_posts" in menu.buttons for menu in relay.menus.values())
+
+
+@pytest.mark.asyncio
+async def test_next_five_posts_can_repeat_for_multiple_pages():
+    first = card()
+    bot = SimpleNamespace(send_message=AsyncMock(side_effect=lambda *_args, **_kwargs:
+        SimpleNamespace(message_id=200 + bot.send_message.await_count)))
+    pages = []
+    async def click(*_args, **kwargs):
+        number = len(pages) + 1
+        post = SimpleNamespace(id=100 + number * 2, photo=object(), document=None,
+            video=None, raw_text="📸 1/100 · @cnn\n🤖 Downloaded with @instaRoxinoBot", buttons=[])
+        next_button = SimpleNamespace(id=101 + number * 2, photo=None, document=None,
+            video=None, raw_text="✅ Sent 5 posts.",
+            buttons=[[button(f"📥 Next 5 posts ({100 - 5 * number} left)")]])
+        await kwargs["on_media"](post)
+        pages.append(number)
+        return [post, next_button]
+    bridge = SimpleNamespace(instagram_click=AsyncMock(side_effect=click))
+    relay = InstagramRelay(bridge, bot, None, None)
+    relay._send_media = AsyncMock(return_value=True)
+    _, actions = relay._menu_markup("profile", first, profile_handle="cnn")
+    relay._remember_menu("profile", 7, 70, 100, "cnn", first, actions)
+    current_token, current_id, action = "profile", 100, "posts"
+    for _ in range(3):
+        query = SimpleNamespace(data=f"ir:{current_token}:{action}",
+            from_user=SimpleNamespace(id=7),
+            message=SimpleNamespace(chat=SimpleNamespace(id=70), message_id=current_id,
+                                    photo=object()), answer=AsyncMock())
+        assert await relay.callback(query)
+        current_token, session = max(((token, session) for token, session in relay.menus.items()
+            if session.message > current_id), key=lambda pair: pair[1].message)
+        current_id, action = session.message, "next_posts"
+    assert pages == [1, 2, 3]
 
 
 @pytest.mark.asyncio
