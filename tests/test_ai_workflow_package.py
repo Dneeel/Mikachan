@@ -113,3 +113,42 @@ def test_reply_table_is_created_and_remapped_on_new_instance():
     assert _map_reply_table(Client(), graph) is None
     ref = graph["nodes"][0]["parameters"]["dataTableId"]
     assert ref["value"] == "new" and ref["cachedResultUrl"] == "/data/new"
+
+
+def test_missing_provider_imports_inactive_draft_without_foreign_credential(tmp_path, monkeypatch):
+    graph = {"name": "AI", "nodes": [{"name": "Model", "credentials": {
+        "groqApi": {"name": "Groq account", "id": "foreign-id"}}}],
+        "connections": {}, "settings": {}}
+    artifact = tmp_path / "workflow.json"
+    artifact.write_text(json.dumps(graph))
+    key_file = tmp_path / "api-key"
+    key_file.write_text("x" * 32)
+    os.chmod(key_file, 0o600)
+
+    class FakeClient:
+        installed = None
+
+        def __init__(self, _origin, _key):
+            pass
+
+        def request(self, method, path, body=None):
+            if path.startswith("/workflows?"):
+                return {"data": []}
+            if path.startswith("/credentials?"):
+                return {"data": []}
+            if path.startswith("/data-tables?"):
+                return {"data": []}
+            if method == "POST" and path == "/workflows":
+                assert "credentials" not in body["nodes"][0]
+                FakeClient.installed = {**body, "id": "new", "active": False,
+                                        "versionId": "v1"}
+                return {"id": "new"}
+            if method == "GET" and path == "/workflows/new":
+                return FakeClient.installed
+            raise AssertionError((method, path))  # Activation must not be attempted.
+
+    monkeypatch.setattr("deploy.n8n.reconcile_ai.Client", FakeClient)
+    result = reconcile("https://n8n.example.org", key_file, artifact, tmp_path / "state")
+    assert result["status"] == "IMPORTED_SETUP_REQUIRED"
+    assert result["workflow_id"] == "new"
+    assert "Groq account" in result["reason"]

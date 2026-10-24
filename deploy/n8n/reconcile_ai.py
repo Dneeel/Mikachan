@@ -136,12 +136,20 @@ def reconcile(origin: str, key_file: Path, artifact: Path, state_dir: Path) -> d
     available = {(item.get("type"), item.get("name")):
                  item.get("id") for item in client.request("GET", "/credentials?limit=100").get("data", [])}
     missing = sorted(f"{kind}: {name}" for kind, name in needed if (kind, name) not in available)
-    if missing:
+    if missing and current and current.get("active"):
         return {"status": "NOT_CONFIGURED",
-                "reason": "Create these n8n credentials, then retry: " + ", ".join(missing)}
+                "reason": "Active workflow was preserved; missing credentials: " + ", ".join(missing)}
     for node in desired["nodes"]:
-        for kind, ref in node.get("credentials", {}).items():
-            ref["id"] = available[(kind, ref["name"])]
+        for kind, ref in list(node.get("credentials", {}).items()):
+            pair = (kind, ref["name"])
+            if pair in available:
+                ref["id"] = available[pair]
+            else:
+                # An imported draft must never point at a credential ID from
+                # another n8n instance. The owner attaches it in the editor.
+                del node["credentials"][kind]
+        if not node.get("credentials"):
+            node.pop("credentials", None)
     table_problem = _map_reply_table(client, desired)
     if table_problem:
         return table_problem
@@ -149,8 +157,11 @@ def reconcile(origin: str, key_file: Path, artifact: Path, state_dir: Path) -> d
     if current and _fingerprint(current) == wanted:
         _save(state_file, {"id": current["id"], "fingerprint": wanted,
                            "version_id": current.get("versionId")})
-        return {"status": "ACTIVE" if current.get("active") else "IMPORTED",
-                "workflow_id": str(current["id"])}
+        return {"status": "ACTIVE" if current.get("active") else
+                "IMPORTED_SETUP_REQUIRED" if missing else "IMPORTED",
+                "workflow_id": str(current["id"]),
+                **({"reason": "Attach credentials in the n8n editor, then activate manually: " +
+                    ", ".join(missing)} if missing else {})}
     if current and (not previous or previous.get("id") != current.get("id") or
                     previous.get("version_id") != current.get("versionId")):
         return {"status": "BLOCKED_CONFLICT", "reason": "Existing workflow changed outside the reconciler"}
@@ -161,9 +172,11 @@ def reconcile(origin: str, key_file: Path, artifact: Path, state_dir: Path) -> d
         result = client.request("PUT", "/workflows/" + str(current["id"]), _body(desired)) \
             if current else client.request("POST", "/workflows", _body(desired))
         workflow_id = str(result["id"])
-        client.request("POST", "/workflows/" + workflow_id + "/activate", {})
+        if not missing:
+            client.request("POST", "/workflows/" + workflow_id + "/activate", {})
         installed = client.request("GET", "/workflows/" + workflow_id)
-        if not installed.get("active") or _fingerprint(installed) != _fingerprint(desired):
+        if (bool(installed.get("active")) == bool(missing) or
+                _fingerprint(installed) != _fingerprint(desired)):
             raise ReconcileError("Published n8n graph did not verify")
     except (ReconcileError, KeyError):
         if current:
@@ -176,6 +189,10 @@ def reconcile(origin: str, key_file: Path, artifact: Path, state_dir: Path) -> d
         raise
     _save(state_file, {"id": workflow_id, "fingerprint": _fingerprint(desired),
                        "version_id": installed.get("versionId")})
+    if missing:
+        return {"status": "IMPORTED_SETUP_REQUIRED", "workflow_id": workflow_id,
+                "reason": "Attach credentials in the n8n editor, then activate manually: " +
+                          ", ".join(missing)}
     return {"status": "ACTIVE", "workflow_id": workflow_id}
 
 
