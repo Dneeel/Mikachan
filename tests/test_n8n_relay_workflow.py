@@ -15,6 +15,10 @@ def test_relay_export_replaces_telegram_trigger_and_preserves_branches():
         "Telegram Trigger": {"main": [[{"node": "If", "type": "main", "index": 0}]]}},
         "nodes": [
             {"name": "Telegram Trigger", "type": "n8n-nodes-base.telegramTrigger"},
+            {"name": "Switch1", "type": "n8n-nodes-base.switch", "parameters": {
+                "rules": {"values": [{"conditions": {"conditions": [{
+                    "leftValue": "old", "rightValue": "old", "operator": {"operation": "contains"}}]}}
+                    for _ in range(4)]}}},
             {"name": "If", "type": "n8n-nodes-base.if", "parameters": {
                 "conditions": {"conditions": [{"operator": {"operation": "exists",
                     "singleValue": True}, "rightValue": ""}]}}},
@@ -35,6 +39,10 @@ def test_relay_export_replaces_telegram_trigger_and_preserves_branches():
     assert result["active"] is False
     assert result["connections"]["Private Webhook"]["main"][0][0]["node"] == \
         "Telegram Trigger"
+    assert result["connections"]["Telegram Trigger"]["main"][0][0]["node"] == \
+        "Switch1"
+    rules = next(n for n in result["nodes"] if n["name"] == "Switch1")["parameters"]["rules"]["values"]
+    assert "tts" in rules[1]["conditions"]["conditions"][0]["leftValue"]
     for node in ("ElevenLabs2", "Transcribe ElevenLabs1", "AI Agent"):
         assert any(item["name"] == node for item in result["nodes"])
 

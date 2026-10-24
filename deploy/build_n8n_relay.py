@@ -50,8 +50,24 @@ def build(source: dict) -> dict:
     ])
     workflow["connections"]["Private Webhook"] = {
         "main": [[{"node": "Telegram Trigger", "type": "main", "index": 0}]]}
+    # Every webhook item is already an explicit, authorized command. The
+    # inherited AI-reply detector classifies a replied /tts as an AI reply and
+    # sends it to the text agent. Route commands before that detector.
+    workflow["connections"]["Telegram Trigger"] = {
+        "main": [[{"node": "Switch1", "type": "main", "index": 0}]]}
     # Fix two inherited input bugs while retaining the owner's provider nodes.
     by_name = {node["name"]: node for node in nodes}
+    rules = by_name["Switch1"]["parameters"]["rules"]["values"]
+    for rule, expression in zip(rules, (
+        "false",
+        "/^\\/tts(?:@\\w+)?(?:\\s|$)/i.test($json.message.text)",
+        "/^\\/stt(?:@\\w+)?(?:\\s|$)/i.test($json.message.text)",
+        "/^میکا(?:\\s|$)/u.test($json.message.text)",
+    )):
+        condition = rule["conditions"]["conditions"][0]
+        condition["leftValue"] = "={{ " + expression + " }}"
+        condition.pop("rightValue", None)
+        condition["operator"] = {"type": "boolean", "operation": "true"}
     by_name["ElevenLabs2"]["parameters"]["text"] = (
         "={{ $json.message.reply_to_message?.text || "
         "$json.message.text.replace(/^\\/tts(?:@\\w+)?\\s*/i, '') }}")
