@@ -12,13 +12,18 @@ from mikachan.n8n_gateway import GatewayError, N8NGateway
 
 def test_relay_export_replaces_telegram_trigger_and_preserves_branches():
     source = {"name": "Owner export", "active": True, "connections": {
-        "Telegram Trigger": {"main": [[{"node": "If", "type": "main", "index": 0}]]}},
+        "Telegram Trigger": {"main": [[{"node": "If", "type": "main", "index": 0}]]},
+        "Switch1": {"main": [[], [], [], [{"node": "AI Agent", "type": "main", "index": 0}]]},
+        "Is AI Reply?": {"main": [[{"node": "AI Agent", "type": "main", "index": 0}],
+                                   [{"node": "Switch1", "type": "main", "index": 0}]]}},
         "nodes": [
             {"name": "Telegram Trigger", "type": "n8n-nodes-base.telegramTrigger"},
             {"name": "Switch1", "type": "n8n-nodes-base.switch", "parameters": {
                 "rules": {"values": [{"conditions": {"conditions": [{
                     "leftValue": "old", "rightValue": "old", "operator": {"operation": "contains"}}]}}
                     for _ in range(4)]}}},
+            {"name": "Get Mikasa1", "type": "n8n-nodes-base.httpRequest",
+             "parameters": {"url": "https://example.invalid/old"}},
             {"name": "If", "type": "n8n-nodes-base.if", "parameters": {
                 "conditions": {"conditions": [{"operator": {"operation": "exists",
                     "singleValue": True}, "rightValue": ""}]}}},
@@ -26,7 +31,7 @@ def test_relay_export_replaces_telegram_trigger_and_preserves_branches():
             {"name": "Get Voice File1", "type": "telegram", "parameters": {
                 "additionalFields": {}}},
             {"name": "Transcribe ElevenLabs1", "type": "elevenlabs"},
-            {"name": "AI Agent", "type": "agent", "parameters": {"options": {}}},
+            {"name": "AI Agent", "type": "agent", "parameters": {"text": "old", "options": {}}},
         ]}
     result = build(source)
     types = [node["type"] for node in result["nodes"]]
@@ -43,6 +48,11 @@ def test_relay_export_replaces_telegram_trigger_and_preserves_branches():
         "Switch1"
     rules = next(n for n in result["nodes"] if n["name"] == "Switch1")["parameters"]["rules"]["values"]
     assert "tts" in rules[1]["conditions"]["conditions"][0]["leftValue"]
+    assert "میکا عکس" in rules[0]["conditions"]["conditions"][0]["leftValue"]
+    assert "rating%3Ageneral" in next(n for n in result["nodes"] if
+        n["name"] == "Get Mikasa1")["parameters"]["url"]
+    assert result["connections"]["Switch1"]["main"][3][0]["node"] == "Analyze Message"
+    assert result["connections"]["Is AI Reply?"]["main"][1][0]["node"] == "AI Agent"
     for node in ("ElevenLabs2", "Transcribe ElevenLabs1", "AI Agent"):
         assert any(item["name"] == node for item in result["nodes"])
 

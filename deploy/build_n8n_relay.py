@@ -59,7 +59,7 @@ def build(source: dict) -> dict:
     by_name = {node["name"]: node for node in nodes}
     rules = by_name["Switch1"]["parameters"]["rules"]["values"]
     for rule, expression in zip(rules, (
-        "false",
+        "/^میکا عکس$/u.test($json.message.text)",
         "/^\\/tts(?:@\\w+)?(?:\\s|$)/i.test($json.message.text)",
         "/^\\/stt(?:@\\w+)?(?:\\s|$)/i.test($json.message.text)",
         "/^میکا(?:\\s|$)/u.test($json.message.text)",
@@ -68,6 +68,19 @@ def build(source: dict) -> dict:
         condition["leftValue"] = "={{ " + expression + " }}"
         condition.pop("rightValue", None)
         condition["operator"] = {"type": "boolean", "operation": "true"}
+    image_node = by_name.get("Get Mikasa1") or by_name.get("Get Mikasa")
+    if image_node:
+        image_node["parameters"]["url"] = (
+            "https://danbooru.donmai.us/posts.json?limit=1&"
+            "tags=mikasa_ackerman+rating%3Ageneral&random=true")
+    # The explicit AI branch still needs Analyze Message: it builds the
+    # session key consumed by Simple Memory and the reply context. The legacy
+    # reply detector's false branch must return to AI, not loop to Switch.
+    workflow["connections"]["Switch1"]["main"][3] = [
+        {"node": "Analyze Message", "type": "main", "index": 0}]
+    workflow["connections"]["Is AI Reply?"]["main"][1] = [
+        {"node": "AI Agent", "type": "main", "index": 0}]
+    by_name["AI Agent"]["parameters"]["text"] = "={{ $json.mika.aiPrompt }}"
     by_name["ElevenLabs2"]["parameters"]["text"] = (
         "={{ $json.message.reply_to_message?.text || "
         "$json.message.text.replace(/^\\/tts(?:@\\w+)?\\s*/i, '') }}")
