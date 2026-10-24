@@ -131,14 +131,12 @@ def reconcile(origin: str, key_file: Path, artifact: Path, state_dir: Path) -> d
     if len(matches) > 1:
         return {"status": "BLOCKED_CONFLICT", "reason": "Duplicate named workflows"}
     current = client.request("GET", "/workflows/" + str(matches[0]["id"])) if matches else None
+    conflict = False
     needed = {(kind, ref.get("name")) for node in desired["nodes"]
               for kind, ref in node.get("credentials", {}).items()}
     available = {(item.get("type"), item.get("name")):
                  item.get("id") for item in client.request("GET", "/credentials?limit=100").get("data", [])}
     missing = sorted(f"{kind}: {name}" for kind, name in needed if (kind, name) not in available)
-    if missing and current and current.get("active"):
-        return {"status": "NOT_CONFIGURED",
-                "reason": "Active workflow was preserved; missing credentials: " + ", ".join(missing)}
     for node in desired["nodes"]:
         for kind, ref in list(node.get("credentials", {}).items()):
             pair = (kind, ref["name"])
@@ -154,14 +152,36 @@ def reconcile(origin: str, key_file: Path, artifact: Path, state_dir: Path) -> d
     if table_problem:
         return table_problem
     wanted = _fingerprint(desired)
+    if current and _fingerprint(current) != wanted and (not previous or
+            previous.get("id") != current.get("id") or
+            previous.get("version_id") != current.get("versionId")):
+        conflict = True
+        # Never overwrite the owner's changed workflow. Import a separate draft.
+        desired["name"] += " · Setup Draft"
+        wanted = _fingerprint(desired)
+        state_file = state_dir / "draft-state.json"
+        previous = json.loads(state_file.read_text(encoding="utf-8")) if state_file.is_file() else {}
+        drafts = [item for item in listing if item.get("name") == desired["name"]]
+        if len(drafts) > 1:
+            return {"status": "BLOCKED_CONFLICT", "reason": "Duplicate setup drafts"}
+        current = client.request("GET", "/workflows/" + str(drafts[0]["id"])) if drafts else None
+    if missing and current and current.get("active") and not conflict:
+        return {"status": "NOT_CONFIGURED",
+                "reason": "Active workflow was preserved; missing credentials: " + ", ".join(missing)}
     if current and _fingerprint(current) == wanted:
         _save(state_file, {"id": current["id"], "fingerprint": wanted,
                            "version_id": current.get("versionId")})
-        return {"status": "ACTIVE" if current.get("active") else
+        return {"status": "IMPORTED_SETUP_REQUIRED" if conflict else
+                "ACTIVE" if current.get("active") else
                 "IMPORTED_SETUP_REQUIRED" if missing else "IMPORTED",
                 "workflow_id": str(current["id"]),
-                **({"reason": "Attach credentials in the n8n editor, then activate manually: " +
-                    ", ".join(missing)} if missing else {})}
+                **({"reason": "Existing workflow preserved. Configure and activate the setup draft. " +
+                    ("Missing: " + ", ".join(missing) if missing else "")}
+                   if conflict else {"reason": "Attach credentials in the n8n editor, "
+                    "then activate manually: " + ", ".join(missing)} if missing else {})}
+    if conflict and current:
+        return {"status": "DRAFT_EDITED", "workflow_id": str(current["id"]),
+                "reason": "Existing setup draft was edited; it was preserved"}
     if current and (not previous or previous.get("id") != current.get("id") or
                     previous.get("version_id") != current.get("versionId")):
         return {"status": "BLOCKED_CONFLICT", "reason": "Existing workflow changed outside the reconciler"}
@@ -172,10 +192,10 @@ def reconcile(origin: str, key_file: Path, artifact: Path, state_dir: Path) -> d
         result = client.request("PUT", "/workflows/" + str(current["id"]), _body(desired)) \
             if current else client.request("POST", "/workflows", _body(desired))
         workflow_id = str(result["id"])
-        if not missing:
+        if not missing and not conflict:
             client.request("POST", "/workflows/" + workflow_id + "/activate", {})
         installed = client.request("GET", "/workflows/" + workflow_id)
-        if (bool(installed.get("active")) == bool(missing) or
+        if (bool(installed.get("active")) == bool(missing or conflict) or
                 _fingerprint(installed) != _fingerprint(desired)):
             raise ReconcileError("Published n8n graph did not verify")
     except (ReconcileError, KeyError):
@@ -189,6 +209,10 @@ def reconcile(origin: str, key_file: Path, artifact: Path, state_dir: Path) -> d
         raise
     _save(state_file, {"id": workflow_id, "fingerprint": _fingerprint(desired),
                        "version_id": installed.get("versionId")})
+    if conflict:
+        return {"status": "IMPORTED_SETUP_REQUIRED", "workflow_id": workflow_id,
+                "reason": "Existing workflow preserved. Configure and activate the setup draft. " +
+                          ("Missing: " + ", ".join(missing) if missing else "")}
     if missing:
         return {"status": "IMPORTED_SETUP_REQUIRED", "workflow_id": workflow_id,
                 "reason": "Attach credentials in the n8n editor, then activate manually: " +

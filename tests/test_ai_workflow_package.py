@@ -38,9 +38,14 @@ def test_artifact_has_two_isolated_agents_and_preserves_media_edges():
         "Mika Serious Agent"
     assert nodes["Groq Serious Model"]["parameters"]["model"] == \
         nodes["Groq Chat Model"]["parameters"]["model"]
-    assert links["Simple Memory"]["ai_memory"][0][0]["node"] == "AI Agent"
+    assert links["Mika Simple Memory"]["ai_memory"][0][0]["node"] == "AI Agent"
     assert links["Serious Simple Memory"]["ai_memory"][0][0]["node"] == \
         "Mika Serious Agent"
+    assert links["AI Agent"]["main"][0][0]["node"] == "Normalize Chat Result"
+    assert nodes["AI Agent"]["continueOnFail"] is True
+    assert links["Tavily MCP"]["ai_tool"][0][0]["node"] == "AI Agent"
+    assert links["Tavily MCP1"]["ai_tool"][0][0]["node"] == "Mika Serious Agent"
+    assert len([n for n in graph["nodes"] if n["type"] == "n8n-nodes-base.stickyNote"]) == 8
     assert links["Get Mikasa"]["main"][0][0]["node"] == "Nude"
     assert links["Get Voice File"]["main"][0][0]["node"] == "TTS ElevenLabs"
     assert links["STT ElevenLabs"]["main"][0][0]["node"] == "Code in JavaScript"
@@ -152,3 +157,47 @@ def test_missing_provider_imports_inactive_draft_without_foreign_credential(tmp_
     assert result["status"] == "IMPORTED_SETUP_REQUIRED"
     assert result["workflow_id"] == "new"
     assert "Groq account" in result["reason"]
+
+
+def test_changed_existing_workflow_is_preserved_and_separate_draft_imported(tmp_path, monkeypatch):
+    graph = {"name": "AI", "nodes": [], "connections": {}, "settings": {}}
+    artifact = tmp_path / "workflow.json"
+    artifact.write_text(json.dumps(graph))
+    key_file = tmp_path / "api-key"
+    key_file.write_text("x" * 32)
+    os.chmod(key_file, 0o600)
+    existing = {**graph, "settings": {"manual": True}, "id": "owner",
+                "versionId": "owner-v2", "active": True}
+
+    class FakeClient:
+        draft = None
+
+        def __init__(self, _origin, _key):
+            pass
+
+        def request(self, method, path, body=None):
+            if path.startswith("/workflows?"):
+                data = [{"id": "owner", "name": "AI"}]
+                if FakeClient.draft:
+                    data.append({"id": "draft", "name": "AI · Setup Draft"})
+                return {"data": data}
+            if path == "/workflows/owner":
+                return existing
+            if path == "/workflows/draft":
+                return FakeClient.draft
+            if path.startswith("/credentials?"):
+                return {"data": []}
+            if method == "POST" and path == "/workflows":
+                assert body["name"] == "AI · Setup Draft"
+                FakeClient.draft = {**body, "id": "draft", "versionId": "draft-v1",
+                                    "active": False}
+                return {"id": "draft"}
+            raise AssertionError((method, path))
+
+    monkeypatch.setattr("deploy.n8n.reconcile_ai.Client", FakeClient)
+    first = reconcile("https://n8n.example.org", key_file, artifact, tmp_path / "state")
+    assert first["status"] == "IMPORTED_SETUP_REQUIRED"
+    assert first["workflow_id"] == "draft"
+    assert existing["versionId"] == "owner-v2"
+    second = reconcile("https://n8n.example.org", key_file, artifact, tmp_path / "state")
+    assert second["workflow_id"] == "draft"

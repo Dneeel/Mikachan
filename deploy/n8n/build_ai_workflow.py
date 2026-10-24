@@ -113,6 +113,16 @@ def _system_expression(agent: str) -> str:
 def build(source: dict) -> dict:
     graph = copy.deepcopy(source)
     by_name = {node["name"]: node for node in graph["nodes"]}
+    # A current, owner-edited graph is already the source of truth. Preserve
+    # its notes, tools and credentials instead of regenerating old node names.
+    if {"Mika Serious Agent", "Mika Simple Memory", "Normalize Chat Result"} <= by_name.keys():
+        if any(node["type"] == "n8n-nodes-base.telegramTrigger" for node in graph["nodes"]):
+            raise ValueError("A competing Telegram Trigger cannot be imported")
+        for key in ("id", "active", "activeVersionId", "versionId", "createdAt",
+                    "updatedAt", "shared", "tags", "meta", "pinData", "triggerCount",
+                    "isArchived"):
+            graph.pop(key, None)
+        return {key: graph[key] for key in ("name", "nodes", "connections", "settings")}
     required = {"Private Webhook", "Telegram Trigger", "Switch", "Analyze Message",
                 "Find AI Reply", "Decide AI", "Is AI Reply?", "AI Agent", "Simple Memory",
                 "Groq Chat Model", "OpenRouter Chat Model", "Send a text message",
