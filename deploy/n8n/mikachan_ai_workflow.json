@@ -1123,6 +1123,58 @@
       "parameters": {
         "jsCode": "return $input.all().map(item => ({json: {...item.json, output: typeof item.json.output === 'string' && item.json.output.trim() ? item.json.output : 'Mika could not complete this request right now. The model or search tool may be unavailable; try again shortly.'}}));"
       }
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "id",
+          "value": "@cf/google/gemma-4-26b-a4b-it"
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "id": "69c4ccd4-8e90-55e4-8859-f01088efe1a0",
+      "name": "Cloudflare Mika Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        288,
+        1312
+      ],
+      "disabled": true,
+      "credentials": {
+        "openAiApi": {
+          "name": "Cloudflare Workers AI",
+          "id": "configure-in-n8n"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "id",
+          "value": "@cf/google/gemma-4-26b-a4b-it"
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "id": "c0cc3f41-198e-5fa7-94de-80f3404d5207",
+      "name": "Cloudflare Serious Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        288,
+        1312
+      ],
+      "disabled": true,
+      "credentials": {
+        "openAiApi": {
+          "name": "Cloudflare Workers AI",
+          "id": "configure-in-n8n"
+        }
+      }
     }
   ],
   "connections": {

@@ -42,6 +42,14 @@ without any AI credential; the bot's ordinary commands continue working.
    means the graph imported and activated, not that every external provider
    was live-tested. Test `/mika`, `/tts`, and `/stt` from an authorized ID.
 
+For a fresh installation, **AI Integration → Auto Setup / Repair** in
+`n8n-manage` creates a missing private Header Auth credential and a matching
+bot-owned `0600` relay secret. It preserves any existing credential or secret.
+Once all provider credentials are present and the workflow activates on a
+verified HTTPS domain, it connects the bot through the existing Mikachan
+manager. `WEBHOOK_READY` only confirms that configuration step; provider
+responses still need testing.
+
 The independent n8n manager now has **AI Memory · PostgreSQL** with Quick
 Install/Repair, Status, Backup, Restore and a Simple/PostgreSQL backend choice.
 Quick Install creates a private database container on n8n's internal Docker
@@ -51,6 +59,12 @@ chat-history tables to Mika and Serious. The existing Simple Memory path remains
 selectable. This path is offline tested; it has not been exercised on the
 owner's VPS. The long-term fact writer/retriever is not implemented, and these
 tables must not be presented as a working personal memory feature yet.
+
+Two disabled Cloudflare Workers AI model nodes are packaged for Mika and
+Serious, using `@cf/google/gemma-4-26b-a4b-it`. They are not connected or
+called by default: the account's free entitlement and n8n tool-calling
+behavior have not been verified. This prevents an unexpected bill or a silent
+model swap. Groq remains the active provider.
 
 TikTok `/explore` uses a public third-party feed/search endpoint with no paid
 API key. Public discovery can be rate limited or blocked, especially for topic

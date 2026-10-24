@@ -46,6 +46,11 @@ def test_artifact_has_two_isolated_agents_and_preserves_media_edges():
     assert links["Tavily MCP"]["ai_tool"][0][0]["node"] == "AI Agent"
     assert links["Tavily MCP1"]["ai_tool"][0][0]["node"] == "Mika Serious Agent"
     assert len([n for n in graph["nodes"] if n["type"] == "n8n-nodes-base.stickyNote"]) == 8
+    for name in ("Cloudflare Mika Model", "Cloudflare Serious Model"):
+        assert nodes[name]["disabled"] is True
+        assert nodes[name]["parameters"]["model"]["value"] == \
+            "@cf/google/gemma-4-26b-a4b-it"
+        assert name not in links or not links[name].get("ai_languageModel")
     assert links["Get Mikasa"]["main"][0][0]["node"] == "Nude"
     assert links["Get Voice File"]["main"][0][0]["node"] == "TTS ElevenLabs"
     assert links["STT ElevenLabs"]["main"][0][0]["node"] == "Code in JavaScript"

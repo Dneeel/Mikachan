@@ -822,6 +822,40 @@ class N8NManager:
         atomic(self.root / "ai/api-key", key + "\n", 0o600)
         return self._reconcile_ai()
 
+    def auto_ai_setup(self) -> dict[str, str]:
+        """Prepare the relay secret, import the graph, and connect a ready bot."""
+        self.require_owned()
+        key = self.root / "ai/api-key"
+        release = Path("/opt/Mikachan/current")
+        if not key.is_file() or not (release / "deploy/n8n/relay_setup.py").is_file():
+            return {"status": "SETUP_REQUIRED", "reason": "Connect the n8n API key and install Mikachan first"}
+        prepared = subprocess.run([sys.executable, "-m", "deploy.n8n.relay_setup",
+            "--key-file", str(key)], cwd=release, capture_output=True, text=True,
+            timeout=40, check=False)
+        if prepared.returncode:
+            return {"status": "SETUP_REQUIRED", "reason": "Webhook credential preparation needs repair"}
+        relay = json.loads(prepared.stdout)
+        if relay.get("status") != "WEBHOOK_CREDENTIAL_READY":
+            return relay
+        graph = self._reconcile_ai()
+        if graph.get("status") != "ACTIVE":
+            return {"status": "SETUP_REQUIRED", "reason": "Webhook credential prepared; "
+                    "workflow still needs provider setup", "workflow_id": graph.get("workflow_id", "")}
+        state = self.state()
+        if state.get("access") != "domain" or not state.get("hostname"):
+            return {"status": "SETUP_REQUIRED", "reason": "Workflow active, but a verified HTTPS domain "
+                    "is required before connecting the bot"}
+        python = Path("/opt/Mikachan/panel-venv/bin/python")
+        if not python.is_file():
+            return {"status": "SETUP_REQUIRED", "reason": "Mikachan panel runtime unavailable"}
+        connected = subprocess.run([str(python), str(release / "deploy/manager.py"),
+            "connect-n8n-relay", "https://" + state["hostname"]], cwd=release,
+            capture_output=True, text=True, timeout=90, check=False)
+        if connected.returncode:
+            return {"status": "SETUP_REQUIRED", "reason": "Workflow active; bot relay connection needs diagnostics"}
+        return {"status": "WEBHOOK_READY", "workflow_id": graph.get("workflow_id", ""),
+                "reason": "Bot relay configured; verify provider responses separately"}
+
     def service(self, action: str) -> dict[str, Any]:
         self.require_owned()
         if action not in {"start", "stop", "restart"}:
@@ -1045,10 +1079,10 @@ def managed_menu(manager: N8NManager) -> None:
               "Backup", "Restore backup", "Update pinned n8n version",
               "Remove service (keep data)", "Uninstall service and data",
               "Change access method / domain", "Connect Mikachan AI workflow",
-              "AI Memory · PostgreSQL", "Return"]
+              "AI Memory · PostgreSQL", "AI Integration · Auto Setup / Repair", "Return"]
     while manager.owned():
         choice = _choose("n8n / independent management", labels)
-        if choice == 17:
+        if choice == 18:
             return
         if choice in {12, 13}:
             phrase = "REMOVE N8N SERVICE" if choice == 12 else "PURGE N8N DATA"
@@ -1073,6 +1107,8 @@ def managed_menu(manager: N8NManager) -> None:
                 print("The hostname's DNS A record must point to this server. "
                       f"Public IPv4: {public_ips().get('ipv4') or 'unavailable'}")
                 result = manager.change_access("domain", input("Full hostname: "))
+        elif choice == 17:
+            result = manager.auto_ai_setup()
         elif choice == 16:
             memory_action = _choose("AI Memory · PostgreSQL",
                 ["Quick Install / Repair", "Status", "Backup", "Restore",
@@ -1094,6 +1130,8 @@ def managed_menu(manager: N8NManager) -> None:
                 result = (json.loads(process.stdout) if process.returncode == 0 else
                           {"status": "RECOVERABLE", "reason": "AI memory operation failed; "
                            "check n8n and Docker diagnostics"})
+                if process.returncode == 0 and operation in {"quick-install", "postgres", "simple"}:
+                    result["workflow"] = manager._reconcile_ai()
         elif choice == 15:
             print("In n8n, open Settings → n8n API, create an API key, then paste it here. "
                   "It stays in /opt/n8n/ai/api-key (mode 0600) and is never shown in logs.")
@@ -1270,6 +1308,7 @@ def main() -> None:
     remove.add_argument("--purge", action="store_true")
     remove.add_argument("--confirm", default="")
     commands.add_parser("ai-connect")
+    commands.add_parser("ai-auto-setup")
     args = parser.parse_args()
     manager = N8NManager()
     try:
@@ -1307,6 +1346,8 @@ def main() -> None:
             if not sys.stdin.isatty():
                 raise N8NError("Run ai-connect in an interactive terminal to protect the key")
             result = manager.connect_ai(getpass.getpass("n8n API key (hidden): "))
+        elif args.command == "ai-auto-setup":
+            result = manager.auto_ai_setup()
         elif args.command == "access-set":
             result = manager.change_access(args.method, args.hostname)
         elif args.command == "remove":
