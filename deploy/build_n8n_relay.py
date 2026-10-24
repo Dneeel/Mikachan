@@ -19,12 +19,18 @@ if (!message || !Number.isSafeInteger(message.chat?.id) ||
   throw new Error('Invalid relay message');
 }
 const text = String(message.text ?? '').trim();
+const replyOnly = message.relay_reply === true &&
+  Number.isSafeInteger(message.reply_to_message?.message_id);
 if (!(/^\/(?:mika|tts|stt)(?:@\w+)?(?:\s|$)/i.test(text) ||
-      /^میکا(?:\s|$)/u.test(text))) {
+      /^میکا(?:\s|$)/u.test(text) || /^can i see you$/i.test(text) ||
+      replyOnly)) {
   throw new Error('Unsupported relay command');
 }
 if (/^\/mika(?:@\w+)?(?:\s|$)/i.test(text)) {
   message.text = 'میکا ' + text.replace(/^\/mika(?:@\w+)?\s*/i, '');
+} else if (replyOnly && !/^can i see you$/i.test(text) &&
+           !/^میکا(?:\s|$)/u.test(text)) {
+  message.text = 'میکا ' + text;
 }
 return [{json: {message}}];
 """.strip()
@@ -59,7 +65,7 @@ def build(source: dict) -> dict:
     by_name = {node["name"]: node for node in nodes}
     rules = by_name["Switch1"]["parameters"]["rules"]["values"]
     for rule, expression in zip(rules, (
-        "/^میکا عکس$/u.test($json.message.text)",
+        "/^(?:میکا عکس|can i see you)$/iu.test($json.message.text)",
         "/^\\/tts(?:@\\w+)?(?:\\s|$)/i.test($json.message.text)",
         "/^\\/stt(?:@\\w+)?(?:\\s|$)/i.test($json.message.text)",
         "/^میکا(?:\\s|$)/u.test($json.message.text)",
@@ -81,6 +87,16 @@ def build(source: dict) -> dict:
     workflow["connections"]["Is AI Reply?"]["main"][1] = [
         {"node": "AI Agent", "type": "main", "index": 0}]
     by_name["AI Agent"]["parameters"]["text"] = "={{ $json.mika.aiPrompt }}"
+    lookup = by_name.get("Find AI Reply")
+    if lookup:
+        lookup["parameters"]["filters"]["conditions"][0]["keyName"] = "reply_key"
+    decide = by_name.get("Decide AI")
+    if decide:
+        decide["parameters"]["jsCode"] = decide["parameters"]["jsCode"].replace(
+            "const row = found ? matches[0].json : null;",
+            "const row = found ? matches[0].json : null;\n"
+            "if (original.message.relay_reply === true && !found) return [];",
+        )
     by_name["ElevenLabs2"]["parameters"]["text"] = (
         "={{ $json.message.reply_to_message?.text || "
         "$json.message.text.replace(/^\\/tts(?:@\\w+)?\\s*/i, '') }}")

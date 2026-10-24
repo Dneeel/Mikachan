@@ -336,7 +336,7 @@ class App:
         if not self.store.rate(m.from_user.id, "n8n_relay", 6):
             await m.reply("Too many audio or AI requests. Try again shortly.")
             return
-        reply = m.reply_to_message
+        reply = getattr(m, "reply_to_message", None)
         source: dict[str, object] | None = None
         if reply:
             source = {"message_id": reply.message_id,
@@ -359,6 +359,9 @@ class App:
         }
         if source:
             message["reply_to_message"] = source
+            if (reply and reply.from_user and reply.from_user.id == self.bot.id and
+                    not text.startswith("/") and not text.startswith("میکا")):
+                message["relay_reply"] = True
         try:
             await self.n8n_gateway.relay_telegram(message)
         except GatewayError as exc:
@@ -418,6 +421,15 @@ class App:
             return
         if (self.module_enabled("content", m.chat.id) and hasattr(self, "content_ui")
                 and await self.content_ui.reply(m)):
+            return
+        reply = getattr(m, "reply_to_message", None)
+        relay_reply = bool(reply and reply.from_user and
+                           reply.from_user.id == self.bot.id and
+                           getattr(self.settings, "mika_n8n_telegram_relay", False))
+        if (relay_reply and m.text and m.text.strip() and
+                not m.text.lstrip().startswith("/") and
+                self.module_enabled("utilities", m.chat.id)):
+            await self.relay_n8n_command(m, m.text.strip())
             return
         if (m.chat.type in {"group", "supergroup"} and
                 self.module_enabled("community", m.chat.id) and
@@ -504,7 +516,8 @@ class App:
             return
         if (self.settings.mika_n8n_telegram_relay and
                 self.module_enabled("utilities", m.chat.id) and
-                (text == "میکا" or text.startswith("میکا "))):
+                (text == "میکا" or text.startswith("میکا ") or
+                 text.casefold() == "can i see you")):
             await self.relay_n8n_command(m, text)
             return
         if hasattr(self, "community") and await self.community.search_reply(m):

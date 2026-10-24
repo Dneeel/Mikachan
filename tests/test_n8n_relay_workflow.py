@@ -98,3 +98,23 @@ async def test_relay_does_not_send_unauthorized_update_or_extra_user_fields():
     payload = app.n8n_gateway.relay_telegram.await_args.args[0]
     assert payload == {"message_id": 11, "text": "/mika hello",
                        "chat": {"id": 8}, "from": {"id": 7}, "mika_mode": "normal"}
+
+
+@pytest.mark.asyncio
+async def test_plain_reply_to_bot_is_marked_for_ai_row_verification():
+    app = App.__new__(App)
+    app.store = SimpleNamespace(rate=lambda *_args: True)
+    app.n8n_gateway = SimpleNamespace(relay_telegram=AsyncMock())
+    app.authorized = lambda *_args: True
+    app.bot = SimpleNamespace(id=999)
+    app.settings = SimpleNamespace(mommy_ids=set())
+    reply = SimpleNamespace(message_id=32, text="Earlier AI answer", caption=None,
+                            from_user=SimpleNamespace(id=999, first_name="Mikachan"),
+                            voice=None, audio=None)
+    message = SimpleNamespace(from_user=SimpleNamespace(id=7),
+                              chat=SimpleNamespace(id=8, type="private"),
+                              message_id=33, reply_to_message=reply, reply=AsyncMock())
+    await app.relay_n8n_command(message, "Please explain further")
+    payload = app.n8n_gateway.relay_telegram.await_args.args[0]
+    assert payload["relay_reply"] is True
+    assert payload["reply_to_message"]["message_id"] == 32
