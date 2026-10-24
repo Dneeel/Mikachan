@@ -14,7 +14,7 @@ resume_bootstrap=false
 
 usage() {
   cat <<'HELP'
-Usage: bootstrap.sh [--branch v2|v2-test|vN] [--commit FULL_40_CHAR_SHA]
+Usage: bootstrap.sh [--branch v2|v2.1|vN] [--commit FULL_40_CHAR_SHA]
                     [--config /private/bot.env] [--repo-url GIT_URL]
                     [--source CHECKOUT_DIR] [--list-versions]
 Without --branch, the installer asks you to choose a remote version.
@@ -42,11 +42,11 @@ while (($#)); do
 done
 
 valid_branch() {
-  [[ "$1" =~ ^v[1-9][0-9]*$ || "$1" == 'v2-test' ]]
+  [[ "$1" =~ ^v[1-9][0-9]*(\.[1-9][0-9]*)?$ ]]
 }
 
 if [[ -n "$selected_branch" ]] && ! valid_branch "$selected_branch"; then
-  echo 'Invalid version: only v1, v2, v3, ... and v2-test are supported.' >&2
+  echo 'Invalid version: use a numbered version such as v1, v2 or v2.1.' >&2
   exit 2
 fi
 if [[ -n "$selected_commit" && ! "$selected_commit" =~ ^[0-9a-f]{40}$ ]]; then
