@@ -1165,6 +1165,60 @@ class Manager:
                 raise
             return f"Updated {key}; previous configuration and database: {undo}"
 
+    def connect_n8n_relay(self, base_url: str, secret_file: Path) -> str:
+        """Connect the existing bot to an already provisioned private n8n relay.
+
+        Apply the five related settings together so an active bot is restarted
+        only once and can be rolled back as one configuration change.
+        """
+        from urllib.parse import urlsplit
+
+        parsed = urlsplit(base_url.strip())
+        if (parsed.scheme != "https" or not parsed.hostname or parsed.username or
+                parsed.password or parsed.path not in {"", "/"} or parsed.query or
+                parsed.fragment):
+            raise ManagerError("Use the n8n HTTPS origin, for example https://n8n.example.com")
+        if secret_file.is_symlink() or not secret_file.is_file():
+            raise ManagerError("The n8n relay secret file is missing or is a symlink")
+        info = secret_file.stat()
+        try:
+            bot_uid = pwd.getpwnam("mikachan").pw_uid
+        except KeyError as exc:
+            raise ManagerError("The Mikachan service user is missing") from exc
+        if info.st_uid != bot_uid or stat.S_IMODE(info.st_mode) != 0o600:
+            raise ManagerError("The relay secret must be owned by mikachan with mode 0600")
+        secret = secret_file.read_text(encoding="utf-8").strip()
+        if not 32 <= len(secret) <= 512 or "\n" in secret or "\r" in secret:
+            raise ManagerError("The relay secret is invalid")
+        with self._lock():
+            manifest = self._manifest()
+            self._ensure_consistent(manifest)
+            if not self.paths.env.is_file():
+                raise ManagerError("Complete bot Setup first")
+            values = _parse_env(self.paths.env)
+            values.update({"MIKA_N8N_BASE_URL": base_url.rstrip("/"),
+                           "MIKA_N8N_WEBHOOK_PATH": "/webhook/mikachan-relay",
+                           "MIKA_N8N_AUTH_REF": str(secret_file),
+                           "MIKA_N8N_ENABLED": "true",
+                           "MIKA_N8N_TELEGRAM_RELAY": "true",
+                           "MIKA_TTS_ENABLED": "false", "MIKA_STT_ENABLED": "false"})
+            self._validate_config(values, self.paths.current)
+            undo, was_active = self._stop_and_snapshot(reason="before n8n relay connection")
+            try:
+                _atomic(self.paths.env, _render_env(values), 0o640)
+                self._set_file_group(self.paths.env)
+                if was_active:
+                    self._systemctl("start")
+                if was_active and not self._healthy():
+                    raise ManagerError("Bot service did not stay active after n8n relay connection")
+            except BaseException:
+                self._systemctl("stop", check=False)
+                self._restore_snapshot(undo)
+                if was_active:
+                    self._systemctl("start", check=False)
+                raise
+            return "n8n relay settings connected; verify /tts and /help in Telegram"
+
     def _sync_access(self, key: str, values: dict[str, str],
                      previous: dict[str, str] | None = None) -> None:
         database = self.paths.state / "mikachan.sqlite"
@@ -1467,6 +1521,10 @@ def _cli() -> None:
     diagnostics.add_argument("--live", action="store_true")
     setting = sub.add_parser("set")
     setting.add_argument("key")
+    relay = sub.add_parser("connect-n8n-relay")
+    relay.add_argument("url", help="HTTPS origin of the existing n8n instance")
+    relay.add_argument("--secret-file", type=Path,
+                       default=Path("/opt/Mikachan/config/n8n-relay.secret"))
     owner_approval = sub.add_parser("owner-approval")
     owner_approval.add_argument("action", choices=("list", "approve"))
     owner_approval.add_argument("token", nargs="?")
@@ -1542,6 +1600,8 @@ def _cli() -> None:
         elif args.command == "set":
             value = getpass.getpass("New value: ") if args.key in PRIVATE_KEYS else input("New value: ")
             result = manager.set_config(args.key, value)
+        elif args.command == "connect-n8n-relay":
+            result = manager.connect_n8n_relay(args.url, args.secret_file)
         elif args.command == "owner-approval":
             if args.action == "list":
                 result = manager.owner_approvals()

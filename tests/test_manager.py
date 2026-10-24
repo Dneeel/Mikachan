@@ -548,6 +548,32 @@ def test_code_install_then_setup_and_owner_change(
     assert len(manager.backups()) >= 2
 
 
+def test_connect_n8n_relay_is_atomic_and_keeps_secret_private(
+        deployment: tuple[FakeManager, Path, str], monkeypatch) -> None:
+    from types import SimpleNamespace
+    import deploy.manager as panel
+
+    manager, _, _ = deployment
+    manager.install()
+    manager.setup({"BOT_TOKEN": "12345:" + "x" * 30,
+                   "OWNER_TELEGRAM_ID": "42", "ALLOWED_TELEGRAM_IDS": "42",
+                   "ALLOWED_GROUP_IDS": ""})
+    secret = manager.paths.base / "config" / "n8n-relay.secret"
+    secret.write_text("a" * 64)
+    secret.chmod(0o600)
+    monkeypatch.setattr(panel.pwd, "getpwnam", lambda _: SimpleNamespace(pw_uid=os.getuid()))
+    manager.connect_n8n_relay("https://n8n.example.org", secret)
+    configured = _parse_env(manager.paths.env)
+    assert configured["MIKA_N8N_TELEGRAM_RELAY"] == "true"
+    assert configured["MIKA_N8N_AUTH_REF"] == str(secret)
+    assert "a" * 64 not in manager.paths.env.read_text()
+    before = manager.paths.env.read_text()
+    secret.chmod(0o644)
+    with pytest.raises(ManagerError, match="mode 0600"):
+        manager.connect_n8n_relay("https://n8n.example.org", secret)
+    assert manager.paths.env.read_text() == before
+
+
 def test_operator_changes_preserve_ui_registered_people_and_groups(deployment):
     manager, _, _ = deployment
     install(manager)

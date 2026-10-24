@@ -27,7 +27,19 @@ messages does not take over update delivery.
    its Header Auth endpoint rejected an unauthenticated request with HTTP 403.
    Verify that the production path is
    `/webhook/mikachan-relay` (not `/webhook-test/...`).
-4. In the Mikachan terminal manager, set `MIKA_N8N_ENABLED=true`,
+4. Once the same secret has been placed in the n8n Header Auth credential,
+   connect the already configured bot with one command:
+
+   `sudo mikachan connect-n8n-relay https://eneytenjoon.duckdns.org`
+
+   This verifies the private secret file and writes all relay settings as one
+   rollback-protected change. The secret file and bot configuration persist
+   across routine release updates. A new installation still requires one-time
+   n8n credential provisioning; the manager cannot safely create or replace
+   a credential in an independent n8n account without authorization to that
+   account. Do not paste the relay secret into chat or public logs.
+
+   Alternatively, in the Mikachan terminal manager, set `MIKA_N8N_ENABLED=true`,
    `MIKA_N8N_TELEGRAM_RELAY=true`, `MIKA_N8N_BASE_URL` to the n8n HTTPS origin,
    `MIKA_N8N_WEBHOOK_PATH=/webhook/mikachan-relay`, and `MIKA_N8N_AUTH_REF` to
    the secret file. Leave `MIKA_TTS_ENABLED` and `MIKA_STT_ENABLED` off in this
