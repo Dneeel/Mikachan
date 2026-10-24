@@ -135,8 +135,10 @@ def reconcile(origin: str, key_file: Path, artifact: Path, state_dir: Path) -> d
               for kind, ref in node.get("credentials", {}).items()}
     available = {(item.get("type"), item.get("name")):
                  item.get("id") for item in client.request("GET", "/credentials?limit=100").get("data", [])}
-    if any(pair not in available for pair in needed):
-        return {"status": "NOT_CONFIGURED", "reason": "Required n8n provider credential unavailable"}
+    missing = sorted(f"{kind}: {name}" for kind, name in needed if (kind, name) not in available)
+    if missing:
+        return {"status": "NOT_CONFIGURED",
+                "reason": "Create these n8n credentials, then retry: " + ", ".join(missing)}
     for node in desired["nodes"]:
         for kind, ref in node.get("credentials", {}).items():
             ref["id"] = available[(kind, ref["name"])]
