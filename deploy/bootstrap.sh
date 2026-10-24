@@ -14,7 +14,7 @@ resume_bootstrap=false
 
 usage() {
   cat <<'HELP'
-Usage: bootstrap.sh [--branch v2|v2.1|vN] [--commit FULL_40_CHAR_SHA]
+Usage: bootstrap.sh [--branch EXISTING_BRANCH] [--commit FULL_40_CHAR_SHA]
                     [--config /private/bot.env] [--repo-url GIT_URL]
                     [--source CHECKOUT_DIR] [--list-versions]
 Without --branch, the installer asks you to choose a remote version.
@@ -42,11 +42,11 @@ while (($#)); do
 done
 
 valid_branch() {
-  [[ "$1" =~ ^v[1-9][0-9]*(\.[1-9][0-9]*)?$ ]]
+  [[ -n "$1" && "$1" != -* ]] && git check-ref-format --branch "$1" >/dev/null 2>&1
 }
 
 if [[ -n "$selected_branch" ]] && ! valid_branch "$selected_branch"; then
-  echo 'Invalid version: use v1, v2, v2.1, v3, and other numbered releases.' >&2
+  echo 'Invalid Git branch name.' >&2
   exit 2
 fi
 if [[ -n "$selected_commit" && ! "$selected_commit" =~ ^[0-9a-f]{40}$ ]]; then
@@ -214,8 +214,8 @@ if ! command -v git >/dev/null 2>&1; then
 fi
 
 # Read the actual remote branches. No implicit 'latest' or default version.
-if ! remote_refs="$(git ls-remote --heads "$repo_url" 'refs/heads/v*')"; then
-  echo 'Could not query GitHub versions; installation cancelled.' >&2
+if ! remote_refs="$(git ls-remote --heads "$repo_url")"; then
+  echo 'Could not query GitHub branches; installation cancelled.' >&2
   exit 1
 fi
 versions=()
@@ -225,7 +225,7 @@ while read -r sha ref; do
   if valid_branch "$name"; then versions+=("$name"); fi
 done <<< "$remote_refs"
 if ((${#versions[@]} == 0)); then
-  echo 'No supported version branches found; installation cancelled.' >&2
+  echo 'No valid branches found; installation cancelled.' >&2
   exit 1
 fi
 mapfile -t versions < <(printf '%s\n' "${versions[@]}" | sort -Vu)
@@ -244,7 +244,7 @@ if [[ -n "$selected_branch" ]]; then
     exit 1
   fi
 else
-  printf '\nMikachan: choose a version to install (no automatic selection)\n' >/dev/tty
+  printf '\nMikachan: choose a branch to install (no automatic selection)\n' >/dev/tty
   for index in "${!versions[@]}"; do
     printf '  %d) %s\n' "$((index+1))" "${versions[index]}" >/dev/tty
   done

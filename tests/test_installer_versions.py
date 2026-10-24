@@ -38,6 +38,8 @@ if [ \"$1\" = ls-remote ]; then
     'ffffffffffffffffffffffffffffffffffffffff refs/heads/v2.1' \\
     'dddddddddddddddddddddddddddddddddddddddd refs/heads/v2-malicious' \\
     'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee refs/heads/main'
+elif [ \"$1\" = check-ref-format ]; then
+  exec /usr/bin/git \"$@\"
 else
   exit 99
 fi
@@ -50,12 +52,12 @@ def test_version_listing_is_remote_driven_and_read_only(fake_git: dict[str, str]
     run = subprocess.run(["bash", str(ROOT / "deploy/bootstrap.sh"), "--list-versions"],
                          env=fake_git, capture_output=True, text=True, check=False)
     assert run.returncode == 0, run.stderr
-    assert run.stdout.splitlines() == ["v1", "v2", "v2.1"]
+    assert run.stdout.splitlines() == ["main", "v1", "v2", "v2-malicious", "v2-test", "v2.1"]
 
 
 @pytest.mark.parametrize("args", [
-    ["--branch", "main"],
-    ["--branch", "v2-test-hijack"],
+    ["--branch", "../invalid"],
+    ["--branch", "-invalid"],
     ["--branch", "v2", "--commit", "short"],
     ["--commit", "a" * 40],
 ])
