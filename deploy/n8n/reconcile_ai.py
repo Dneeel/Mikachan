@@ -88,6 +88,37 @@ class Client:
         return result
 
 
+def _map_reply_table(client: Client, desired: dict[str, Any]) -> dict[str, str] | None:
+    """Create or map the one known reply ledger without adopting unrelated tables."""
+    nodes = [node for node in desired["nodes"] if node.get("type") == "n8n-nodes-base.dataTable"]
+    if not nodes:
+        return None
+    if any(node.get("parameters", {}).get("dataTableId", {}).get("cachedResultName") !=
+           "MikaAIReplies" for node in nodes):
+        return {"status": "BLOCKED_CONFLICT", "reason": "Unexpected n8n data table reference"}
+    rows = client.request("GET", "/data-tables?limit=100").get("data", [])
+    matches = [row for row in rows if row.get("name") == "MikaAIReplies"]
+    if len(matches) > 1:
+        return {"status": "BLOCKED_CONFLICT", "reason": "Duplicate AI reply tables"}
+    required = {"reply_key", "chat_id", "message_id", "session_id", "agent_type", "user_id"}
+    if matches:
+        table = client.request("GET", "/data-tables/" + str(matches[0]["id"]))
+    else:
+        table = client.request("POST", "/data-tables", {"name": "MikaAIReplies",
+            "columns": [{"name": name, "type": "string"} for name in sorted(required)]})
+    columns = {row.get("name") for row in table.get("columns", [])}
+    if not required <= columns:
+        return {"status": "NOT_CONFIGURED", "reason": "AI reply table columns need repair"}
+    table_id = str(table["id"])
+    for node in nodes:
+        ref = node["parameters"]["dataTableId"]
+        old_id = str(ref["value"])
+        ref["value"] = table_id
+        if isinstance(ref.get("cachedResultUrl"), str):
+            ref["cachedResultUrl"] = ref["cachedResultUrl"].replace(old_id, table_id)
+    return None
+
+
 def reconcile(origin: str, key_file: Path, artifact: Path, state_dir: Path) -> dict[str, str]:
     if not key_file.is_file():
         return {"status": "NOT_CONFIGURED", "reason": "n8n API credential unavailable"}
@@ -109,6 +140,9 @@ def reconcile(origin: str, key_file: Path, artifact: Path, state_dir: Path) -> d
     for node in desired["nodes"]:
         for kind, ref in node.get("credentials", {}).items():
             ref["id"] = available[(kind, ref["name"])]
+    table_problem = _map_reply_table(client, desired)
+    if table_problem:
+        return table_problem
     wanted = _fingerprint(desired)
     if current and _fingerprint(current) == wanted:
         _save(state_file, {"id": current["id"], "fingerprint": wanted,

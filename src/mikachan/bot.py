@@ -44,6 +44,7 @@ from .mikasub_core import MikaSubCore
 from .mikasub_ui import MikaSubUI
 from .instagram_relay import InstagramRelay
 from .external_utilities import ExternalUtilities
+from .explore import Explore
 from .content_ui import ContentUI, COMMANDS as CONTENT_COMMANDS
 from .n8n_gateway import GatewayError, N8NGateway
 from .intelligence import Intelligence
@@ -203,6 +204,7 @@ HELP_TEXT = (
     "👀 <b>PROFILES &amp; FOLLOWING</b>\n"
     "/instagram USER · /twitter USER · /tiktok USER · /youtube USER\n"
     "/follow PROFILE_URL · watch a profile\n"
+    "/explore #TOPIC · discover TikTok posts\n"
     "/following · manage and check follows\n\n"
     "🛠 <b>QUICK TOOLS</b>\n"
     "/weather CITY · forecast  |  /now · local time\n"
@@ -284,6 +286,7 @@ class App:
                                    self.store.access_registry)
         self.utilities = Utilities(self.bot, settings, self.store.db)
         self.external_utilities = ExternalUtilities(self.userbot, self.bot)
+        self.explore = Explore(self.bot)
         self.content_ui = ContentUI(self.store.db, self.bot,
                                     enabled=settings.mika_content_enabled,
                                     authorize=lambda user, chat: self.authorized(
@@ -486,7 +489,7 @@ class App:
                              text in {"هواشناسی", "اکنون", "امروز"})
             builtin = command_name in {
                 "help", "search", "music", "podcast", "pod", "book", "id", "twitter", "instagram",
-                "follow", "following",
+                "follow", "following", "explore",
                 "tiktok", "youtube", "settings", "queue", "status",
                 "fal", "poem", "quote", "pishi", "phishi", "earth", "art", "xotd", "wiki",
                 "dice", "nickname", "rules", "setrules",
@@ -609,7 +612,7 @@ class App:
             cmd = "/url"
         arg = arg.strip()
         downloader_commands = {"/search", "/music", "/podcast", "/pod", "/book"}
-        follow_commands = {"/follow", "/following", "/twitter", "/instagram",
+        follow_commands = {"/follow", "/following", "/explore", "/twitter", "/instagram",
                            "/tiktok", "/youtube"}
         utility_commands = {"/qr", "/scan", "/ocr", "/tr", "/pron", "/asr", "/style", "/mika",
                             "/tts", "/stt",
@@ -648,6 +651,10 @@ class App:
             return
         if cmd == "/mika":
             await m.reply("Mikachan AI is not connected to the owner's n8n workflow yet.")
+            return
+        if cmd == "/explore":
+            if self.store.rate(m.from_user.id, "explore", 5):
+                await self.explore.command(m, arg)
             return
         if hasattr(self, "audio_ui") and await self.audio_ui.command(m, cmd, arg):
             return
@@ -1340,6 +1347,14 @@ class App:
                         active_task.cancel()
             return
         if hasattr(self, "content_ui") and await self.content_ui.callback(q, data):
+            return
+        if data.startswith("ex:"):
+            if not self.module_enabled("follow", q.message.chat.id):
+                await acknowledge(q, "Explore is currently unavailable")
+            elif self.store.rate(q.from_user.id, "explore", 5):
+                await self.explore.callback(q)
+            else:
+                await acknowledge(q, "Explore limit reached")
             return
         if hasattr(self, "audio_ui") and await self.audio_ui.callback(q, data):
             return
@@ -2224,6 +2239,7 @@ class App:
                     ("tiktok", "TikTok link help"),
                     ("youtube", "YouTube link help"),
                     ("follow", "Follow a public profile"),
+                    ("explore", "Discover TikTok posts"),
                     ("following", "Manage followed profiles"),
                     ("settings", "Preferences"),
                     ("queue", "My jobs"),

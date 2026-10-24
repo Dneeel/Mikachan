@@ -41,12 +41,12 @@ def seed_sql() -> str:
                 raise ValueError(f"Missing {agent} style rule: {key}")
             body = sections[key]
             digest = hashlib.sha256(body.encode()).hexdigest()
-            values = (agent, key, body, digest, "bundled_default")
+            rule_values = (agent, key, body, digest, "bundled_default")
             lines.append("INSERT INTO mika_style_rules "
                          "(agent_type,rule_key,body,source_hash,provenance) VALUES (" +
-                         ",".join(map(_literal, values)) + ") ON CONFLICT DO NOTHING;")
+                         ",".join(map(_literal, rule_values)) + ") ON CONFLICT DO NOTHING;")
         for row in seeds[agent]["examples"]:
-            values = (row["id"], agent, row["category"], row["audience"],
+            example_values = (row["id"], agent, row["category"], row["audience"],
                       row["user_example"], row["assistant_example"],
                       hashlib.sha256((row["user_example"] + "\n" +
                           row["assistant_example"]).encode()).hexdigest(),
@@ -54,7 +54,7 @@ def seed_sql() -> str:
             lines.append("INSERT INTO mika_style_examples "
                          "(example_id,agent_type,category,audience,user_example,"
                          "assistant_example,source_hash,provenance) VALUES (" +
-                         ",".join(map(_literal, values)) + ") ON CONFLICT DO NOTHING;")
+                         ",".join(map(_literal, example_values)) + ") ON CONFLICT DO NOTHING;")
     lines.append("COMMIT;")
     return "\n".join(lines) + "\n"
 

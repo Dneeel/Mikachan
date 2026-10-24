@@ -462,3 +462,27 @@ def test_journal_has_no_secret_and_cold_backup_contains_key(manager):
     secret = manager.secrets.read_text().split("=", 1)[1].strip()
     assert secret not in json.dumps(state)
     assert state["preflight"]["mikachan_installed"]
+
+
+def test_ai_key_is_verified_before_private_save(manager, monkeypatch):
+    manager.install()
+    key_file = manager.root / "ai/api-key"
+    monkeypatch.setattr(manager, "_reconcile_ai", lambda: {"status": "ACTIVE"})
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return b'{"data":[]}'
+
+    monkeypatch.setattr(n8n.urllib.request, "urlopen", lambda *_args, **_kwargs: Response())
+    assert manager.connect_ai("a" * 40) == {"status": "ACTIVE"}
+    assert key_file.read_text().strip() == "a" * 40
+    assert key_file.stat().st_mode & 0o777 == 0o600
+    with pytest.raises(n8n.N8NError):
+        manager.connect_ai("short")
+    assert key_file.read_text().strip() == "a" * 40

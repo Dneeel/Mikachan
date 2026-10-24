@@ -836,10 +836,7 @@ class Manager:
         if (self.paths.base == Path("/opt/Mikachan") and key.is_file() and
                 script.is_file() and artifact.is_file() and state_file.is_file()):
             try:
-                n8n_state = json.loads(state_file.read_text(encoding="utf-8"))
-                origin = ("https://" + n8n_state["hostname"] if
-                          n8n_state.get("access") == "domain" else "http://127.0.0.1:5678")
-                result = self._run(sys.executable, str(script), "--origin", origin,
+                result = self._run(sys.executable, str(script), "--origin", "http://127.0.0.1:5678",
                     "--key-file", str(key), "--artifact", str(artifact),
                     "--state-dir", str(n8n_root / "ai"), check=False, timeout=90)
                 self.on_event("n8n AI reconciliation " +

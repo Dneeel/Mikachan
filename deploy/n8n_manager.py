@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import getpass
 import fcntl
 import ipaddress
 import json
@@ -790,9 +791,7 @@ class N8NManager:
         artifact = release / "mikachan_ai_workflow.json"
         if not (key.is_file() and script.is_file() and artifact.is_file()):
             return {"status": "NOT_CONFIGURED"}
-        state = self.state()
-        origin = ("https://" + state["hostname"] if state.get("access") == "domain"
-                  else "http://127.0.0.1:5678")
+        origin = "http://127.0.0.1:5678"
         result = self._run(sys.executable, str(script), "--origin", origin,
                            "--key-file", str(key), "--artifact", str(artifact),
                            "--state-dir", str(self.root / "ai"),
@@ -804,6 +803,24 @@ class N8NManager:
             return payload if isinstance(payload, dict) else {"status": "RECOVERABLE"}
         except json.JSONDecodeError:
             return {"status": "RECOVERABLE", "reason": "Invalid reconciliation result"}
+
+    def connect_ai(self, api_key: str) -> dict[str, str]:
+        """Verify a pasted owner API key locally, save it privately, then reconcile."""
+        self.require_owned()
+        key = api_key.strip()
+        if not 32 <= len(key) <= 4096 or any(ch.isspace() for ch in key):
+            raise N8NError("Enter a valid n8n API key from Settings → n8n API")
+        request = urllib.request.Request("http://127.0.0.1:5678/api/v1/workflows?limit=1",
+            headers={"X-N8N-API-KEY": key})
+        try:
+            with urllib.request.urlopen(request, timeout=8) as response:
+                payload = json.load(response)
+            if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+                raise N8NError("The n8n API did not accept this key")
+        except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+            raise N8NError("n8n API key could not be verified locally; existing key was kept") from exc
+        atomic(self.root / "ai/api-key", key + "\n", 0o600)
+        return self._reconcile_ai()
 
     def service(self, action: str) -> dict[str, Any]:
         self.require_owned()
@@ -1027,10 +1044,10 @@ def managed_menu(manager: N8NManager) -> None:
               "Start", "Stop", "Restart", "View logs", "Diagnostics",
               "Backup", "Restore backup", "Update pinned n8n version",
               "Remove service (keep data)", "Uninstall service and data",
-              "Change access method / domain", "Return"]
+              "Change access method / domain", "Connect Mikachan AI workflow", "Return"]
     while manager.owned():
         choice = _choose("n8n / independent management", labels)
-        if choice == 15:
+        if choice == 16:
             return
         if choice in {12, 13}:
             phrase = "REMOVE N8N SERVICE" if choice == 12 else "PURGE N8N DATA"
@@ -1055,6 +1072,10 @@ def managed_menu(manager: N8NManager) -> None:
                 print("The hostname's DNS A record must point to this server. "
                       f"Public IPv4: {public_ips().get('ipv4') or 'unavailable'}")
                 result = manager.change_access("domain", input("Full hostname: "))
+        elif choice == 15:
+            print("In n8n, open Settings → n8n API, create an API key, then paste it here. "
+                  "It stays in /opt/n8n/ai/api-key (mode 0600) and is never shown in logs.")
+            result = manager.connect_ai(getpass.getpass("n8n API key (hidden): "))
         elif choice == 1:
             result = manager.status()
         elif choice == 2:
@@ -1226,6 +1247,7 @@ def main() -> None:
     remove = commands.add_parser("remove")
     remove.add_argument("--purge", action="store_true")
     remove.add_argument("--confirm", default="")
+    commands.add_parser("ai-connect")
     args = parser.parse_args()
     manager = N8NManager()
     try:
@@ -1259,6 +1281,10 @@ def main() -> None:
             result = manager.restore(args.backup, args.confirm)
         elif args.command == "update":
             result = manager.update(args.version)
+        elif args.command == "ai-connect":
+            if not sys.stdin.isatty():
+                raise N8NError("Run ai-connect in an interactive terminal to protect the key")
+            result = manager.connect_ai(getpass.getpass("n8n API key (hidden): "))
         elif args.command == "access-set":
             result = manager.change_access(args.method, args.hostname)
         elif args.command == "remove":

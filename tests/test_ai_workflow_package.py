@@ -7,7 +7,7 @@ from pathlib import Path
 from deploy.n8n.ai_assets import core_prompt, style_seeds
 from deploy.n8n.build_ai_workflow import build
 from deploy.n8n.seed_ai_style import seed_sql
-from deploy.n8n.reconcile_ai import _fingerprint, reconcile
+from deploy.n8n.reconcile_ai import _fingerprint, _map_reply_table, reconcile
 
 
 ARTIFACT = Path(__file__).resolve().parents[1] / "deploy/n8n/mikachan_ai_workflow.json"
@@ -96,3 +96,20 @@ def test_reconcile_maps_credentials_before_comparing_existing_graph(tmp_path, mo
     monkeypatch.setattr("deploy.n8n.reconcile_ai.Client", FakeClient)
     result = reconcile("https://n8n.example.org", key_file, artifact, tmp_path / "state")
     assert result == {"status": "ACTIVE", "workflow_id": "existing"}
+
+
+def test_reply_table_is_created_and_remapped_on_new_instance():
+    graph = {"nodes": [{"type": "n8n-nodes-base.dataTable", "parameters": {
+        "dataTableId": {"value": "old", "cachedResultName": "MikaAIReplies",
+                        "cachedResultUrl": "/data/old"}}}]}
+
+    class Client:
+        def request(self, method, path, body=None):
+            if method == "GET":
+                return {"data": []}
+            assert method == "POST" and path == "/data-tables"
+            return {"id": "new", "columns": body["columns"]}
+
+    assert _map_reply_table(Client(), graph) is None
+    ref = graph["nodes"][0]["parameters"]["dataTableId"]
+    assert ref["value"] == "new" and ref["cachedResultUrl"] == "/data/new"
