@@ -4,6 +4,7 @@ import asyncio
 import html
 import json
 import os
+import re
 import secrets
 import shutil
 import time
@@ -374,8 +375,11 @@ class App:
                                     "file_size": media.file_size or 0}
         message: dict[str, object] = {
             "message_id": m.message_id, "text": text[:3000],
-            "chat": {"id": m.chat.id},
+            "chat": {"id": m.chat.id, "type": m.chat.type},
             "from": {"id": m.from_user.id},
+            "verified_daniel": bool(m.from_user.id == self.settings.owner_telegram_id),
+            "adult_verified": False,
+            "mommy_enabled": False,
             "mika_mode": "mommy" if m.from_user.id in getattr(
                 getattr(self, "settings", None), "mommy_ids", set()) else "normal",
         }
@@ -384,6 +388,8 @@ class App:
             if (reply and reply.from_user and reply.from_user.id == self.bot.id and
                     not text.startswith("/") and not text.startswith("میکا")):
                 message["relay_reply"] = True
+        if getattr(m, "message_thread_id", None):
+            message["message_thread_id"] = m.message_thread_id
         try:
             await self.n8n_gateway.relay_telegram(message)
         except GatewayError as exc:
@@ -539,6 +545,7 @@ class App:
         if (self.settings.mika_n8n_telegram_relay and
                 self.module_enabled("utilities", m.chat.id) and
                 (text == "میکا" or text.startswith("میکا ") or
+                 re.match(r"^mika(?:\s|$)", text, re.I) or
                  text.casefold() == "can i see you")):
             await self.relay_n8n_command(m, text)
             return

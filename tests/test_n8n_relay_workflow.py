@@ -87,6 +87,7 @@ async def test_relay_does_not_send_unauthorized_update_or_extra_user_fields():
     app = App.__new__(App)
     app.store = SimpleNamespace(rate=lambda *_args: True)
     app.n8n_gateway = SimpleNamespace(relay_telegram=AsyncMock())
+    app.settings = SimpleNamespace(owner_telegram_id=7, mommy_ids=set())
     app.authorized = lambda user, _chat, _type: user == 7
     actor = SimpleNamespace(id=8, first_name="Owner", username="private_name")
     message = SimpleNamespace(from_user=actor, chat=SimpleNamespace(id=8, type="private"),
@@ -97,7 +98,9 @@ async def test_relay_does_not_send_unauthorized_update_or_extra_user_fields():
     await app.relay_n8n_command(message, "/mika hello")
     payload = app.n8n_gateway.relay_telegram.await_args.args[0]
     assert payload == {"message_id": 11, "text": "/mika hello",
-                       "chat": {"id": 8}, "from": {"id": 7}, "mika_mode": "normal"}
+                       "chat": {"id": 8, "type": "private"}, "from": {"id": 7},
+                       "verified_daniel": True, "adult_verified": False,
+                       "mommy_enabled": False, "mika_mode": "normal"}
 
 
 @pytest.mark.asyncio
@@ -107,7 +110,7 @@ async def test_plain_reply_to_bot_is_marked_for_ai_row_verification():
     app.n8n_gateway = SimpleNamespace(relay_telegram=AsyncMock())
     app.authorized = lambda *_args: True
     app.bot = SimpleNamespace(id=999)
-    app.settings = SimpleNamespace(mommy_ids=set())
+    app.settings = SimpleNamespace(owner_telegram_id=7, mommy_ids=set())
     reply = SimpleNamespace(message_id=32, text="Earlier AI answer", caption=None,
                             from_user=SimpleNamespace(id=999, first_name="Mikachan"),
                             voice=None, audio=None)
