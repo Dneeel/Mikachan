@@ -192,27 +192,49 @@ def public_media_result(hit: dict[str, object]) -> bool:
 
 
 HELP_TEXT = (
-    "◈ <b>Mikachan</b>\nChoose a command. Eligible links always ask before downloading.\n\n"
-    "⬇️ <b>Media</b>\n"
-    "/search · /music · /podcast · /book · /twitter\n"
-    "/follow · /following · /queue\n\n"
-    "👥 <b>Community</b>\n"
-    "/fal · /poem · /quote · /dice\n"
-    "/pishi · /earth · /art · /xotd · /wiki\n"
-    "Groups: /rules · /notes · /setnote · /groupstats · /groupsettings · /id (reply)\n\n"
-    "🛠 <b>Utilities</b>\n"
-    "/qr · /scan · /ocr (reply to an image) · /url or /link (reply to a file)\n"
-    "/weather CITY · /now [CITY]\n"
-    "/st · /xst (reply to an image or sticker)\n"
-    "/nasa · /tr LANGUAGE TEXT · /pron WORD · /asr (reply to audio)\n"
-    "/tts · /stt (when the owner's n8n audio workflow is connected)\n"
-    "/style TEXT · /mika TEXT (n8n AI)\n\n"
-    "💱 Toman quotes: send exactly دلار, سکه, طلا, تتر or ارز.\n"
-    "🛡 Proxies: /proxy or پروکسی (requires user account login).\n"
-    "🏴‍☠️ MikaSub and private subscription converter: /vpn. Configs are untested.\n"
-    "فارسی: عکس به استیکر · استیکر به عکس\n"
-    "For file tools, reply to the file with a command."
+    "✦ <b>MIKACHAN</b>\n"
+    "Your private toolkit. Choose a task below.\n\n"
+    "⬇️ <b>DOWNLOAD &amp; DISCOVER</b>\n"
+    "Send a supported link → choose <b>Yes</b> or <b>No</b>.\n"
+    "/search QUERY · find media\n"
+    "/music QUERY · songs  |  /podcast QUERY · shows\n"
+    "/book TITLE · local books  |  /queue · download status\n\n"
+    "👀 <b>PROFILES &amp; FOLLOWING</b>\n"
+    "/instagram USER · /twitter USER · /tiktok USER · /youtube USER\n"
+    "/follow PROFILE_URL · watch a profile\n"
+    "/following · manage and check follows\n\n"
+    "🛠 <b>QUICK TOOLS</b>\n"
+    "/weather CITY · forecast  |  /now · local time\n"
+    "/nasa · astronomy picture  |  /qr TEXT · QR code\n"
+    "Reply to a file or image: /url · /scan · /ocr · /st · /xst\n"
+    "/tr fa TEXT · translate  |  /asr · transcribe replied audio\n\n"
+    "🎭 <b>CULTURE &amp; MORE</b>\n"
+    "/fal · Hafez  |  /poem · poetry  |  /dice · roll\n"
+    "/pishi · cats  |  /earth · nature  |  /art · art\n"
+    "/proxy · proxies  |  /vpn · subscriptions\n"
+    "Send <b>دلار</b>, <b>سکه</b> or <b>طلا</b> for Toman quotes.\n"
 )
+
+
+def help_text(*, relay_enabled: bool, group: bool, closing: str) -> str:
+    sections = [HELP_TEXT]
+    if relay_enabled:
+        sections.append(
+            "\n🗣 <b>MIKACHAN AI</b>\n"
+            "/mika QUESTION or <b>میکا QUESTION</b>\n"
+            "Reply to an AI answer to continue the conversation.\n"
+            "/tts TEXT · speech  |  /stt · reply to audio\n"
+        )
+    if group:
+        sections.append(
+            "\n👥 <b>IN GROUPS</b>\n"
+            "/rules · /notes · /groupstats\n"
+            "Reply to a member with /id for their profile.\n"
+            "Admins: /groupsettings · /setnote · /mute · /del\n"
+        )
+    sections.append("\n⚙️ /settings · preferences  |  /status · bot status\n"
+                    "<i>" + html.escape(closing) + "</i>")
+    return "".join(sections)
 
 
 class App:
@@ -694,10 +716,10 @@ class App:
         if cmd == "/help":
             personality_mode = (mode_for(m.from_user.id, self.store.allowlist(), self.settings.mommy_ids)
                     if m.chat.type == "private" else Mode.NORMAL)
-            extra_help = ("\n\n🛡 Group admins: /notes · /setnote · /setrules · "
-                          "/delrules · /nickname · /del · /mute · /modlog"
-                          if m.chat.type in {"group", "supergroup"} else "")
-            await m.reply(HELP_TEXT + extra_help + "\n\n" + response("ready", personality_mode))
+            await m.reply(help_text(
+                relay_enabled=self.settings.mika_n8n_telegram_relay,
+                group=m.chat.type in {"group", "supergroup"},
+                closing=response("ready", personality_mode)))
         elif cmd == "/follow":
             target = command_target(arg)
             if target is None:
