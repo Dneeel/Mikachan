@@ -1,6 +1,9 @@
 """TikTok discovery validates provider data and preserves button ownership."""
 
+from datetime import datetime, timezone
+
 import pytest
+from aiogram.types import Chat, Message
 
 from mikachan.explore import Explore, _post, topic_from_arg
 
@@ -47,8 +50,8 @@ async def test_topic_and_one_more_keep_subject_and_send_new_message(monkeypatch)
     class Query:
         data = f"ex:{token}:more"
         from_user = type("User", (), {"id": 42})()
-        message = type("Message", (), {"message_id": 1,
-            "chat": type("Chat", (), {"id": -100})()})()
+        message = Message(message_id=1, date=datetime.now(timezone.utc),
+                          chat=Chat(id=-100, type="supergroup"))
 
         async def answer(self, *_args):
             pass
