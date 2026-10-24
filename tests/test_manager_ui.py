@@ -64,6 +64,16 @@ def test_top_level_arrow_enter_and_back_navigation():
     assert ui.page.title == "SERVICES"
 
 
+def test_setup_offers_userbot_qr_and_integrations_can_reopen_it():
+    ui = MikachanMenu(FakeManager)
+    ui.events.put(("done", ("setup", "configured", FakeManager().status())))
+    assert ui.drain_events()
+    assert ui.page.title == "USERBOT LOGIN"
+    assert ui.page.entries[0].action == "external:userbot"
+    integrations = MikachanMenu.submenu("integrations")
+    assert any(entry.action == "external:userbot" for entry in integrations.entries)
+
+
 def test_confirmation_cannot_run_without_exact_phrase(tmp_path, monkeypatch):
     import deploy.manager_ui as panel
 

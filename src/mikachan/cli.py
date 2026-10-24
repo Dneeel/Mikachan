@@ -28,6 +28,26 @@ def _save_managed_userbot_session(
     return True
 
 
+def _managed_api_credentials(root: Path = Path("/opt/Mikachan")) -> tuple[int, str] | None:
+    """Reuse API credentials already entered during Setup without displaying them."""
+    current = root / "current"
+    if (os.geteuid() != 0 or not (root / ".managed-by-mikachan").is_file()
+            or not current.is_dir() or Path.cwd().resolve() != current.resolve()
+            or not (current / "deploy/manager.py").is_file()):
+        return None
+    sys.path.insert(0, str(current))
+    try:
+        from deploy.manager import Manager, _parse_env
+
+        values = _parse_env(Manager().paths.env)
+        api_id, api_hash = values.get("TELEGRAM_API_ID", ""), values.get("TELEGRAM_API_HASH", "")
+        if api_id.isdigit() and api_hash:
+            return int(api_id), api_hash
+    finally:
+        sys.path.pop(0)
+    return None
+
+
 async def _login_with_qr(client: object, output: TextIO) -> None:
     """Authorize a real Telegram account with a short-lived terminal QR code."""
     import qrcode
@@ -68,8 +88,13 @@ def main() -> None:
         from telethon.sessions import StringSession  # type: ignore[import-untyped]
 
         async def login() -> None:
-            api_id = int(input("Telegram app API ID: ").strip())
-            api_hash = getpass.getpass("Telegram app API hash: ").strip()
+            configured = _managed_api_credentials()
+            if configured:
+                api_id, api_hash = configured
+                print("Using Telegram API credentials already saved in Setup.")
+            else:
+                api_id = int(input("Telegram app API ID: ").strip())
+                api_hash = getpass.getpass("Telegram app API hash: ").strip()
             client = TelegramClient(StringSession(), api_id, api_hash)
             try:
                 await _login_with_qr(client, sys.stdout)

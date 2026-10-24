@@ -221,6 +221,7 @@ class MikachanMenu:
             "integrations": ("INTEGRATIONS", [
                 ("Independent n8n installer / manager", "external:n8n"),
                 ("Userbot readiness", "op:userbot"),
+                ("Scan Telegram userbot login QR", "external:userbot"),
                 ("Telegram user account settings", "category:Telegram Userbot"),
                 ("Translation & data providers", "category:Translation & Data"),
                 ("Music provider settings", "category:Music"),
@@ -548,6 +549,9 @@ class MikachanMenu:
         elif cmd == "external:n8n":
             self.external_request = "n8n"
             self.running = False
+        elif cmd == "external:userbot":
+            self.external_request = "userbot"
+            self.running = False
         elif cmd == "n8n:remove-choice":
             self.push(Page("n8n IS INDEPENDENT", [
                 Entry("Remove n8n service; preserve workflows, key and backups",
@@ -811,6 +815,12 @@ class MikachanMenu:
                     continue
                 if action == "config" and isinstance(result, dict):
                     self.state["config"] = result
+                if action == "setup":
+                    self.push(Page("USERBOT LOGIN", [
+                        Entry("Scan QR now (Telegram → Settings → Devices)", "external:userbot"),
+                        Entry("Later", "back"),
+                    ]))
+                    continue
                 if action == "versions" and isinstance(result, list):
                     entries = [Entry(f"{item['branch']}   {item['commit'][:12]}", "branch", item)
                                for item in result if isinstance(item, dict)
@@ -1053,8 +1063,17 @@ def main() -> None:
             curses.wrapper(menu.run)
         except curses.error as exc:
             raise SystemExit(f"Unsupported terminal capability: {exc}") from exc
-        if menu.external_request != "n8n":
+        if menu.external_request not in {"n8n", "userbot"}:
             break
+        if menu.external_request == "userbot":
+            release = Path("/opt/Mikachan/current")
+            executable = release / ".venv/bin/mikachan"
+            if not executable.is_file() or release.is_symlink() and not release.resolve().is_dir():
+                print("Install and set up a Mikachan release before userbot QR login.")
+            else:
+                subprocess.run([str(executable), "userbot-login"], cwd=release, check=False)
+            input("Press Enter to return to Mikachan…")
+            continue
         installed = trusted_n8n_manager()
         release = Path("/opt/Mikachan/current/deploy/n8n_manager.py")
         source = installed or release
