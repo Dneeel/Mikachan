@@ -148,7 +148,7 @@ class ExternalUtilities:
                                             time.time() + 600, actions)
 
     async def command(self, message: Message, cmd: str, arg: str) -> bool:
-        if cmd not in {"/ocr", "/tr", "/pron", "/asr", "/style", "/ai"}:
+        if cmd not in {"/ocr", "/tr", "/pron", "/asr", "/style"}:
             return False
         try:
             bridge = self._require()
@@ -185,13 +185,13 @@ class ExternalUtilities:
                 if not _WORD.fullmatch(arg.strip()):
                     raise ValueError("Use /pron ENGLISH_WORD")
                 command = f"/pron {arg.strip()}"
-            elif cmd in {"/style", "/ai"}:
+            elif cmd == "/style":
                 if not 1 <= len(arg.strip()) <= 2500:
                     raise ValueError(f"Use {cmd} TEXT (1–2500 characters)")
                 command = f"{cmd} {arg.strip()}"
             try:
                 results = await bridge.external_request(kind, command, staged_id=staged,
-                    reply_text=reply_text, timeout=130 if cmd in {"/asr", "/ai"} else 65,
+                    reply_text=reply_text, timeout=130 if cmd == "/asr" else 65,
                     media_data=media_data, media_name=media_name)
             finally:
                 if staged is not None:

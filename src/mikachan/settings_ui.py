@@ -13,6 +13,7 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from .access import AccessRegistry
+from .intelligence import Intelligence
 from .now_service import NowService
 
 
@@ -32,6 +33,7 @@ class SettingsUI:
         self.content_ui = content_ui
         self.n8n_gateway = n8n_gateway
         self.audio_ui = audio_ui
+        self.intelligence: Intelligence | None = None
         self.broadcast_tasks: dict[str, asyncio.Task[None]] = {}
         db.executescript("""
         CREATE TABLE IF NOT EXISTS settings_sessions (
@@ -89,6 +91,8 @@ class SettingsUI:
                 sections.append([button("🔑 Content APIs", "sourceapis")])
             if self.n8n_gateway is not None:
                 sections.append([button("🎙 AI & Audio", "ai_audio")])
+            if self.intelligence is not None:
+                sections.append([button("🕵️ Intelligence Desk", "intel")])
             sections += [
                 [button("📝 Global Message Studio", "messages")],
                 [button("🎭 Personality & Identity", "identity")],
@@ -364,6 +368,9 @@ class SettingsUI:
             return True
         if action == "mikasub" and owner and self.mikasub is not None:
             await self.mikasub.open_owner(q, token)
+            return True
+        if action == "intel" and owner and self.intelligence is not None:
+            await self.intelligence.open(q)
             return True
         if action.startswith("sourcekey_set:") and owner and self.content_ui is not None:
             provider = action.split(":", 1)[1]

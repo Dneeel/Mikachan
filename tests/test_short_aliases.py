@@ -14,7 +14,7 @@ async def test_plain_reply_aliases_use_existing_id_and_link_actions(tmp_path):
     app.authorized = lambda *_args: True
     app.module_enabled = lambda *_args: True
     app.group_status = SimpleNamespace(observe=lambda _message: None,
-                                       show_identity=AsyncMock())
+                                       show_identity=AsyncMock(), reply=AsyncMock(return_value=False))
     app.community = SimpleNamespace(content=SimpleNamespace(pending_message=AsyncMock(
         return_value=False)))
     app.command = AsyncMock()

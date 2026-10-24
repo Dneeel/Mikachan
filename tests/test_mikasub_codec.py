@@ -89,8 +89,8 @@ def test_large_mixed_collection_and_limits():
                      for i in range(4001)).encode()
     parsed = parse_subscription(data)
     assert len(parsed.nodes) == 4001 and parsed.duplicates == 0
-    with pytest.raises(ValueError, match="5,000"):
-        parse_subscription("\n".join("trojan://u@h.example:443#x" for _ in range(5001)).encode())
+    with pytest.raises(ValueError, match="10,000"):
+        parse_subscription("\n".join("trojan://u@h.example:443#x" for _ in range(10001)).encode())
 
 
 def test_html_is_offline_injection_safe_and_qr_is_on_demand():

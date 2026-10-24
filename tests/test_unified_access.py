@@ -170,14 +170,15 @@ async def test_reply_id_uses_authentic_sender_and_group_scoped_observations(tmp_
         msg = message(chat_id, mid, text="hello", sender=2)
         msg.from_user = person
         assert stats.observe(msg)
-    reply = AsyncMock()
+    reply = AsyncMock(return_value=SimpleNamespace(message_id=99))
     command = SimpleNamespace(chat=SimpleNamespace(id=-100, type="supergroup"),
+        from_user=SimpleNamespace(id=1),
         reply_to_message=SimpleNamespace(from_user=person,
             forward_origin=SimpleNamespace(sender_user=SimpleNamespace(id=999))),
         reply=reply)
     await stats.show_identity(command)
     body = reply.await_args.args[0]
-    assert "<code>2</code>" in body and "Recent observed messages here · 2" in body
+    assert "<code>2</code>" in body and "Messages today | 2" in body
     assert "999" not in body and "&lt;A&gt;" in body
 
 

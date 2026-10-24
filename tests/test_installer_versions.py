@@ -35,6 +35,7 @@ if [ \"$1\" = ls-remote ]; then
     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa refs/heads/v2-test' \\
     'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb refs/heads/v1' \\
     'cccccccccccccccccccccccccccccccccccccccc refs/heads/v2' \\
+    'ffffffffffffffffffffffffffffffffffffffff refs/heads/v2.1' \\
     'dddddddddddddddddddddddddddddddddddddddd refs/heads/v2-malicious' \\
     'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee refs/heads/main'
 else
@@ -49,7 +50,7 @@ def test_version_listing_is_remote_driven_and_read_only(fake_git: dict[str, str]
     run = subprocess.run(["bash", str(ROOT / "deploy/bootstrap.sh"), "--list-versions"],
                          env=fake_git, capture_output=True, text=True, check=False)
     assert run.returncode == 0, run.stderr
-    assert run.stdout.splitlines() == ["v1", "v2", "v2-test"]
+    assert run.stdout.splitlines() == ["v1", "v2", "v2.1"]
 
 
 @pytest.mark.parametrize("args", [
@@ -66,8 +67,9 @@ def test_bad_options_abort_before_install(args: list[str]) -> None:
 
 
 def test_manager_accepts_only_explicit_supported_branches() -> None:
-    assert BRANCH.fullmatch("v2-test")
+    assert BRANCH.fullmatch("v2-test")  # legacy pinned releases remain installable explicitly
     assert BRANCH.fullmatch("v2")
+    assert BRANCH.fullmatch("v2.1")
     assert not BRANCH.fullmatch("v2-hijack")
     assert not BRANCH.fullmatch("main")
 
@@ -92,7 +94,7 @@ class _MenuManager:
 
 def test_tui_install_menu_chooses_version_instead_of_defaulting() -> None:
     menu = MikachanMenu(manager_factory=_MenuManager)
-    menu._choose_branch({"branch": "v2-test", "commit": "a" * 40})
+    menu._choose_branch({"branch": "v2.1", "commit": "a" * 40})
     entries = menu.page.entries
-    assert entries[0] == Entry("Install v2-test@aaaaaaaaaaaa", "confirm:install", "v2-test")
-    assert "v2-test" in menu.page.title
+    assert entries[0] == Entry("Install v2.1@aaaaaaaaaaaa", "confirm:install", "v2.1")
+    assert "v2.1" in menu.page.title

@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     mikasub_admin_token: str = ""
     mikasub_public_url: str = ""
     mika_n8n_enabled: bool = False
+    mika_n8n_telegram_relay: bool = False
     mika_n8n_base_url: str = ""
     mika_n8n_webhook_path: str = ""
     mika_n8n_auth_ref: str = ""
@@ -117,6 +118,8 @@ class Settings(BaseSettings):
                 raise ValueError("n8n requires a private auth file reference")
         if (self.mika_tts_enabled or self.mika_stt_enabled) and not self.mika_n8n_enabled:
             raise ValueError("TTS and STT require a configured n8n gateway")
+        if self.mika_n8n_telegram_relay and not self.mika_n8n_enabled:
+            raise ValueError("n8n Telegram relay requires a configured n8n gateway")
         if not 1 <= self.mika_ai_global_concurrency <= 4 or not 2 <= self.mika_n8n_webhook_timeout_s <= 30:
             raise ValueError("AI concurrency or webhook timeout is outside the safe range")
         if not 1 <= self.mika_n8n_job_status_poll_s <= 30:

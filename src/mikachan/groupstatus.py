@@ -63,6 +63,7 @@ def window(kind: str, instant: datetime, year: int | None = None) -> tuple[float
 class GroupStatus:
     def __init__(self, db: sqlite3.Connection, access: AccessRegistry):
         self.db, self.access = db, access
+        self.identity_edits: dict[int, tuple[int, float]] = {}
         db.executescript("""
         CREATE TABLE IF NOT EXISTS observed_group_messages (
           chat_id INTEGER NOT NULL, message_id INTEGER NOT NULL, observed REAL NOT NULL,
@@ -86,6 +87,18 @@ class GroupStatus:
         CREATE TABLE IF NOT EXISTS group_status_menus (
           token TEXT PRIMARY KEY, user_id INTEGER NOT NULL, chat_id INTEGER NOT NULL,
           message_id INTEGER, expires REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS group_identity_menus (
+          token TEXT PRIMARY KEY, actor_id INTEGER NOT NULL, chat_id INTEGER NOT NULL,
+          message_id INTEGER, target_id INTEGER NOT NULL, real_name TEXT NOT NULL,
+          username TEXT NOT NULL, expires REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS intel_profiles (
+          user_id INTEGER PRIMARY KEY, official_first TEXT NOT NULL DEFAULT '',
+          official_last TEXT NOT NULL DEFAULT '', friendly TEXT NOT NULL DEFAULT '',
+          birthday TEXT NOT NULL DEFAULT '', birthplace TEXT NOT NULL DEFAULT '',
+          residence TEXT NOT NULL DEFAULT '');
+        CREATE TABLE IF NOT EXISTS group_nicknames (
+          chat_id INTEGER NOT NULL, user_id INTEGER NOT NULL, nickname TEXT NOT NULL,
+          PRIMARY KEY(chat_id,user_id));
         """)
         columns = {str(row[1]) for row in db.execute("PRAGMA table_info(observed_group_messages)")}
         if "user_id" not in columns:
@@ -105,34 +118,134 @@ class GroupStatus:
             row = None
         return row is None or row[0] == "1"
 
+    async def reply(self, m: Message) -> bool:
+        if not m.from_user or m.from_user.id not in self.identity_edits or \
+                m.chat.type != "private" or self.access.role(m.from_user.id) != "OWNER":
+            return False
+        target, expires = self.identity_edits[m.from_user.id]
+        if expires < time.time():
+            self.identity_edits.pop(m.from_user.id, None)
+            return False
+        if not m.text or m.text.startswith("/"):
+            return False
+        field, sep, value = m.text.partition("=")
+        allowed = {"official_first", "official_last", "friendly", "birthday",
+                   "birthplace", "residence"}
+        if not sep or field.strip() not in allowed or len(value.strip()) > 100:
+            await m.reply("Use FIELD=VALUE. Allowed fields: " + ", ".join(sorted(allowed)))
+            return True
+        field = field.strip()
+        self.db.execute("INSERT OR IGNORE INTO intel_profiles(user_id) VALUES (?)", (target,))
+        self.db.execute(f"UPDATE intel_profiles SET {field}=? WHERE user_id=?",
+                        (value.strip(), target))
+        self.identity_edits.pop(m.from_user.id, None)
+        await m.reply("✅ Identity field saved. Reopen /id in the group to view it.")
+        return True
+
     async def show_identity(self, m: Message) -> None:
         """Only report authenticated Telegram fields and messages actually observed here."""
-        if m.chat.type not in {"group", "supergroup"} or not m.reply_to_message:
+        if m.chat.type not in {"group", "supergroup"} or not m.reply_to_message or \
+                not m.from_user:
             await m.reply("Reply to a group member's message with /id or آیدی.")
             return
         person = m.reply_to_message.from_user
         if person is None:
             await m.reply("This message has no identifiable Telegram user.")
             return
-        count = int(self.db.execute("SELECT COUNT(*) FROM observed_group_messages "
-                                    "WHERE chat_id=? AND user_id=?", (m.chat.id, person.id)
-                                    ).fetchone()[0])
-        known = self.db.execute("SELECT last_observed FROM known_group_members "
-                                "WHERE chat_id=? AND user_id=?", (m.chat.id, person.id)).fetchone()
-        name = html.escape(str(getattr(person, "full_name", "") or "Unknown")[:80])
-        username = str(getattr(person, "username", "") or "")
-        role = (self.access.role(person.id) or "Authorized") if self.access.can_access(
-            person.id, m.chat.id, m.chat.type) else "Not authorized"
-        lines = ["👤 <b>Group member</b>", f"Name · {name}",
-                 f"Telegram ID · <code>{person.id}</code>",
-                 f"Username · {'@' + html.escape(username) if username else 'Not set'}",
-                 f"Mikachan access · {html.escape(role)}",
-                 f"Recent observed messages here · {count}"]
-        if known:
-            lines.append("Last observed here · " + time.strftime(
-                "%Y-%m-%d %H:%M UTC", time.gmtime(float(known[0]))))
-        lines.append("Counts cover retained observations in this group; older rollups are not per-user.")
-        await m.reply("\n".join(lines))
+        token = secrets.token_urlsafe(8)
+        name = str(getattr(person, "full_name", "") or "Unknown")[:80]
+        username = str(getattr(person, "username", "") or "")[:80]
+        self.db.execute("INSERT INTO group_identity_menus VALUES (?,?,?,?,?,?,?,?)",
+                        (token, m.from_user.id, m.chat.id, None, person.id, name,
+                         username, time.time() + 900))
+        body, buttons = self.identity_screen(token, m.chat.id, person.id, name,
+                                             username, "summary", m.from_user.id)
+        sent = await m.reply(body, reply_markup=buttons)
+        self.db.execute("UPDATE group_identity_menus SET message_id=? WHERE token=?",
+                        (sent.message_id, token))
+
+    def identity_screen(self, token: str, chat: int, user: int, name: str,
+                        username: str, page: str, actor: int) -> tuple[str, InlineKeyboardMarkup]:
+        def controls(items: list[tuple[str, str]]) -> InlineKeyboardMarkup:
+            return InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text=label, callback_data=f"gi:{token}:{action}")]
+                for label, action in items])
+        nick = self.db.execute("SELECT nickname FROM group_nicknames WHERE chat_id=? AND user_id=?",
+                               (chat, user)).fetchone()
+        profile = self.db.execute("SELECT * FROM intel_profiles WHERE user_id=?", (user,)).fetchone()
+        role = (self.access.role(user) or "Authorized") if self.access.can_access(
+            user, chat, "supergroup") else "Not authorized"
+        now = datetime.now(timezone.utc)
+        day, _ = window("day", now)
+        count = self.db.execute("SELECT COUNT(*) FROM observed_group_messages WHERE "
+                                "chat_id=? AND user_id=? AND observed>=?",
+                                (chat, user, day)).fetchone()[0]
+        if page == "summary":
+            body = ("🔮 <b>Summary</b>\n\n"
+                f"👤 Real name | {html.escape(name)}\n"
+                f"👤 Nickname | {html.escape(nick[0]) if nick else 'Not set'}\n"
+                f"🔗 Username | {'@' + html.escape(username) if username else 'Not set'}\n"
+                f"🆔 Numeric | <code>{user}</code>\n"
+                f"🛡️ Access | {html.escape(role)}\n"
+                f"💬 Messages today | {count}")
+            buttons = [("🗃 Details", "details")]
+            if self.access.can_manage(actor, chat):
+                buttons.append(("🛡 Manage", "manage"))
+            buttons.append(("✖ Close", "close"))
+            return body, controls(buttons)
+        if page == "details":
+            def field(key: str) -> str:
+                return html.escape(str(profile[key]) if profile and profile[key] else "Not set")
+            counts = []
+            for label, kind in (("Today", "day"), ("Last 7 days", "week"),
+                                ("Last 30 days", "month"), ("Last 365 days", "annual"),
+                                ("All retained", "all")):
+                start, end = window(kind, now)
+                value = self.db.execute("SELECT COUNT(*) FROM observed_group_messages "
+                    "WHERE chat_id=? AND user_id=? AND observed>=? AND observed<?",
+                    (chat, user, start, end)).fetchone()[0]
+                counts.append(f"💬 {label} | {value}")
+            first_last = self.db.execute("SELECT MIN(observed),MAX(observed) FROM "
+                "observed_group_messages WHERE chat_id=? AND user_id=?", (chat, user)).fetchone()
+            def date(value: float | None) -> str:
+                return datetime.fromtimestamp(value, TEHRAN).strftime("%Y/%m/%d") if value else "Unknown"
+            try:
+                visible = self.db.execute("SELECT c.name,COUNT(*) FROM intel_hits h "
+                    "JOIN intel_terms t ON t.id=h.term_id "
+                    "JOIN intel_categories c ON c.id=t.category_id "
+                    "WHERE h.chat_id=? AND h.user_id=? AND c.visible=1 GROUP BY c.id",
+                    (chat, user)).fetchall()
+            except sqlite3.OperationalError:
+                visible = []
+            body = ("🗃️ <b>IDENTITY</b>\n"
+                f"🪪 Official name | {field('official_first')}\n"
+                f"🪪 Official last name | {field('official_last')}\n"
+                f"🫂 Friendly name | {field('friendly')}\n"
+                f"👤 Real name | {html.escape(name)}\n"
+                f"🎂 Birthday | {field('birthday')}\n"
+                f"👶🏻 Place of birth | {field('birthplace')}\n"
+                f"📍 Lives in | {field('residence')}\n\n"
+                "📊 <b>Observed statistics</b>\n"
+                f"💬 First message | {date(first_last[0])}\n"
+                f"💬 Last message | {date(first_last[1])}\n" + "\n".join(counts) +
+                "\n" + "\n".join(f"🫯 {html.escape(r[0])} | {r[1]}" for r in visible) +
+                "\nCounts cover messages this bot observed; earlier history is unavailable.")
+            buttons = [("◀ Back", "summary")]
+            if self.access.role(actor) == "OWNER":
+                buttons.insert(0, ("✏️ Edit identity", "edit"))
+                buttons.insert(1, ("🗃 Owner word records", "intel"))
+            return body, controls(buttons)
+        body = (f"🛡 <b>Manage</b>\n{html.escape(name)} · <code>{user}</code>\n"
+                f"Access · {html.escape(role)}\n\n"
+                "Use Owner Settings → Access Control for global access. "
+                "Use /nickname in this group for its local display name.")
+        options: list[tuple[str, str]] = []
+        if self.access.role(actor) == "OWNER" and user != self.access.primary_owner and \
+                self.access.person(user):
+            body += "\nPrivate chat · " + ("On" if self.access.private_enabled(user) else "Off")
+            options.append(("🔓 Enable private chat" if not self.access.private_enabled(user)
+                            else "🔒 Disable private chat", "private"))
+        return body, controls(options + [("◀ Back", "summary")])
 
     def observe(self, m: Message) -> bool:
         if m.chat.type not in {"group", "supergroup"} or m.chat.id not in self.access.groups():
@@ -307,6 +420,63 @@ class GroupStatus:
                         (sent.message_id, token))
 
     async def callback(self, q: CallbackQuery, data: str) -> bool:
+        if data.startswith("gi:"):
+            if not q.from_user or not isinstance(q.message, Message):
+                return True
+            parts = data.split(":", 2)
+            if len(parts) != 3:
+                await q.answer()
+                return True
+            token, action = parts[1:]
+            row = self.db.execute("SELECT * FROM group_identity_menus WHERE token=? "
+                "AND actor_id=? AND chat_id=? AND message_id=? AND expires>?",
+                (token, q.from_user.id, q.message.chat.id, q.message.message_id,
+                 time.time())).fetchone()
+            if not row or not self.access.can_access(q.from_user.id, q.message.chat.id,
+                                                     q.message.chat.type):
+                await q.answer("Unavailable")
+                return True
+            if action == "close":
+                await q.message.delete()
+                await q.answer()
+                return True
+            if action == "intel" and self.access.role(q.from_user.id) == "OWNER":
+                await q.message.answer("Open private /settings → Intelligence Desk for all categories and exports.")
+                await q.answer()
+                return True
+            if action == "edit" and self.access.role(q.from_user.id) == "OWNER" and q.bot:
+                self.identity_edits[q.from_user.id] = (int(row["target_id"]), time.time()+300)
+                try:
+                    await q.bot.send_message(q.from_user.id, "Edit identity for "
+                        f"<code>{row['target_id']}</code>. Send one field as "
+                        "<code>official_first=VALUE</code>, <code>official_last=VALUE</code>, "
+                        "<code>friendly=VALUE</code>, <code>birthday=YYYY/MM/DD</code>, "
+                        "<code>birthplace=VALUE</code>, or <code>residence=VALUE</code>. "
+                        "Send an empty value to clear it. Expires in 5 minutes.")
+                except TelegramBadRequest:
+                    await q.answer("Open a private chat with Mikachan first")
+                    return True
+                await q.answer("Edit instructions sent privately")
+                return True
+            if action == "private" and self.access.role(q.from_user.id) == "OWNER":
+                target = int(row["target_id"])
+                if target == self.access.primary_owner or not self.access.person(target):
+                    await q.answer("Person is not registered")
+                    return True
+                self.access.set_private(q.from_user.id, target,
+                                        not self.access.private_enabled(target))
+                action = "manage"
+            if action not in {"summary", "details", "manage"} or \
+                    action == "manage" and not self.access.can_manage(
+                        q.from_user.id, q.message.chat.id):
+                await q.answer("Unavailable")
+                return True
+            body, buttons = self.identity_screen(token, q.message.chat.id,
+                int(row["target_id"]), str(row["real_name"]), str(row["username"]),
+                action, q.from_user.id)
+            await q.message.edit_text(body, reply_markup=buttons)
+            await q.answer()
+            return True
         if not data.startswith("gs:"):
             return False
         if not q.from_user or not isinstance(q.message, Message):

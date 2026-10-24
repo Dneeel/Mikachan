@@ -101,6 +101,28 @@ class N8NGateway:
     async def close(self) -> None:
         await self.client.aclose()
 
+    async def relay_telegram(self, message: dict[str, Any]) -> None:
+        """Hand one already-authorized command to a private legacy n8n workflow.
+
+        The workflow acknowledges the webhook immediately and sends the eventual
+        result with its Telegram credential. It must never consume bot updates.
+        """
+        if not self.enabled:
+            raise GatewayError("n8n is not configured")
+        headers = {"X-Mikachan-Auth": _secret_from_ref(self.auth_ref)}
+        try:
+            async with self.slots:
+                response = await self.client.post(self.url, json={"message": message},
+                                                  headers=headers)
+            if response.status_code in {401, 403}:
+                raise GatewayError("n8n authentication failed")
+            if response.status_code == 404:
+                raise GatewayError("n8n production webhook is not active")
+            if response.status_code < 200 or response.status_code >= 300:
+                raise GatewayError("n8n did not accept this command")
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            raise GatewayError("n8n did not respond in time") from exc
+
     async def _request(self, action: str, *, request_id: str | None = None,
                        input_data: dict[str, Any] | None = None,
                        options: dict[str, Any] | None = None,

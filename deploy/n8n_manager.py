@@ -976,12 +976,15 @@ class N8NManager:
             return "n8n containers removed; data, key, backups and manager preserved"
 
 
-def _choose(title: str, options: list[str]) -> int:
+def _choose(title: str, options: list[str], *, default: int | None = None) -> int:
     print("\n" + title)
     for index, option in enumerate(options, 1):
         print(f"  {index}. {option}")
     while True:
-        answer = input("Choose number (q to cancel): ").strip().lower()
+        answer = input("Choose number (Enter = No, q = cancel): " if default == 2 and
+                       len(options) == 2 else "Choose number (q to cancel): ").strip().lower()
+        if not answer and default is not None:
+            return default
         if answer == "q":
             raise KeyboardInterrupt
         if answer.isdigit() and 1 <= int(answer) <= len(options):
@@ -1082,7 +1085,8 @@ def wizard(manager: N8NManager) -> None:
         return
     print("\nn8n lets you build automation and AI workflows using a visual editor. It will be "
           "installed separately from Mikachan, so each application can be managed independently.")
-    if _choose("Install n8n on this server?", ["Yes, Install n8n", "No, Mikachan Only"]) == 2:
+    if _choose("Install n8n on this server?", ["Yes, Install n8n", "No, Mikachan Only"],
+               default=2) == 2:
         print("Mikachan only. Nothing was changed for n8n.")
         return
     access_choice = _choose("How would you like to access n8n?",

@@ -44,7 +44,8 @@ from .mikasub_ui import MikaSubUI
 from .instagram_relay import InstagramRelay
 from .external_utilities import ExternalUtilities
 from .content_ui import ContentUI, COMMANDS as CONTENT_COMMANDS
-from .n8n_gateway import N8NGateway
+from .n8n_gateway import GatewayError, N8NGateway
+from .intelligence import Intelligence
 from .audio_ui import AudioUI
 from .local_sources import LocalSources
 from .market_prices import parse_asset_query
@@ -205,7 +206,7 @@ HELP_TEXT = (
     "/st · /xst (reply to an image or sticker)\n"
     "/nasa · /tr LANGUAGE TEXT · /pron WORD · /asr (reply to audio)\n"
     "/tts · /stt (when the owner's n8n audio workflow is connected)\n"
-    "/style TEXT · /ai TEXT (requires user account login)\n\n"
+    "/style TEXT · /mika TEXT (n8n AI)\n\n"
     "💱 Toman quotes: send exactly دلار, سکه, طلا, تتر or ارز.\n"
     "🛡 Proxies: /proxy or پروکسی (requires user account login).\n"
     "🏴‍☠️ MikaSub and private subscription converter: /vpn. Configs are untested.\n"
@@ -287,6 +288,8 @@ class App:
                                       self.mikasub, self.content_ui, self.n8n_gateway,
                                       self.audio_ui)
         self.group_status = GroupStatus(self.store.db, self.store.access_registry)
+        self.intelligence = Intelligence(self.store.db, self.store.access_registry)
+        self.settings_ui.intelligence = self.intelligence
         self.router = Router()
         self.router.message.register(self.message)
         self.router.callback_query.register(self.callback)
@@ -326,13 +329,52 @@ class App:
             return self.community.store.enabled(chat_id, domain)
         return True
 
+    async def relay_n8n_command(self, m: Message, text: str) -> None:
+        """Send only an approved command and its needed reply data to n8n."""
+        if not m.from_user or not self.authorized(m.from_user.id, m.chat.id, m.chat.type):
+            return
+        if not self.store.rate(m.from_user.id, "n8n_relay", 6):
+            await m.reply("Too many audio or AI requests. Try again shortly.")
+            return
+        reply = m.reply_to_message
+        source: dict[str, object] | None = None
+        if reply:
+            source = {"message_id": reply.message_id,
+                      "text": (reply.text or "")[:3000],
+                      "caption": (reply.caption or "")[:1000],
+                      "from": {"id": reply.from_user.id,
+                               "first_name": reply.from_user.first_name[:80]}
+                      if reply.from_user else {}}
+            for kind in ("voice", "audio"):
+                media = getattr(reply, kind, None)
+                if media:
+                    source[kind] = {"file_id": media.file_id,
+                                    "file_size": media.file_size or 0}
+        message: dict[str, object] = {
+            "message_id": m.message_id, "text": text[:3000],
+            "chat": {"id": m.chat.id},
+            "from": {"id": m.from_user.id},
+            "mika_mode": "mommy" if m.from_user.id in getattr(
+                getattr(self, "settings", None), "mommy_ids", set()) else "normal",
+        }
+        if source:
+            message["reply_to_message"] = source
+        try:
+            await self.n8n_gateway.relay_telegram(message)
+        except GatewayError as exc:
+            await m.reply("⚠️ " + html.escape(str(exc)))
+
     async def message(self, m: Message) -> None:
         if hasattr(self, "group_status"):
             self.group_status.observe(m)
+        if hasattr(self, "intelligence"):
+            self.intelligence.observe(m)
         if (getattr(m, "new_chat_members", None) and m.chat.id in self.store.groups()
                 and self.module_enabled("community", m.chat.id)):
             await self.community.welcome(m, self.store.allowlist())
         if not m.from_user or not self.authorized(m.from_user.id, m.chat.id, m.chat.type):
+            return
+        if hasattr(self, "group_status") and await self.group_status.reply(m):
             return
         if (self.module_enabled("utilities", m.chat.id) and hasattr(self, "audio_ui")
                 and await self.audio_ui.reply(m)):
@@ -372,6 +414,8 @@ class App:
             return
         if hasattr(self, "settings_ui") and await self.settings_ui.reply(m):
             return
+        if hasattr(self, "intelligence") and await self.intelligence.reply(m):
+            return
         if (self.module_enabled("content", m.chat.id) and hasattr(self, "content_ui")
                 and await self.content_ui.reply(m)):
             return
@@ -386,9 +430,9 @@ class App:
             await self.group_status.show(m, stats_kind)
             return
         if (text in {"فال", "شعر"} and not self.module_enabled("community", m.chat.id) or
-                (text in {"ارز", "هواشناسی", "اکنون"} or
+                (text in {"ارز", "هواشناسی", "اکنون", "امروز"} or
                  parse_asset_query(text) is not None or
-                 text.startswith(("ارز ", "هواشناسی ", "اکنون "))) and
+                 text.startswith(("ارز ", "هواشناسی ", "اکنون ", "امروز "))) and
                 not self.module_enabled("utilities", m.chat.id)):
             return
         if text.startswith("/") and "@" in text.split(" ", 1)[0]:
@@ -398,8 +442,8 @@ class App:
         if m.chat.type in {"group", "supergroup"}:
             command_name = text.split(" ", 1)[0].split("@")[0].lower().lstrip("/")
             explicit_text = (text in {"فال", "شعر", "ارز"} or parse_asset_query(text) is not None or
-                             text.startswith(("ارز ", "هواشناسی ", "اکنون ")) or
-                             text in {"هواشناسی", "اکنون"})
+                             text.startswith(("ارز ", "هواشناسی ", "اکنون ", "امروز ")) or
+                             text in {"هواشناسی", "اکنون", "امروز"})
             builtin = command_name in {
                 "help", "search", "music", "podcast", "pod", "book", "id", "twitter", "instagram",
                 "follow", "following",
@@ -408,7 +452,7 @@ class App:
                 "dice", "nickname", "rules", "setrules",
                 "notes", "setnote", "delrules", "welcome", "del",
                 "mute", "modlog", "groupstats", "groupstatus", "groupsettings", "qr", "scan", "ocr",
-                "st", "xst", "weather", "now", "nasa", "tr", "pron", "asr", "style", "ai",
+                "st", "xst", "weather", "now", "nasa", "tr", "pron", "asr", "style", "mika",
                 "tts", "stt",
                 "url", "link", "vpn", "proxy"}
             if explicit_text or text.startswith("/") and builtin:
@@ -416,8 +460,8 @@ class App:
         if (m.chat.type in {"group", "supergroup"} and
                 not self.community.store.enabled(m.chat.id, "utilities") and
                 (text == "ارز" or parse_asset_query(text) is not None or
-                 text.startswith(("ارز ", "هواشناسی ", "اکنون ")) or
-                 text in {"هواشناسی", "اکنون"})):
+                 text.startswith(("ارز ", "هواشناسی ", "اکنون ", "امروز ")) or
+                 text in {"هواشناسی", "اکنون", "امروز"})):
             return
         userbot = getattr(self, "userbot", None)
         if userbot and (text == "ارز" or is_currency_query(text)) and self.module_enabled(
@@ -429,8 +473,8 @@ class App:
             except ValueError as exc:
                 await m.reply(html.escape(str(exc)))
             return
-        if text == "اکنون" or text.startswith("اکنون "):
-            await self.utilities.command(m, "/now", text.removeprefix("اکنون").strip())
+        if text in {"اکنون", "امروز"} or text.startswith(("اکنون ", "امروز ")):
+            await self.utilities.command(m, "/now", text.split(" ", 1)[1].strip() if " " in text else "")
             return
         if text == "هواشناسی" or text.startswith("هواشناسی "):
             await self.utilities.command(m, "/weather", text.removeprefix("هواشناسی").strip())
@@ -457,6 +501,11 @@ class App:
         if text.startswith("/"):
             self.store.clear_query(m.from_user.id, m.chat.id)
             await self.command(m, text)
+            return
+        if (self.settings.mika_n8n_telegram_relay and
+                self.module_enabled("utilities", m.chat.id) and
+                (text == "میکا" or text.startswith("میکا "))):
+            await self.relay_n8n_command(m, text)
             return
         if hasattr(self, "community") and await self.community.search_reply(m):
             return
@@ -520,7 +569,7 @@ class App:
         downloader_commands = {"/search", "/music", "/podcast", "/pod", "/book"}
         follow_commands = {"/follow", "/following", "/twitter", "/instagram",
                            "/tiktok", "/youtube"}
-        utility_commands = {"/qr", "/scan", "/ocr", "/tr", "/pron", "/asr", "/style", "/ai",
+        utility_commands = {"/qr", "/scan", "/ocr", "/tr", "/pron", "/asr", "/style", "/mika",
                             "/tts", "/stt",
                             "/st", "/xst", "/weather", "/now",
                             "/nasa", "/url", "/proxy", "/vpn", "/image", "/sticker", "/stickerimage",
@@ -539,6 +588,24 @@ class App:
             await m.reply("Content requests are limited to 8 per minute. Try again shortly.")
             return
         if hasattr(self, "content_ui") and await self.content_ui.command(m, cmd, arg):
+            return
+        if (getattr(getattr(self, "settings", None), "mika_n8n_telegram_relay", False)
+                and cmd in {"/tts", "/stt", "/mika"}):
+            if cmd == "/tts" and not (arg or m.reply_to_message and
+                                       (m.reply_to_message.text or m.reply_to_message.caption)):
+                await m.reply("Use /tts TEXT or reply to text with /tts.")
+                return
+            if cmd == "/stt" and not (m.reply_to_message and
+                                       (m.reply_to_message.voice or m.reply_to_message.audio)):
+                await m.reply("Reply to a voice or audio message with /stt.")
+                return
+            if cmd == "/mika" and not (arg or m.reply_to_message):
+                await m.reply("Use /mika QUESTION or reply to a message with /mika.")
+                return
+            await self.relay_n8n_command(m, raw)
+            return
+        if cmd == "/mika":
+            await m.reply("Mikachan AI is not connected to the owner's n8n workflow yet.")
             return
         if hasattr(self, "audio_ui") and await self.audio_ui.command(m, cmd, arg):
             return
@@ -1219,6 +1286,8 @@ class App:
                 await acknowledge(q, "Link expired or unavailable")
             return
         if hasattr(self, "group_status") and await self.group_status.callback(q, data):
+            return
+        if hasattr(self, "intelligence") and await self.intelligence.callback(q, data):
             return
         if hasattr(self, "settings_ui") and await self.settings_ui.callback(q, data):
             for job_id, active_task in list(self.worker.tasks.items()):
@@ -2090,6 +2159,12 @@ class App:
             await self.render_search(sid, q.from_user.id, q.message.chat.id)
 
     async def run(self) -> None:
+        if self.settings.mika_n8n_telegram_relay:
+            # Switching from n8n's Telegram Trigger back to the bot's sole
+            # polling consumer must preserve pending updates.
+            webhook = await self.bot.get_webhook_info()
+            if webhook.url:
+                await self.bot.delete_webhook(drop_pending_updates=False)
         identity = await self.bot.get_me()
         self.bot_username = identity.username or ""
         await self.audio_ui.recover()
@@ -2128,7 +2203,7 @@ class App:
                     ("notes", "Manage group notes"),
                     ("qr", "Create a QR image"),
                     ("url", "Get a link for a replied file"),
-                    ("link", "Get a link for a replied file"),
+                    ("mika", "Ask Mikachan through n8n"),
                     ("scan", "Scan a replied QR or barcode"),
                     ("ocr", "Read text in a replied image"),
                     ("st", "Convert replied image to sticker"),

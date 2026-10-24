@@ -390,7 +390,7 @@ def test_unmanaged_paths_and_bad_refs_are_rejected(deployment: tuple[FakeManager
     (manager.paths.base / "legacy").unlink()
     install(manager)
     database(manager)
-    with pytest.raises(ManagerError, match="existing major"):
+    with pytest.raises(ManagerError, match="existing version"):
         manager.switch("main")
     with pytest.raises(ManagerError, match="full 40-character"):
         manager.switch("v2", commit="abc")
@@ -666,7 +666,7 @@ def test_test_branch_can_install_pinned_older_commit(deployment):
     second = commit(source, "newer release")
     git("branch", "v2-test", cwd=source)
     assert second != first
-    assert "v2-test" in {item["branch"] for item in manager.versions(refresh=True)}
+    assert "v2-test" not in {item["branch"] for item in manager.versions(refresh=True)}
     result = manager.install(branch="v2-test", commit=first)
     assert "v2-test@" in result
     assert manager.status()["branch"] == "v2-test"

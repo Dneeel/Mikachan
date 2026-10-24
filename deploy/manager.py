@@ -32,7 +32,7 @@ from typing import Any, Callable, Iterator
 
 
 OFFICIAL_REPO = "https://github.com/Dneeel/Mikachan.git"
-BRANCH = re.compile(r"(?:v[1-9][0-9]*|v2-test)\Z")
+BRANCH = re.compile(r"(?:v[1-9][0-9]*(?:\.[1-9][0-9]*)?|v2-test)\Z")
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 SNAPSHOT = re.compile(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}\Z")
 MANAGED = "Mikachan manager schema 1\n"
@@ -45,7 +45,7 @@ EDITABLE = {
     "CONFIRMATION_TTL_SECONDS", "SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET",
     "NASA_API_KEY", "NAVASAN_API_KEY", "NAVASAN_REFRESH_SECONDS",
     "MIKASUB_WORKER_URL", "MIKASUB_ADMIN_TOKEN", "MIKASUB_PUBLIC_URL",
-    "MIKA_N8N_ENABLED", "MIKA_N8N_BASE_URL", "MIKA_N8N_WEBHOOK_PATH",
+    "MIKA_N8N_ENABLED", "MIKA_N8N_TELEGRAM_RELAY", "MIKA_N8N_BASE_URL", "MIKA_N8N_WEBHOOK_PATH",
     "MIKA_N8N_AUTH_REF", "MIKA_N8N_WEBHOOK_TIMEOUT_S", "MIKA_N8N_JOB_STATUS_POLL_S",
     "MIKA_AI_GLOBAL_CONCURRENCY", "MIKA_TTS_ENABLED", "MIKA_STT_ENABLED",
     "MIKA_CONTENT_ENABLED",
@@ -464,7 +464,8 @@ class Manager:
                         for line in lines if len(parts := line.split()) == 2
                         for commit, branch in [parts]
                         if branch.startswith("refs/heads/") and
-                        BRANCH.fullmatch(branch[11:]) and SHA.fullmatch(commit)]
+                        BRANCH.fullmatch(branch[11:]) and branch[11:] != "v2-test"
+                        and SHA.fullmatch(commit)]
             with self._lock():
                 self._managed()
                 self._fetch()
@@ -477,11 +478,12 @@ class Manager:
                 if len(parts := line.split()) == 2
                 for name, commit in [parts]
                 if name.startswith("origin/") and BRANCH.fullmatch(name[7:])
+                and name[7:] != "v2-test"
                 and SHA.fullmatch(commit)]
 
     def _target(self, branch: str, commit: str | None = None) -> str:
         if not BRANCH.fullmatch(branch):
-            raise ManagerError("Select an existing major version branch such as v2 or v2-test")
+            raise ManagerError("Select an existing version branch such as v2 or v2.1")
         ref = f"refs/remotes/origin/{branch}^{{commit}}"
         tip = self._run("git", "--git-dir", str(self.paths.repo), "rev-parse", "--verify",
                         ref, check=False)

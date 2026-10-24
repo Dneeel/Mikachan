@@ -12,7 +12,7 @@ from urllib.parse import quote, unquote
 import yaml
 
 MAX_DOCUMENT = 4_000_000
-MAX_NODES = 5_000
+MAX_NODES = 10_000
 MAX_URI = 16_384
 MAX_NAME = 160
 RAW_SCHEMES = frozenset({
@@ -218,7 +218,7 @@ def parse_subscription(payload: bytes) -> Parsed:
     except (UnicodeError, yaml.YAMLError, json.JSONDecodeError) as exc:
         raise ValueError("subscription document is malformed") from exc
     if len(records) > MAX_NODES:
-        raise ValueError("subscription exceeds 5,000 records")
+        raise ValueError("subscription exceeds 10,000 records")
     nodes: dict[str, Node] = {}
     unsupported = structured_rejected
     errors = 0
