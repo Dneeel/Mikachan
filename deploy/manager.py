@@ -825,6 +825,27 @@ class Manager:
             self._refresh_panel(self.paths.releases / sha)
         except (OSError, ValueError) as exc:
             self.on_event(f"Panel refresh skipped: {type(exc).__name__}")
+        # The independent n8n service may already be running. Reconcile its
+        # AI graph only when an operator-owned API key is available; a missing
+        # key never blocks a healthy bot release or adds an installer prompt.
+        n8n_root = Path("/opt/n8n")
+        key = n8n_root / "ai/api-key"
+        script = self.paths.releases / sha / "deploy/n8n/reconcile_ai.py"
+        artifact = self.paths.releases / sha / "deploy/n8n/mikachan_ai_workflow.json"
+        state_file = n8n_root / "installation.json"
+        if (self.paths.base == Path("/opt/Mikachan") and key.is_file() and
+                script.is_file() and artifact.is_file() and state_file.is_file()):
+            try:
+                n8n_state = json.loads(state_file.read_text(encoding="utf-8"))
+                origin = ("https://" + n8n_state["hostname"] if
+                          n8n_state.get("access") == "domain" else "http://127.0.0.1:5678")
+                result = self._run(sys.executable, str(script), "--origin", origin,
+                    "--key-file", str(key), "--artifact", str(artifact),
+                    "--state-dir", str(n8n_root / "ai"), check=False, timeout=90)
+                self.on_event("n8n AI reconciliation " +
+                    ("completed" if result.returncode == 0 else "needs diagnostics"))
+            except (OSError, ValueError, KeyError):
+                self.on_event("n8n AI reconciliation needs diagnostics")
         return f"Activated {branch}@{sha[:12]}; backup {snapshot}"
 
     def _refresh_panel(self, release: Path) -> None:

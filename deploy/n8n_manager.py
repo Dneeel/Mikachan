@@ -669,7 +669,9 @@ class N8NManager:
                 if "health" not in record["completed"]:
                     record["completed"].append("health")
                 self._write_state(record)
-                return self.status()
+                result = self.status()
+                result["ai_reconcile"] = self._reconcile_ai()
+                return result
             except (N8NError, OSError, ValueError) as exc:
                 record["status"] = "RECOVERABLE"
                 record["error_type"] = _secretless_error(exc)
@@ -776,7 +778,32 @@ class N8NManager:
                     raise N8NError("Access change and rollback need repair; previous config "
                                    f"snapshot: {snapshot.name}") from exc
                 raise
-        return self.status()
+        result = self.status()
+        result["ai_reconcile"] = self._reconcile_ai()
+        return result
+
+    def _reconcile_ai(self) -> dict[str, str]:
+        """Optional internal AI import; n8n itself remains independently usable."""
+        key = self.root / "ai/api-key"
+        release = Path("/opt/Mikachan/current/deploy/n8n")
+        script = release / "reconcile_ai.py"
+        artifact = release / "mikachan_ai_workflow.json"
+        if not (key.is_file() and script.is_file() and artifact.is_file()):
+            return {"status": "NOT_CONFIGURED"}
+        state = self.state()
+        origin = ("https://" + state["hostname"] if state.get("access") == "domain"
+                  else "http://127.0.0.1:5678")
+        result = self._run(sys.executable, str(script), "--origin", origin,
+                           "--key-file", str(key), "--artifact", str(artifact),
+                           "--state-dir", str(self.root / "ai"),
+                           check=False, timeout=90)
+        if result.returncode:
+            return {"status": "RECOVERABLE", "reason": "AI workflow reconciliation failed"}
+        try:
+            payload = json.loads(result.stdout)
+            return payload if isinstance(payload, dict) else {"status": "RECOVERABLE"}
+        except json.JSONDecodeError:
+            return {"status": "RECOVERABLE", "reason": "Invalid reconciliation result"}
 
     def service(self, action: str) -> dict[str, Any]:
         self.require_owned()
@@ -946,7 +973,9 @@ class N8NManager:
                     self._write_state(previous)
                 raise N8NError("n8n update failed; restore the pre-update backup "
                                f"{snapshot.name} if the new version modified data") from exc
-        return self.status()
+        result = self.status()
+        result["ai_reconcile"] = self._reconcile_ai()
+        return result
 
     def remove(self, *, purge: bool = False, confirm: str = "") -> str:
         self.require_owned()

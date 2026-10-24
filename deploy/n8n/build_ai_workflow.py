@@ -122,7 +122,8 @@ def build(source: dict) -> dict:
     if any(node["type"] == "n8n-nodes-base.telegramTrigger" for node in graph["nodes"]):
         raise ValueError("A competing Telegram Trigger cannot be imported")
     graph["nodes"] = [node for node in graph["nodes"] if node["name"] not in
-                      {"Mika Serious Agent", "Serious Simple Memory", "Send Serious Reply"}]
+                      {"Mika Serious Agent", "Serious Simple Memory", "Send Serious Reply",
+                       "Normalize Serious Result", "Groq Serious Model"}]
     by_name = {node["name"]: node for node in graph["nodes"]}
     by_name["Telegram Trigger"]["parameters"]["jsCode"] = NORMALIZE
     by_name["Analyze Message"]["parameters"]["jsCode"] = ANALYZE
@@ -143,15 +144,28 @@ def build(source: dict) -> dict:
     serious = copy.deepcopy(chat)
     serious.update(id=str(uuid.uuid5(NAMESPACE, "Mika Serious Agent")),
                    name="Mika Serious Agent", position=[840, 688])
+    serious["continueOnFail"] = True
     serious["parameters"]["options"]["systemMessage"] = _system_expression("serious")
     serious_memory = copy.deepcopy(by_name["Simple Memory"])
     serious_memory.update(id=str(uuid.uuid5(NAMESPACE, "Serious Simple Memory")),
                           name="Serious Simple Memory", position=[840, 928])
+    serious_model = copy.deepcopy(by_name["Groq Chat Model"])
+    serious_model.update(id=str(uuid.uuid5(NAMESPACE, "Groq Serious Model")),
+                         name="Groq Serious Model", position=[960, 928])
+    serious_model["parameters"]["model"] = by_name["Groq Chat Model"]["parameters"]["model"]
     serious_send = copy.deepcopy(by_name["Send a text message"])
     serious_send.update(id=str(uuid.uuid5(NAMESPACE, "Send Serious Reply")),
                         name="Send Serious Reply", position=[1100, 688])
-    graph["nodes"].extend([serious, serious_memory, serious_send])
-    by_name["OpenRouter Chat Model"].pop("disabled", None)
+    serious_result = {"id": str(uuid.uuid5(NAMESPACE, "Normalize Serious Result")),
+        "name": "Normalize Serious Result", "type": "n8n-nodes-base.code",
+        "typeVersion": 2, "position": [970, 688],
+        "parameters": {"jsCode": "return $input.all().map(item => ({json: {"
+            "...item.json, output: typeof item.json.output === 'string' && "
+            "item.json.output.trim() ? item.json.output : "
+            "'Mika Serious is unavailable right now. The model may be rate limited; try later.'"
+            "}}));"}}
+    graph["nodes"].extend([serious, serious_memory, serious_model,
+                           serious_result, serious_send])
     lookup = by_name["Is AI Reply?"]["parameters"]["conditions"]["conditions"][0]
     lookup["leftValue"] = "={{ $json.mika.agentType === 'chat' }}"
     lookup["operator"] = {"type": "boolean", "operation": "true"}
@@ -169,9 +183,11 @@ def build(source: dict) -> dict:
     links["Switch"]["main"] = [links["Switch"]["main"][i] for i in range(3)] + [
         [_edge("Analyze Message")], [_edge("Analyze Message")], [_edge("Analyze Message")]]
     links["Is AI Reply?"]["main"] = [[_edge("AI Agent")], [_edge("Mika Serious Agent")]]
-    links["Mika Serious Agent"] = {"main": [[_edge("Send Serious Reply")]]}
+    links["Mika Serious Agent"] = {"main": [[_edge("Normalize Serious Result")]]}
+    links["Normalize Serious Result"] = {"main": [[_edge("Send Serious Reply")]]}
     links["Serious Simple Memory"] = {"ai_memory": [[_edge("Mika Serious Agent", "ai_memory")]]}
-    links["OpenRouter Chat Model"] = {"ai_languageModel": [[_edge("Mika Serious Agent", "ai_languageModel")]]}
+    links["OpenRouter Chat Model"] = {"ai_languageModel": [[]]}
+    links["Groq Serious Model"] = {"ai_languageModel": [[_edge("Mika Serious Agent", "ai_languageModel")]]}
     links["Send Serious Reply"] = {"main": [[_edge("Save AI Reply")]]}
     graph["name"] = "Mikachan · Private AI Relay"
     for key in ("id", "active", "activeVersionId", "versionId", "createdAt", "updatedAt",
