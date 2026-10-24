@@ -42,12 +42,15 @@ without any AI credential; the bot's ordinary commands continue working.
    means the graph imported and activated, not that every external provider
    was live-tested. Test `/mika`, `/tts`, and `/stt` from an authorized ID.
 
-The packaged PostgreSQL schema and style seeds are **preparation only**. The
-current n8n service uses SQLite for its own database and the AI agents use
-separate Simple Memory nodes. PostgreSQL Memory, the long-term identity store,
-and automatic schema seeding still need a managed database, credential wiring,
-backup/restore integration, and a migration test. Do not switch the agents to
-PostgreSQL Memory by editing the workflow alone.
+The independent n8n manager now has **AI Memory · PostgreSQL** with Quick
+Install/Repair, Status, Backup, Restore and a Simple/PostgreSQL backend choice.
+Quick Install creates a private database container on n8n's internal Docker
+network and applies the packaged schema and style seeds. The next workflow
+reconciliation creates a dedicated n8n PostgreSQL credential and wires separate
+chat-history tables to Mika and Serious. The existing Simple Memory path remains
+selectable. This path is offline tested; it has not been exercised on the
+owner's VPS. The long-term fact writer/retriever is not implemented, and these
+tables must not be presented as a working personal memory feature yet.
 
 TikTok `/explore` uses a public third-party feed/search endpoint with no paid
 API key. Public discovery can be rate limited or blocked, especially for topic

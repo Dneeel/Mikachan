@@ -1044,10 +1044,11 @@ def managed_menu(manager: N8NManager) -> None:
               "Start", "Stop", "Restart", "View logs", "Diagnostics",
               "Backup", "Restore backup", "Update pinned n8n version",
               "Remove service (keep data)", "Uninstall service and data",
-              "Change access method / domain", "Connect Mikachan AI workflow", "Return"]
+              "Change access method / domain", "Connect Mikachan AI workflow",
+              "AI Memory · PostgreSQL", "Return"]
     while manager.owned():
         choice = _choose("n8n / independent management", labels)
-        if choice == 16:
+        if choice == 17:
             return
         if choice in {12, 13}:
             phrase = "REMOVE N8N SERVICE" if choice == 12 else "PURGE N8N DATA"
@@ -1072,6 +1073,27 @@ def managed_menu(manager: N8NManager) -> None:
                 print("The hostname's DNS A record must point to this server. "
                       f"Public IPv4: {public_ips().get('ipv4') or 'unavailable'}")
                 result = manager.change_access("domain", input("Full hostname: "))
+        elif choice == 16:
+            memory_action = _choose("AI Memory · PostgreSQL",
+                ["Quick Install / Repair", "Status", "Backup", "Restore",
+                 "Use PostgreSQL Memory", "Use Simple Memory", "Back"])
+            if memory_action == 7:
+                continue
+            operation = {1: "quick-install", 2: "status", 3: "backup", 4: "restore",
+                         5: "postgres", 6: "simple"}[memory_action]
+            release = Path("/opt/Mikachan/current")
+            if not (release / "deploy/n8n/pg_memory.py").is_file():
+                result = {"status": "SETUP_REQUIRED", "reason": "Mikachan AI memory code is unavailable"}
+            else:
+                command = [sys.executable, "-m", "deploy.n8n.pg_memory", operation]
+                if operation == "restore":
+                    command += ["--backup", input("Exact AI memory backup filename: ").strip(),
+                                "--confirm", input("Type RESTORE AI MEMORY: ").strip()]
+                process = subprocess.run(command, cwd=release, capture_output=True,
+                                         text=True, timeout=300, check=False)
+                result = (json.loads(process.stdout) if process.returncode == 0 else
+                          {"status": "RECOVERABLE", "reason": "AI memory operation failed; "
+                           "check n8n and Docker diagnostics"})
         elif choice == 15:
             print("In n8n, open Settings → n8n API, create an API key, then paste it here. "
                   "It stays in /opt/n8n/ai/api-key (mode 0600) and is never shown in logs.")

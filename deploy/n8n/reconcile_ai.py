@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import json
 import os
+import copy
 import stat
 import tempfile
 import urllib.error
@@ -119,7 +120,63 @@ def _map_reply_table(client: Client, desired: dict[str, Any]) -> dict[str, str] 
     return None
 
 
-def reconcile(origin: str, key_file: Path, artifact: Path, state_dir: Path) -> dict[str, str]:
+def _attach_postgres_memory(client: Client, desired: dict[str, Any],
+                            memory_root: Path) -> None:
+    """Use managed PostgreSQL only after an explicit memory installation."""
+    marker = memory_root / ".managed-by-mikachan-ai-memory"
+    backend = memory_root / "backend"
+    if not marker.is_file() or marker.read_text() != "Mikachan AI memory schema 1\n":
+        return
+    if backend.is_file() and backend.read_text().strip() == "simple":
+        return
+    env = memory_root / "secrets.env"
+    if env.is_symlink() or not env.is_file() or stat.S_IMODE(env.stat().st_mode) != 0o600:
+        raise ReconcileError("Managed AI memory secrets are unavailable")
+    values = dict(line.split("=", 1) for line in env.read_text().splitlines() if "=" in line)
+    password = values.get("AI_DB_PASSWORD", "")
+    if len(password) < 32:
+        raise ReconcileError("Managed AI memory password is invalid")
+    rows = client.request("GET", "/credentials?limit=100").get("data", [])
+    matches = [row for row in rows if row.get("type") == "postgres" and
+               row.get("name") == "Mikachan AI Postgres"]
+    if len(matches) > 1:
+        raise ReconcileError("Duplicate managed PostgreSQL credentials")
+    if matches:
+        credential_id = matches[0]["id"]
+    else:
+        created = client.request("POST", "/credentials", {"name": "Mikachan AI Postgres",
+            "type": "postgres", "data": {"host": "ai-postgres", "port": 5432,
+                "database": "mika_ai", "user": "mika_ai", "password": password,
+                "ssl": "disable"}})
+        credential_id = created["id"]
+    nodes = {node["name"]: node for node in desired["nodes"]}
+    template = nodes.get("Postgres Chat Memory")
+    if template is None:
+        raise ReconcileError("PostgreSQL memory node template is missing")
+    for agent, table, name in (("AI Agent", "mika_chat_history", "Mika Postgres Memory"),
+                               ("Mika Serious Agent", "mika_serious_history",
+                                "Serious Postgres Memory")):
+        if name not in nodes:
+            node = copy.deepcopy(template)
+            node.update(name=name, id=hashlib.sha256(name.encode()).hexdigest()[:32],
+                        disabled=False)
+            desired["nodes"].append(node)
+        else:
+            node = nodes[name]
+        node["parameters"] = {"sessionIdType": "customKey",
+            "sessionKey": "={{ $json.mika.sessionId }}", "tableName": table,
+            "contextWindowLength": 30}
+        node["credentials"] = {"postgres": {"id": credential_id,
+                                               "name": "Mikachan AI Postgres"}}
+        desired["connections"][name] = {"ai_memory": [[{"node": agent,
+            "type": "ai_memory", "index": 0}]]}
+    for old in ("Mika Simple Memory", "Serious Simple Memory"):
+        if old in desired["connections"]:
+            desired["connections"][old]["ai_memory"] = [[]]
+
+
+def reconcile(origin: str, key_file: Path, artifact: Path, state_dir: Path,
+              memory_root: Path = Path("/opt/n8n/ai-memory")) -> dict[str, str]:
     if not key_file.is_file():
         return {"status": "NOT_CONFIGURED", "reason": "n8n API credential unavailable"}
     client = Client(origin, _private_file(key_file))
@@ -151,6 +208,7 @@ def reconcile(origin: str, key_file: Path, artifact: Path, state_dir: Path) -> d
     table_problem = _map_reply_table(client, desired)
     if table_problem:
         return table_problem
+    _attach_postgres_memory(client, desired, memory_root)
     wanted = _fingerprint(desired)
     if current and _fingerprint(current) != wanted and (not previous or
             previous.get("id") != current.get("id") or
