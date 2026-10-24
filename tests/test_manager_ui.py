@@ -64,7 +64,10 @@ def test_top_level_arrow_enter_and_back_navigation():
     assert ui.page.title == "SERVICES"
 
 
-def test_confirmation_cannot_run_without_exact_phrase():
+def test_confirmation_cannot_run_without_exact_phrase(tmp_path, monkeypatch):
+    import deploy.manager_ui as panel
+
+    monkeypatch.setattr(panel, "N8N_MARKER", tmp_path / "unmanaged-n8n-marker")
     ui = MikachanMenu(FakeManager)
     received = []
     ui.execute = lambda *a: received.append(a)
