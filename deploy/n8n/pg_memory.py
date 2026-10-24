@@ -8,13 +8,17 @@ its credentials and backups under /opt/n8n/ai-memory.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import json
 import os
 import secrets
+import stat
 import subprocess
 import tempfile
 import time
 from pathlib import Path
+from typing import Iterator
 
 from deploy.n8n.seed_ai_style import seed_sql
 
@@ -65,8 +69,13 @@ class MemoryManager:
                          input_data=input_data, timeout=timeout)
 
     def _owned(self) -> bool:
-        return self.marker.is_file() and not self.marker.is_symlink() and \
-            self.marker.read_text() == "Mikachan AI memory schema 1\n"
+        if not self.marker.is_file() or self.marker.is_symlink() or self.root.is_symlink():
+            return False
+        for path in (self.root, self.marker):
+            info = path.stat()
+            if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o022:
+                return False
+        return self.marker.read_text() == "Mikachan AI memory schema 1\n"
 
     def status(self) -> dict[str, object]:
         if not self.root.exists():
@@ -74,8 +83,13 @@ class MemoryManager:
         if not self._owned() or self.env.is_symlink() or self.compose.is_symlink():
             return {"status": "UNOWNED"}
         try:
-            health = self._docker("exec", "-T", "ai-postgres", "pg_isready", "-U", "postgres",
-                                  timeout=8).stdout.decode(errors="replace").strip()
+            health = self._docker("exec", "-T", "ai-postgres", "psql", "-U", "mika_ai",
+                "-d", "mika_ai", "-t", "-A", "-c", "SELECT CASE WHEN "
+                "to_regclass('public.mika_identity') IS NOT NULL AND "
+                "to_regclass('public.mika_long_term_facts') IS NOT NULL "
+                "THEN 1 ELSE 0 END", timeout=8).stdout.decode(errors="replace").strip()
+            if health != "1":
+                return {"status": "SCHEMA_PENDING"}
             return {"status": "DATABASE_READY", "health": health,
                     "credential": "Mikachan AI Postgres",
                     "backend": (self.root / "backend").read_text().strip()
@@ -102,10 +116,13 @@ class MemoryManager:
             _atomic(self.root / "backend", "postgres\n")
         if self.env.is_symlink() or self.env.stat().st_mode & 0o077:
             raise MemoryError("AI memory secret permissions are unsafe")
+        if self.compose.is_symlink() or (self.root / "backend").is_symlink():
+            raise MemoryError("AI memory configuration contains a symlink")
         init = self.root / "init/01-app.sh"
         if not init.exists():
             _atomic(init, "#!/bin/sh\nset -eu\npsql -v ON_ERROR_STOP=1 --username postgres "
-                "--dbname postgres -v ai_pass=\"$AI_DB_PASSWORD\" <<'SQL'\n"
+                "--dbname postgres <<'SQL'\n"
+                "\\getenv ai_pass AI_DB_PASSWORD\n"
                 "CREATE ROLE mika_ai LOGIN PASSWORD :'ai_pass' NOSUPERUSER NOCREATEDB NOCREATEROLE;\n"
                 "CREATE DATABASE mika_ai OWNER mika_ai;\nSQL\n", 0o755)
         if not self.compose.exists():
@@ -120,8 +137,12 @@ class MemoryManager:
                 "networks:\n  n8n-private:\n    external: true\n    name: " + NETWORK + "\n")
         self._docker("up", "-d", "--no-build", timeout=180)
         for _ in range(20):
-            if self.status()["status"] == "DATABASE_READY":
+            try:
+                self._docker("exec", "-T", "ai-postgres", "psql", "-U", "mika_ai",
+                             "-d", "mika_ai", "-t", "-A", "-c", "SELECT 1", timeout=8)
                 break
+            except (MemoryError, OSError, subprocess.TimeoutExpired):
+                pass
             time.sleep(3)
         else:
             raise MemoryError("PostgreSQL did not become ready; run status or repair")
@@ -163,16 +184,24 @@ class MemoryManager:
             if stream.read(5) != b"PGDMP":
                 raise MemoryError("AI memory backup is invalid")
         undo = self.backup()
-        try:
-            with source.open("rb") as stream:
+
+        def apply(path: Path) -> None:
+            with path.open("rb") as stream:
                 result = subprocess.run(["docker", "compose", "--project-name", PROJECT,
                     "--file", str(self.compose), "exec", "-T", "ai-postgres", "pg_restore",
                     "--clean", "--if-exists", "--no-owner", "-U", "mika_ai", "-d", "mika_ai"],
                     stdin=stream, capture_output=True, timeout=180, check=False)
             if result.returncode:
                 raise MemoryError("PostgreSQL restore failed")
-        except MemoryError as exc:
-            raise MemoryError(f"Restore failed; pre-restore backup preserved at {undo.name}") from exc
+
+        try:
+            apply(source)
+        except (MemoryError, OSError, subprocess.TimeoutExpired) as exc:
+            try:
+                apply(undo)
+            except (MemoryError, OSError, subprocess.TimeoutExpired):
+                raise MemoryError(f"Restore and automatic rollback failed; repair from {undo.name}") from exc
+            raise MemoryError(f"Restore failed; previous memory recovered from {undo.name}") from exc
         return self.status()
 
     def select_backend(self, backend: str) -> dict[str, object]:
@@ -181,6 +210,24 @@ class MemoryManager:
         _atomic(self.root / "backend", backend + "\n")
         return {"status": "BACKEND_SELECTED", "backend": backend,
                 "next": "Reconcile the AI workflow to apply this selection"}
+
+
+@contextlib.contextmanager
+def _operation_lock(manager: MemoryManager) -> Iterator[None]:
+    """Serialize database maintenance with the independent n8n manager."""
+    lock = manager.root.parent / ".install.lock"
+    if lock.is_symlink():
+        raise MemoryError("n8n operation lock is unsafe")
+    with lock.open("a+") as stream:
+        os.chmod(lock, 0o600)
+        try:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise MemoryError("Another n8n management operation is running") from exc
+        try:
+            yield
+        finally:
+            fcntl.flock(stream, fcntl.LOCK_UN)
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -192,16 +239,18 @@ def main() -> None:
     args = parser.parse_args()
     manager = MemoryManager()
     try:
-        if args.command in {"quick-install", "repair"}:
-            result: object = manager.install(args.schema)
-        elif args.command == "backup":
-            result = str(manager.backup())
-        elif args.command == "restore":
-            result = manager.restore(args.backup or "", args.confirm)
-        elif args.command in {"simple", "postgres"}:
-            result = manager.select_backend(args.command)
+        if args.command == "status":
+            result: object = manager.status()
         else:
-            result = manager.status()
+            with _operation_lock(manager):
+                if args.command in {"quick-install", "repair"}:
+                    result = manager.install(args.schema)
+                elif args.command == "backup":
+                    result = str(manager.backup())
+                elif args.command == "restore":
+                    result = manager.restore(args.backup or "", args.confirm)
+                else:
+                    result = manager.select_backend(args.command)
         print(json.dumps(result))
     except (MemoryError, OSError, subprocess.TimeoutExpired) as exc:
         raise SystemExit("AI memory: " + str(exc)) from None

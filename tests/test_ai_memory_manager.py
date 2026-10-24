@@ -18,7 +18,7 @@ def test_memory_install_is_repeatable_and_keeps_secrets(tmp_path, monkeypatch):
 
     def run(*args, input_data=None, timeout=60):
         commands.append((args, input_data))
-        output = b"accepting connections" if "pg_isready" in args else b""
+        output = b"1\n" if "-c" in args else b""
         return subprocess.CompletedProcess(args, 0, output, b"")
 
     monkeypatch.setattr(manager, "_run", run)
@@ -27,6 +27,8 @@ def test_memory_install_is_repeatable_and_keeps_secrets(tmp_path, monkeypatch):
     assert manager.env.stat().st_mode & 0o777 == 0o600
     assert "ports:" not in manager.compose.read_text()
     assert "mikachan_n8n_default" in manager.compose.read_text()
+    assert "\\getenv ai_pass AI_DB_PASSWORD" in (manager.root / "init/01-app.sh").read_text()
+    assert 'ai_pass="$AI_DB_PASSWORD"' not in (manager.root / "init/01-app.sh").read_text()
     assert manager.install(schema)["status"] == "DATABASE_READY"
     assert manager.env.read_bytes() == original
     assert sum(bool(data and b"CREATE TABLE" in data) for _, data in commands) == 2
@@ -63,8 +65,40 @@ def test_installed_memory_wires_independent_agent_tables(tmp_path):
         "Mika Serious Agent"
     assert links["Mika Simple Memory"]["ai_memory"] == [[]]
     assert links["Serious Simple Memory"]["ai_memory"] == [[]]
+    assert links["Decide AI"]["main"][0][0]["node"] == "Memory Intent"
+    assert links["Write Explicit Memory"]["main"][0][0]["node"] == "Read Scoped Memory"
+    assert links["Attach Scoped Memory"]["main"][0][0]["node"] == "Is AI Reply?"
+    nodes = {node["name"]: node for node in graph["nodes"]}
+    writer = nodes["Write Explicit Memory"]
+    reader = nodes["Read Scoped Memory"]
+    assert writer["credentials"]["postgres"]["id"] == "pg-cred"
+    assert "ON CONFLICT DO NOTHING" in writer["parameters"]["query"]
+    assert "visibility='private' AND $1=$2" in reader["parameters"]["query"]
+    assert "source_kind='explicit_user'" in reader["parameters"]["query"]
+    assert "m.chat?.type === 'private'" in nodes["Memory Intent"]["parameters"]["jsCode"]
     (root / "backend").write_text("simple\n")
     simple = json.loads((Path(__file__).resolve().parents[1] /
         "deploy/n8n/mikachan_ai_workflow.json").read_text())
     _attach_postgres_memory(Client(), simple, root)
     assert "Mika Postgres Memory" not in simple["connections"]
+
+
+def test_failed_restore_attempts_automatic_rollback(tmp_path, monkeypatch):
+    manager = MemoryManager(tmp_path / "ai-memory")
+    backup_dir = manager.root / "backups"
+    backup_dir.mkdir(parents=True)
+    source = backup_dir / ("a" * 16 + ".dump")
+    undo = backup_dir / ("b" * 16 + ".dump")
+    source.write_bytes(b"PGDMPsource")
+    undo.write_bytes(b"PGDMPundo")
+    monkeypatch.setattr(manager, "backup", lambda: undo)
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append(kwargs["stdin"].name)
+        return subprocess.CompletedProcess(args, 1 if len(calls) == 1 else 0, b"", b"")
+
+    monkeypatch.setattr("deploy.n8n.pg_memory.subprocess.run", run)
+    with pytest.raises(MemoryError, match="previous memory recovered"):
+        manager.restore(source.name, "RESTORE AI MEMORY")
+    assert calls == [str(source), str(undo)]

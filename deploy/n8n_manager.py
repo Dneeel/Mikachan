@@ -820,7 +820,44 @@ class N8NManager:
         except (urllib.error.URLError, TimeoutError, ValueError) as exc:
             raise N8NError("n8n API key could not be verified locally; existing key was kept") from exc
         atomic(self.root / "ai/api-key", key + "\n", 0o600)
-        return self._reconcile_ai()
+        memory = self._ensure_ai_memory()
+        graph = self._reconcile_ai()
+        graph["memory_status"] = str(memory.get("status", "RECOVERABLE"))
+        return graph
+
+    def _ensure_ai_memory(self, release: Path | None = None) -> dict[str, str]:
+        """Install the small private database after n8n API setup, if safe."""
+        release = release or Path("/opt/Mikachan/current")
+        if not (release / "deploy/n8n/pg_memory.py").is_file():
+            return {"status": "SETUP_REQUIRED", "reason": "Mikachan AI memory code is unavailable"}
+        pre = host_preflight(self.root)
+        if (pre["memory_total"] < 3_500_000_000 or
+                pre["memory_available"] < 700_000_000 or
+                pre["disk_free"] < 2_000_000_000 or
+                pre["inodes_free"] < 20_000):
+            return {"status": "RESOURCE_BLOCKED", "reason": "PostgreSQL needs more available RAM or disk"}
+        status = subprocess.run([sys.executable, "-m", "deploy.n8n.pg_memory", "status"],
+            cwd=release, capture_output=True, text=True, timeout=20, check=False)
+        if status.returncode == 0:
+            try:
+                current = json.loads(status.stdout)
+                if current.get("status") == "DATABASE_READY":
+                    return {"status": "DATABASE_READY"}
+                if current.get("status") == "UNOWNED":
+                    return {"status": "BLOCKED_CONFLICT", "reason": "AI memory directory is unowned"}
+            except json.JSONDecodeError:
+                pass
+        installed = subprocess.run([sys.executable, "-m", "deploy.n8n.pg_memory",
+            "quick-install"], cwd=release, capture_output=True, text=True,
+            timeout=360, check=False)
+        if installed.returncode:
+            return {"status": "RECOVERABLE", "reason": "AI memory installation needs repair; "
+                    "the existing workflow can continue with Simple Memory"}
+        try:
+            result = json.loads(installed.stdout)
+            return result if isinstance(result, dict) else {"status": "RECOVERABLE"}
+        except json.JSONDecodeError:
+            return {"status": "RECOVERABLE", "reason": "AI memory result needs diagnostics"}
 
     def auto_ai_setup(self) -> dict[str, str]:
         """Prepare the relay secret, import the graph, and connect a ready bot."""
@@ -829,18 +866,22 @@ class N8NManager:
         release = Path("/opt/Mikachan/current")
         if not key.is_file() or not (release / "deploy/n8n/relay_setup.py").is_file():
             return {"status": "SETUP_REQUIRED", "reason": "Connect the n8n API key and install Mikachan first"}
+        memory = self._ensure_ai_memory()
         prepared = subprocess.run([sys.executable, "-m", "deploy.n8n.relay_setup",
             "--key-file", str(key)], cwd=release, capture_output=True, text=True,
             timeout=40, check=False)
         if prepared.returncode:
             return {"status": "SETUP_REQUIRED", "reason": "Webhook credential preparation needs repair"}
         relay = json.loads(prepared.stdout)
-        if relay.get("status") != "WEBHOOK_CREDENTIAL_READY":
-            return relay
+        existing_header = relay.get("status") == "SETUP_REQUIRED" and \
+            str(relay.get("reason", "")).startswith("Existing Mikachan Private Relay credential")
+        if relay.get("status") != "WEBHOOK_CREDENTIAL_READY" and not existing_header:
+            return {**relay, "memory_status": str(memory.get("status", "RECOVERABLE"))}
         graph = self._reconcile_ai()
         if graph.get("status") != "ACTIVE":
             return {"status": "SETUP_REQUIRED", "reason": "Webhook credential prepared; "
-                    "workflow still needs provider setup", "workflow_id": graph.get("workflow_id", "")}
+                    "workflow still needs provider setup", "workflow_id": graph.get("workflow_id", ""),
+                    "memory_status": str(memory.get("status", "RECOVERABLE"))}
         state = self.state()
         if state.get("access") != "domain" or not state.get("hostname"):
             return {"status": "SETUP_REQUIRED", "reason": "Workflow active, but a verified HTTPS domain "
@@ -848,13 +889,25 @@ class N8NManager:
         python = Path("/opt/Mikachan/panel-venv/bin/python")
         if not python.is_file():
             return {"status": "SETUP_REQUIRED", "reason": "Mikachan panel runtime unavailable"}
+        probe = subprocess.run([sys.executable, "-m", "deploy.n8n.relay_setup",
+            "--verify"], cwd=release, capture_output=True, text=True,
+            timeout=25, check=False)
+        if probe.returncode:
+            return {"status": "SETUP_REQUIRED", "reason": "Webhook authentication verification failed"}
+        try:
+            verified = json.loads(probe.stdout)
+        except json.JSONDecodeError:
+            verified = {}
+        if verified.get("status") != "WEBHOOK_READY":
+            return {"status": "SETUP_REQUIRED", "reason": "Webhook authentication has not been verified"}
         connected = subprocess.run([str(python), str(release / "deploy/manager.py"),
             "connect-n8n-relay", "https://" + state["hostname"]], cwd=release,
             capture_output=True, text=True, timeout=90, check=False)
         if connected.returncode:
-            return {"status": "SETUP_REQUIRED", "reason": "Workflow active; bot relay connection needs diagnostics"}
+            return {"status": "SETUP_REQUIRED", "reason": "Webhook is ready, but bot relay connection needs diagnostics"}
         return {"status": "WEBHOOK_READY", "workflow_id": graph.get("workflow_id", ""),
-                "reason": "Bot relay configured; verify provider responses separately"}
+                "reason": "Local webhook authentication verified; verify provider responses separately",
+                "memory_status": str(memory.get("status", "RECOVERABLE"))}
 
     def service(self, action: str) -> dict[str, Any]:
         self.require_owned()
@@ -1079,10 +1132,11 @@ def managed_menu(manager: N8NManager) -> None:
               "Backup", "Restore backup", "Update pinned n8n version",
               "Remove service (keep data)", "Uninstall service and data",
               "Change access method / domain", "Connect Mikachan AI workflow",
-              "AI Memory · PostgreSQL", "AI Integration · Auto Setup / Repair", "Return"]
+              "AI Memory · PostgreSQL", "AI Integration · Auto Setup / Repair",
+              "AI Models · Cloudflare Workers AI", "Return"]
     while manager.owned():
         choice = _choose("n8n / independent management", labels)
-        if choice == 18:
+        if choice == 19:
             return
         if choice in {12, 13}:
             phrase = "REMOVE N8N SERVICE" if choice == 12 else "PURGE N8N DATA"
@@ -1107,6 +1161,42 @@ def managed_menu(manager: N8NManager) -> None:
                 print("The hostname's DNS A record must point to this server. "
                       f"Public IPv4: {public_ips().get('ipv4') or 'unavailable'}")
                 result = manager.change_access("domain", input("Full hostname: "))
+        elif choice == 18:
+            action = _choose("AI Models · Cloudflare Workers AI",
+                ["Connect Cloudflare credential", "Status", "Mika → Cloudflare",
+                 "Serious → Cloudflare", "Mika → Groq", "Serious → Groq", "Back"])
+            if action == 7:
+                continue
+            release = Path("/opt/Mikachan/current")
+            if not (release / "deploy/n8n/cloudflare_ai.py").is_file():
+                result = {"status": "SETUP_REQUIRED", "reason": "Cloudflare AI integration code is unavailable"}
+            else:
+                command = [sys.executable, "-m", "deploy.n8n.cloudflare_ai"]
+                supplied = None
+                if action == 1:
+                    command += ["prepare", "--token-stdin"]
+                    account = input("Cloudflare account ID (Enter to auto-detect): ").strip()
+                    if account:
+                        command += ["--account-id", account]
+                    supplied = getpass.getpass("Cloudflare API token (hidden): ") + "\n"
+                elif action == 2:
+                    command.append("status")
+                else:
+                    if action in {3, 4} and input(
+                        "Cloudflare inference can consume quota. Type ENABLE CLOUDFLARE "
+                        "to select it: ").strip() != "ENABLE CLOUDFLARE":
+                        print("Selection cancelled; active models were not changed.")
+                        continue
+                    command += ["select", "--agent", "mika" if action in {3, 5}
+                                else "serious", "--provider", "cloudflare"
+                                if action in {3, 4} else "groq"]
+                process = subprocess.run(command, cwd=release, input=supplied,
+                                         capture_output=True, text=True,
+                                         timeout=90, check=False)
+                result = json.loads(process.stdout) if process.returncode == 0 else \
+                    {"status": "SETUP_REQUIRED", "reason": "Cloudflare setup needs diagnostics"}
+                if process.returncode == 0 and action in {3, 4, 5, 6}:
+                    result["workflow"] = manager._reconcile_ai()
         elif choice == 17:
             result = manager.auto_ai_setup()
         elif choice == 16:

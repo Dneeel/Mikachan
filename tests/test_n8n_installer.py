@@ -468,6 +468,7 @@ def test_ai_key_is_verified_before_private_save(manager, monkeypatch):
     manager.install()
     key_file = manager.root / "ai/api-key"
     monkeypatch.setattr(manager, "_reconcile_ai", lambda: {"status": "ACTIVE"})
+    monkeypatch.setattr(manager, "_ensure_ai_memory", lambda: {"status": "DATABASE_READY"})
 
     class Response:
         def __enter__(self):
@@ -480,9 +481,20 @@ def test_ai_key_is_verified_before_private_save(manager, monkeypatch):
             return b'{"data":[]}'
 
     monkeypatch.setattr(n8n.urllib.request, "urlopen", lambda *_args, **_kwargs: Response())
-    assert manager.connect_ai("a" * 40) == {"status": "ACTIVE"}
+    assert manager.connect_ai("a" * 40) == {"status": "ACTIVE",
+                                                "memory_status": "DATABASE_READY"}
     assert key_file.read_text().strip() == "a" * 40
     assert key_file.stat().st_mode & 0o777 == 0o600
     with pytest.raises(n8n.N8NError):
         manager.connect_ai("short")
     assert key_file.read_text().strip() == "a" * 40
+
+
+def test_automatic_memory_respects_small_vps_budget(manager, monkeypatch, tmp_path):
+    release = tmp_path / "release"
+    (release / "deploy/n8n").mkdir(parents=True)
+    (release / "deploy/n8n/pg_memory.py").write_text("# managed helper\n")
+    monkeypatch.setattr(n8n, "host_preflight", lambda _root: {
+        "memory_total": 4_000_000_000, "memory_available": 300_000_000,
+        "disk_free": 10_000_000_000, "inodes_free": 30_000})
+    assert manager._ensure_ai_memory(release)["status"] == "RESOURCE_BLOCKED"

@@ -73,6 +73,29 @@ def test_panel_refresh_requires_bootstrap_marker_and_rejects_symlink(tmp_path):
         manager._refresh_panel(release)
 
 
+def test_owned_independent_n8n_manager_refresh_preserves_backup(tmp_path):
+    manager = Manager(Paths(base=tmp_path / "Mikachan"), require_root=False)
+    release = tmp_path / "release"
+    (release / "deploy").mkdir(parents=True)
+    (release / "deploy/n8n_manager.py").write_text("print('new')\n")
+    root = tmp_path / "n8n"
+    (root / "backups").mkdir(parents=True)
+    (root / ".managed-by-n8n-installer").write_text(
+        "Mikachan optional n8n manager schema 1\n")
+    target = root / "manager.py"
+    target.write_text("print('old')\n")
+    manager._refresh_n8n_manager(release, root)
+    assert target.read_text() == "print('new')\n"
+    backups = list((root / "backups").glob("manager-*.py"))
+    assert len(backups) == 1 and backups[0].read_text() == "print('old')\n"
+    manager._refresh_n8n_manager(release, root)
+    assert len(list((root / "backups").glob("manager-*.py"))) == 1
+    target.unlink()
+    target.symlink_to(tmp_path / "outside")
+    with pytest.raises(ValueError, match="ownership"):
+        manager._refresh_n8n_manager(release, root)
+
+
 def test_install_grants_service_read_access_to_restrictive_release(
         deployment: tuple["FakeManager", Path, str]) -> None:
     manager, _, sha = deployment

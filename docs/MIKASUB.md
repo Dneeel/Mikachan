@@ -1,5 +1,18 @@
 # MikaSub on Mikachan `v2`
 
+## Current Cloudflare state (2026-10-24)
+
+The existing Worker, KV and D1 contain one enabled source:
+`https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/top100.txt`.
+Its document contained 100 distinct exportable configurations. Snapshot
+`31b4df5caed33bd80acc1a6e` was written and read back from the existing KV;
+D1 points to it with a total of 100. No proxy endpoint was tested. The
+existing personal token hash was preserved, so the already issued link should
+continue to address this snapshot. The raw personal URL cannot be reconstructed
+from its hash; it must come from the owner's existing saved URL or be rotated
+deliberately through the authenticated Owner controls. The bot's VPS config
+and an actual subscription request were not accessible from this workspace.
+
 MikaSub publishes an **untested** collection of share configs. It never pings,
 handshakes with, tunnels through, or measures the listed proxy servers. `/proxy`
 is the pre-existing, independent @Dnproxbot userbot feature. `/vpn` is the new
@@ -125,7 +138,7 @@ returns a truthful 503.
 
 ## Deployment and rollback
 
-Use the existing `v2` code. Back up the VPS SQLite database and
+Use the existing `v2.1` code. Back up the VPS SQLite database and
 `/opt/Mikachan/config/bot.env` through the Mikachan manager before activating
 new bot code. Do not start a second bot poller.
 

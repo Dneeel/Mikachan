@@ -12,6 +12,7 @@ import ctypes.util
 import fcntl
 import getpass
 import grp
+import hashlib
 import json
 import os
 import pwd
@@ -825,6 +826,10 @@ class Manager:
             self._refresh_panel(self.paths.releases / sha)
         except (OSError, ValueError) as exc:
             self.on_event(f"Panel refresh skipped: {type(exc).__name__}")
+        try:
+            self._refresh_n8n_manager(self.paths.releases / sha)
+        except (OSError, ValueError) as exc:
+            self.on_event(f"Independent n8n manager refresh skipped: {type(exc).__name__}")
         # The independent n8n service may already be running. Reconcile its
         # AI graph only when an operator-owned API key is available; a missing
         # key never blocks a healthy bot release or adds an installer prompt.
@@ -886,6 +891,45 @@ class Manager:
                 if source.is_symlink() or target.is_symlink() or source.stat().st_size > 64_000:
                     raise ValueError("Terminal asset is unsafe")
                 _atomic(target, source.read_text(encoding="utf-8"), 0o644)
+
+    def _refresh_n8n_manager(self, release: Path,
+                             n8n_root: Path = Path("/opt/n8n")) -> None:
+        """Refresh only an owned n8n command; never touch its running service."""
+        if self.paths.base != Path("/opt/Mikachan") and n8n_root == Path("/opt/n8n"):
+            return
+        marker = n8n_root / ".managed-by-n8n-installer"
+        target = n8n_root / "manager.py"
+        source = release / "deploy/n8n_manager.py"
+        if not marker.is_file():
+            return
+        if (n8n_root.is_symlink() or marker.is_symlink() or target.is_symlink() or
+                source.is_symlink() or not target.is_file() or not source.is_file() or
+                any(path.stat().st_uid != os.geteuid() for path in
+                    (n8n_root, marker, target)) or n8n_root.stat().st_mode & 0o022 or
+                not marker.read_text().startswith("Mikachan optional n8n manager schema 1")):
+            raise ValueError("Independent n8n manager ownership could not be verified")
+        new = source.read_text(encoding="utf-8")
+        if len(new) > 250_000:
+            raise ValueError("Independent n8n manager source is too large")
+        try:
+            compile(new, str(source), "exec")
+        except SyntaxError as exc:
+            raise ValueError("Independent n8n manager source does not compile") from exc
+        lock = n8n_root / ".install.lock"
+        if lock.is_symlink():
+            raise ValueError("Independent n8n manager lock is unsafe")
+        with lock.open("a+") as stream:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            old = target.read_text(encoding="utf-8")
+            if old == new:
+                return
+            backup = n8n_root / "backups" / ("manager-" +
+                hashlib.sha256(old.encode()).hexdigest()[:16] + ".py")
+            if backup.is_symlink():
+                raise ValueError("Independent n8n manager backup is unsafe")
+            if not backup.exists():
+                _atomic(backup, old, 0o600)
+            _atomic(target, new, 0o700)
 
     def install(self, config: dict[str, str] | None = None, *, branch: str = "v2",
                 commit: str | None = None, checks: bool = True,

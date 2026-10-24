@@ -47,8 +47,10 @@ For a fresh installation, **AI Integration → Auto Setup / Repair** in
 bot-owned `0600` relay secret. It preserves any existing credential or secret.
 Once all provider credentials are present and the workflow activates on a
 verified HTTPS domain, it connects the bot through the existing Mikachan
-manager. `WEBHOOK_READY` only confirms that configuration step; provider
-responses still need testing.
+manager. The manager sends an invalid, harmless webhook payload twice to
+verify that a wrong header is rejected and the stored secret is accepted
+before changing the bot configuration. `WEBHOOK_READY` confirms local header
+authentication and bot configuration; provider responses still need testing.
 
 The independent n8n manager now has **AI Memory · PostgreSQL** with Quick
 Install/Repair, Status, Backup, Restore and a Simple/PostgreSQL backend choice.
@@ -56,15 +58,33 @@ Quick Install creates a private database container on n8n's internal Docker
 network and applies the packaged schema and style seeds. The next workflow
 reconciliation creates a dedicated n8n PostgreSQL credential and wires separate
 chat-history tables to Mika and Serious. The existing Simple Memory path remains
-selectable. This path is offline tested; it has not been exercised on the
-owner's VPS. The long-term fact writer/retriever is not implemented, and these
-tables must not be presented as a working personal memory feature yet.
+selectable. The PostgreSQL path also installs a scoped writer and retriever:
+in a **private chat**, an explicit `remember: ...` or `یادت باشه ...` addressed
+to Mika stores a bounded user assertion. Only that numeric sender's private
+facts are retrieved for that sender in a private chat. Group prompts never
+receive private facts. These assertions are labelled unverified data, not
+instructions or independently established truth. Database uniqueness prevents
+duplicate writes on retry. The workflow and container are offline tested;
+neither has been exercised on the owner's VPS, so live memory behavior remains
+unverified. General chat does not automatically create durable facts.
 
-Two disabled Cloudflare Workers AI model nodes are packaged for Mika and
-Serious, using `@cf/google/gemma-4-26b-a4b-it`. They are not connected or
-called by default: the account's free entitlement and n8n tool-calling
-behavior have not been verified. This prevents an unexpected bill or a silent
-model swap. Groq remains the active provider.
+Tavily remains the primary search tool. Each agent also receives a bounded
+Wikipedia search for background and Google News RSS for headline discovery,
+both without credentials. These are narrower than a general live web search.
+The prompt requires source and date checks; a failed tool should still yield a
+visible limited response through the existing result normalizer. Live Agent
+tool-calling behavior remains provider dependent.
+
+Two Cloudflare Workers AI model nodes are packaged for Mika and Serious,
+using `@cf/google/gemma-4-26b-a4b-it`. Groq remains the default. Under
+**AI Models → Cloudflare Workers AI**, the manager can discover a single
+Cloudflare account, verify the token and model listing, and create an n8n
+credential with the account's OpenAI-compatible endpoint. The token stays in
+n8n's encrypted credential store, not Git or an environment file. The owner
+may then explicitly choose Cloudflare or Groq for each agent independently.
+The model does **not** switch on credential creation. Listing a model does not
+prove that inference fits the account's Free allowance or that this model can
+call the current tools; those need a controlled live check before selection.
 
 TikTok `/explore` uses a public third-party feed/search endpoint with no paid
 API key. Public discovery can be rate limited or blocked, especially for topic

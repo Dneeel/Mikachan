@@ -30,13 +30,19 @@ CREATE TABLE IF NOT EXISTS mika_long_term_facts (
     source_kind TEXT NOT NULL,
     visibility TEXT NOT NULL CHECK (visibility IN ('private', 'group', 'public')),
     source_chat_id BIGINT,
+    source_message_id BIGINT,
     verified BOOLEAN NOT NULL DEFAULT FALSE,
     active BOOLEAN NOT NULL DEFAULT TRUE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE mika_long_term_facts
+    ADD COLUMN IF NOT EXISTS source_message_id BIGINT;
 CREATE INDEX IF NOT EXISTS mika_facts_owner_scope
     ON mika_long_term_facts(owner_user_id, visibility, active, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS mika_facts_explicit_message
+    ON mika_long_term_facts(owner_user_id, source_chat_id, source_message_id)
+    WHERE source_message_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS mika_episodic_memory (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
