@@ -825,6 +825,59 @@ class N8NManager:
         graph["memory_status"] = str(memory.get("status", "RECOVERABLE"))
         return graph
 
+    def connect_tavily(self, api_key: str) -> dict[str, str]:
+        """Store a bounded Tavily search credential in n8n, never on disk."""
+        self.require_owned()
+        value = api_key.strip()
+        if not value.startswith("tvly-") or not 20 <= len(value) <= 256 or \
+                any(ch.isspace() for ch in value):
+            raise N8NError("Enter a valid Tavily API key")
+        key_file = self.root / "ai/api-key"
+        if not key_file.is_file() or key_file.stat().st_mode & 0o077:
+            return {"status": "SETUP_REQUIRED", "reason": "Connect the n8n API key first"}
+        n8n_key = key_file.read_text(encoding="utf-8").strip()
+        probe = urllib.request.Request("https://api.tavily.com/search",
+            data=json.dumps({"query": "NASA", "search_depth": "basic",
+                             "max_results": 1, "include_answer": False,
+                             "include_raw_content": False}).encode(),
+            headers={"Authorization": "Bearer " + value,
+                     "Content-Type": "application/json"}, method="POST")
+        try:
+            with urllib.request.urlopen(probe, timeout=15) as response:
+                if response.status != 200:
+                    raise N8NError("Tavily did not accept the API key")
+        except (urllib.error.URLError, TimeoutError) as exc:
+            raise N8NError("Tavily search could not be verified; nothing was changed") from exc
+        api = "http://127.0.0.1:5678/api/v1"
+        headers = {"X-N8N-API-KEY": n8n_key, "Content-Type": "application/json"}
+        try:
+            with urllib.request.urlopen(urllib.request.Request(
+                    api + "/credentials?limit=100", headers=headers), timeout=10) as response:
+                listed = json.load(response).get("data", [])
+            if any(row.get("name") == "Mikachan Tavily Search" and
+                   row.get("type") != "httpHeaderAuth" for row in listed):
+                raise N8NError("A different credential uses the Tavily search name")
+            if any(row.get("name") == "Mikachan Tavily Search" for row in listed):
+                graph = self._reconcile_ai()
+                return {"status": "ALREADY_CONNECTED", "reason":
+                        "Existing Tavily credential was preserved",
+                        "workflow_status": str(graph.get("status", "SETUP_REQUIRED"))}
+            body = {"name": "Mikachan Tavily Search", "type": "httpHeaderAuth",
+                    "data": {"name": "Authorization", "value": "Bearer " + value,
+                             "allowedHttpRequestDomains": "domains",
+                             "allowedDomains": "api.tavily.com"}}
+            with urllib.request.urlopen(urllib.request.Request(api + "/credentials",
+                    data=json.dumps(body).encode(), headers=headers, method="POST"),
+                    timeout=10) as response:
+                credential_id = str(json.load(response).get("id", ""))
+            if not credential_id:
+                raise N8NError("n8n did not confirm the Tavily credential")
+        except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+            raise N8NError("n8n could not store the Tavily credential; no key was logged") from exc
+        graph = self._reconcile_ai()
+        return {"status": "CONNECTED", "workflow_status":
+                str(graph.get("status", "SETUP_REQUIRED"))}
+
     def _ensure_ai_memory(self, release: Path | None = None) -> dict[str, str]:
         """Install the small private database after n8n API setup, if safe."""
         release = release or Path("/opt/Mikachan/current")
@@ -1136,10 +1189,10 @@ def managed_menu(manager: N8NManager) -> None:
               "Remove service (keep data)", "Uninstall service and data",
               "Change access method / domain", "Connect Mikachan AI workflow",
               "AI Memory · PostgreSQL", "AI Integration · Auto Setup / Repair",
-              "AI Models · Cloudflare Workers AI", "Return"]
+              "AI Models · Cloudflare Workers AI", "AI Search · Tavily", "Return"]
     while manager.owned():
         choice = _choose("n8n / independent management", labels)
-        if choice == 19:
+        if choice == 20:
             return
         if choice in {12, 13}:
             phrase = "REMOVE N8N SERVICE" if choice == 12 else "PURGE N8N DATA"
@@ -1200,6 +1253,10 @@ def managed_menu(manager: N8NManager) -> None:
                     {"status": "SETUP_REQUIRED", "reason": "Cloudflare setup needs diagnostics"}
                 if process.returncode == 0 and action in {3, 4, 5, 6}:
                     result["workflow"] = manager._reconcile_ai()
+        elif choice == 19:
+            print("Create a Tavily API key in your Tavily account. It will be "
+                  "stored only as an encrypted n8n credential for api.tavily.com.")
+            result = manager.connect_tavily(getpass.getpass("Tavily API key (hidden): "))
         elif choice == 17:
             result = manager.auto_ai_setup()
         elif choice == 16:
@@ -1401,6 +1458,7 @@ def main() -> None:
     remove.add_argument("--purge", action="store_true")
     remove.add_argument("--confirm", default="")
     commands.add_parser("ai-connect")
+    commands.add_parser("ai-search-connect")
     commands.add_parser("ai-auto-setup")
     args = parser.parse_args()
     manager = N8NManager()
@@ -1439,6 +1497,10 @@ def main() -> None:
             if not sys.stdin.isatty():
                 raise N8NError("Run ai-connect in an interactive terminal to protect the key")
             result = manager.connect_ai(getpass.getpass("n8n API key (hidden): "))
+        elif args.command == "ai-search-connect":
+            if not sys.stdin.isatty():
+                raise N8NError("Run ai-search-connect in an interactive terminal to protect the key")
+            result = manager.connect_tavily(getpass.getpass("Tavily API key (hidden): "))
         elif args.command == "ai-auto-setup":
             result = manager.auto_ai_setup()
         elif args.command == "access-set":

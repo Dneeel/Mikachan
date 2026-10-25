@@ -180,8 +180,10 @@ def test_artifact_has_two_isolated_agents_and_preserves_media_edges():
         "Mika Serious Agent"
     assert links["AI Agent"]["main"][0][0]["node"] == "Normalize Chat Result"
     assert nodes["AI Agent"]["continueOnFail"] is True
-    assert links["Tavily MCP"]["ai_tool"][0][0]["node"] == "AI Agent"
-    assert links["Tavily MCP1"]["ai_tool"][0][0]["node"] == "Mika Serious Agent"
+    assert "Tavily MCP" not in links and "Tavily MCP1" not in links
+    assert links["Search Intent"]["main"][0][0]["node"] == "Tavily HTTP Search"
+    assert links["Search Intent"]["main"][1][0]["node"] == "Is AI Reply?"
+    assert links["Tavily HTTP Search"]["main"][0][0]["node"] == "Attach Search Results"
     assert len([n for n in graph["nodes"] if n["type"] == "n8n-nodes-base.stickyNote"]) == 8
     for name in ("Cloudflare Mika Model", "Cloudflare Serious Model"):
         assert nodes[name]["disabled"] is True
@@ -428,17 +430,31 @@ def test_disabled_optional_model_does_not_block_active_workflow(tmp_path, monkey
     assert result["status"] == "ACTIVE"
 
 
-def test_tavily_search_is_the_only_tool_for_each_agent():
+def test_tavily_prefetch_is_the_only_search_provider_and_is_bounded():
     graph = json.loads((Path(__file__).resolve().parents[1] /
         "deploy/n8n/mikachan_ai_workflow.json").read_text())
-    _configure_search(graph)
+    _configure_search(graph, "test-credential")
     tools = {node["name"]: node for node in graph["nodes"]}
     assert not any("Wikipedia Fallback" in name or "News Fallback" in name
                    for name in tools)
-    for name, agent in (("Tavily MCP", "AI Agent"),
-                        ("Tavily MCP1", "Mika Serious Agent")):
-        assert tools[name]["parameters"]["includeTools"] == ["tavily_search"]
-        assert graph["connections"][name]["ai_tool"][0][0]["node"] == agent
+    assert not any(node.get("type") == "@n8n/mcp-registry.tavily"
+                   for node in graph["nodes"])
+    search = tools["Tavily HTTP Search"]
+    assert search["parameters"]["url"] == "https://api.tavily.com/search"
+    assert search["parameters"]["genericAuthType"] == "httpHeaderAuth"
+    assert "max_results: 3" in search["parameters"]["jsonBody"]
+    assert search["credentials"]["httpHeaderAuth"]["name"] == "Mikachan Tavily Search"
+    assert "slice(0, 350)" in tools["Attach Search Results"]["parameters"]["jsCode"]
+    assert all(not ports.get("ai_tool") for ports in graph["connections"].values())
+
+
+def test_missing_optional_tavily_credential_keeps_ai_route_available():
+    graph = json.loads(ARTIFACT.read_text(encoding="utf-8"))
+    _configure_search(graph)
+    nodes = {node["name"]: node for node in graph["nodes"]}
+    assert "credentials" not in nodes["Tavily HTTP Search"]
+    assert graph["connections"]["Search Intent"]["main"][0][0]["node"] == \
+        "Attach Search Results"
 
 
 def test_ai_telegram_replies_use_original_webhook_message_after_agent():

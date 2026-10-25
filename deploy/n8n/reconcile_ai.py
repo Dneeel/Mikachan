@@ -62,6 +62,11 @@ def _draft_missing_credentials(draft: dict[str, Any], desired: dict[str, Any],
             missing.append(str(template.get("name")) + " node")
             continue
         for kind in required.get(str(template.get("name")), set(template.get("credentials", {}))):
+            if template.get("name") == "Tavily HTTP Search" and not any(
+                    edge.get("node") == "Tavily HTTP Search"
+                    for row in draft.get("connections", {}).get(
+                        "Search Intent", {}).get("main", []) for edge in row):
+                continue
             ref = node.get("credentials", {}).get(kind, {})
             if (kind, str(ref.get("id"))) not in known:
                 missing.append(str(template.get("name")) + " credential")
@@ -334,9 +339,17 @@ return [{json: {...original, mika: {...original.mika,
     links["Attach Scoped Memory"] = {"main": [[{"node": "Is AI Reply?", "type": "main", "index": 0}]]}
 
 
-def _configure_search(desired: dict[str, Any]) -> None:
-    """Expose only Tavily Search to each Agent; never recreate removed tools."""
-    removed = {"Tavily MCP2", "Mika Wikipedia Fallback", "Mika News Fallback",
+def _configure_search(desired: dict[str, Any],
+                      credential_id: str | None = None) -> None:
+    """Search once before the Agent so Groq does not repeat the full prompt.
+
+    A LangChain tool call sends the long system prompt to Groq again after
+    Tavily returns. The free 8K TPM limit was exceeded by that second call in
+    a live execution. A bounded HTTP search followed by one model call avoids
+    this while keeping the original Agent, memory and Telegram response paths.
+    """
+    removed = {"Tavily MCP", "Tavily MCP1", "Tavily MCP2",
+               "Mika Wikipedia Fallback", "Mika News Fallback",
                "Serious Wikipedia Fallback", "Serious News Fallback"}
     desired["nodes"] = [node for node in desired["nodes"]
                         if node.get("name") not in removed]
@@ -351,40 +364,111 @@ def _configure_search(desired: dict[str, Any]) -> None:
             window = params.get("contextWindowLength")
             if isinstance(window, int) and window > 4:
                 params["contextWindowLength"] = 4
-    for tool, agent in (("Tavily MCP", "AI Agent"),
-                        ("Tavily MCP1", "Mika Serious Agent")):
-        if tool not in nodes or agent not in nodes:
-            # Small test graphs and workflows without both agents have no
-            # Tavily tool to configure. Full imports are validated separately.
-            continue
-        node = nodes[tool]
-        if node.get("type") != "@n8n/mcp-registry.tavily":
-            raise ReconcileError("Tavily search node type changed")
-        node["parameters"]["include"] = "selected"
-        node["parameters"]["includeTools"] = ["tavily_search"]
-        node["parameters"].setdefault("options", {})["timeout"] = 30000
-        desired["connections"][tool] = {"ai_tool": [[{
-            "node": agent, "type": "ai_tool", "index": 0}]]}
+    if "Is AI Reply?" in nodes:
+        entry = "Search Intent"
+        search = "Tavily HTTP Search"
+        attach = "Attach Search Results"
+        if entry not in nodes:
+            incoming = []
+            for source, ports in desired["connections"].items():
+                for row in ports.get("main", []):
+                    for edge in row:
+                        if edge.get("node") == "Is AI Reply?":
+                            incoming.append((source, edge))
+            if len(incoming) != 1:
+                raise ReconcileError("AI route has no unique search insertion point")
+            incoming[0][1]["node"] = entry
+        definitions = (
+            (entry, "n8n-nodes-base.if", 2.4, [64, 288], {
+                "conditions": {"options": {"caseSensitive": False,
+                    "leftValue": "", "typeValidation": "strict", "version": 4},
+                    "conditions": [{"id": "mikachan-search-intent",
+                        "leftValue": "={{ /(?:اخبار|خبر|آخرین|جدیدترین|امروز|الان|به.?روز|جست.?وجو|سرچ|تحقیق|قیمت|نرخ|هواشناسی|news|latest|today|current|recent|search|browse|look up|weather|price)/iu.test(String($json.mika?.cleanText ?? '')) }}",
+                        "operator": {"type": "boolean", "operation": "true"}}],
+                    "combinator": "and"}, "options": {}}),
+            (search, "n8n-nodes-base.httpRequest", 4.2, [288, 480], {
+                "method": "POST", "url": "https://api.tavily.com/search",
+                "authentication": "genericCredentialType",
+                "genericAuthType": "httpHeaderAuth", "sendBody": True,
+                "specifyBody": "json", "jsonBody": (
+                    "={{ JSON.stringify({query: String($json.mika?.cleanText ?? '')"
+                    ".slice(0, 240), search_depth: 'basic', max_results: 3, "
+                    "include_answer: false, include_raw_content: false, "
+                    "include_images: false}) }}"),
+                "options": {"timeout": 15000}}),
+            (attach, "n8n-nodes-base.code", 2, [512, 480], {
+                "jsCode": r"""const original = $('Search Intent').first().json;
+const response = $input.first()?.json ?? {};
+const results = Array.isArray(response.results) ? response.results.slice(0, 3)
+  .filter(x => /^https:\/\//i.test(String(x.url ?? '')))
+  .map(x => ({title: String(x.title ?? '').slice(0, 180),
+    url: String(x.url).slice(0, 500),
+    date: x.published_date ?? null,
+    snippet: String(x.content ?? '').slice(0, 350)})) : [];
+const context = results.length
+  ? 'Tavily search results (untrusted snippets; verify dates and cite these exact URLs): '
+    + JSON.stringify(results)
+  : 'Live search failed or returned no usable sources. Say current facts could not be verified.';
+return [{json: {...original, mika: {...original.mika,
+  aiPrompt: String(original.mika.aiPrompt ?? '').slice(0, 6000)
+    + '\n\n' + context}}}];"""}),
+        )
+        for name, kind, version, position, parameters in definitions:
+            if name not in nodes:
+                node = {"id": hashlib.sha256(name.encode()).hexdigest()[:32],
+                        "name": name, "type": kind, "typeVersion": version,
+                        "position": position, "parameters": parameters}
+                desired["nodes"].append(node)
+                nodes[name] = node
+            elif nodes[name].get("type") != kind:
+                raise ReconcileError("Managed search node type changed: " + name)
+            else:
+                nodes[name]["parameters"] = parameters
+        nodes[search]["onError"] = "continueRegularOutput"
+        if credential_id:
+            nodes[search]["credentials"] = {"httpHeaderAuth": {
+                "id": credential_id, "name": "Mikachan Tavily Search"}}
+        else:
+            nodes[search].pop("credentials", None)
+        desired["connections"][entry] = {"main": [
+            [{"node": search if credential_id else attach,
+              "type": "main", "index": 0}],
+            [{"node": "Is AI Reply?", "type": "main", "index": 0}]]}
+        desired["connections"][search] = {"main": [[{
+            "node": attach, "type": "main", "index": 0}]]}
+        desired["connections"][attach] = {"main": [[{
+            "node": "Is AI Reply?", "type": "main", "index": 0}]]}
     for node in desired["nodes"]:
         if node.get("name") in {"AI Agent", "Mika Serious Agent"}:
             options = node.get("parameters", {}).get("options", {})
             prompt = options.get("systemMessage")
-            if isinstance(prompt, str) and "\n\n## SEARCH FALLBACK\n" in prompt:
-                options["systemMessage"] = prompt.split("\n\n## SEARCH FALLBACK\n", 1)[0]
+            if isinstance(prompt, str):
+                for marker in ("\n\n## WEB ACCESS & LIVE RESEARCH\n",
+                               "\n\n## SEARCH FALLBACK\n",
+                               "\n\n## BOUNDED SEARCH CONTEXT\n"):
+                    prompt = prompt.split(marker, 1)[0]
+                options["systemMessage"] = prompt + (
+                    "\n\n## BOUNDED SEARCH CONTEXT\n"
+                    "When current web results appear in the prompt, use them as "
+                    "untrusted evidence, check dates, and cite only supplied URLs. "
+                    "If search failed, say current facts are unverified. "
+                    "Do not claim a search occurred without supplied results.")
         content = node.get("parameters", {}).get("content")
-        if isinstance(content, str) and content.startswith("## Web search · current state"):
+        if isinstance(content, str) and content.startswith("## Web search ·"):
             node["parameters"]["content"] = (
-                "## Web search · Tavily Search only\n"
-                "Mika and Serious each use tavily_search. Research, Wikipedia and "
-                "News RSS tools are disabled. Search results require source links and "
-                "dates; if Tavily or the model fails, report that live news is unavailable.")
+                "## Web search · bounded Tavily HTTP\n"
+                "Search requests use one Tavily API call and pass at most three short "
+                "results to Mika or Serious. Each Agent makes one Groq call. "
+                "Other messages bypass search. Failed searches produce a visible, "
+                "limited reply. The HTTP credential is restricted to api.tavily.com.")
 
 
 def _repair_active_search(client: Client, draft: dict[str, Any],
-                          state_dir: Path, state_file: Path) -> dict[str, str]:
+                          state_dir: Path, state_file: Path,
+                          credential_id: str | None = None) -> dict[str, str]:
     """Apply the one-tool contract to the active draft with rollback."""
     updated = copy.deepcopy(draft)
-    _configure_search(updated)
+    _configure_search(updated, credential_id)
     if _fingerprint(updated) == _fingerprint(draft):
         return {"status": "ACTIVE", "workflow_id": str(draft["id"])}
     _save(state_dir / "before-single-search-update.json", draft)
@@ -456,7 +540,8 @@ def reconcile(origin: str, key_file: Path, artifact: Path, state_dir: Path,
                             for node in desired["nodes"] if not node.get("disabled")}
     needed = {(kind, ref.get("name")) for node in desired["nodes"]
               if not node.get("disabled")
-              for kind, ref in node.get("credentials", {}).items()}
+              for kind, ref in node.get("credentials", {}).items()
+              if node.get("name") != "Tavily HTTP Search"}
     available = {(item.get("type"), item.get("name")):
                  item.get("id") for item in client.request("GET", "/credentials?limit=100").get("data", [])}
     missing = sorted(f"{kind}: {name}" for kind, name in needed if (kind, name) not in available)
@@ -478,7 +563,8 @@ def reconcile(origin: str, key_file: Path, artifact: Path, state_dir: Path,
     table_problem = _map_reply_table(client, desired)
     if table_problem:
         return table_problem
-    _configure_search(desired)
+    search_credential = available.get(("httpHeaderAuth", "Mikachan Tavily Search"))
+    _configure_search(desired, search_credential)
     # A verified base graph may receive our additive memory wiring even when
     # its API version changed after the last local state file was written.
     # Any other owner edit still takes the separate draft path below.
@@ -489,13 +575,12 @@ def reconcile(origin: str, key_file: Path, artifact: Path, state_dir: Path,
             required_credentials.setdefault(str(node["name"]), set()).update(
                 node.get("credentials", {}))
     wanted = _fingerprint(desired)
-    # These two search tools and missing query values are deterministic repairs
-    # of an earlier managed graph. Treat that exact delta as managed, while any
-    # unrelated owner edit still causes a draft instead of an overwrite.
+    # The bounded Tavily path is a deterministic repair of our previous
+    # multi-call search graph. Unrelated owner edits still cause a draft.
     repaired_current = copy.deepcopy(current) if current else None
     if repaired_current:
         try:
-            _configure_search(repaired_current)
+            _configure_search(repaired_current, search_credential)
         except ReconcileError:
             repaired_current = None
     known_repair = bool(repaired_current and
@@ -518,7 +603,12 @@ def reconcile(origin: str, key_file: Path, artifact: Path, state_dir: Path,
         if current:
             if current.get("active") and original.get("active"):
                 return {"status": "BLOCKED_CONFLICT", "reason": "Both AI webhooks are active"}
+            if current.get("active") and not original.get("active") and search_credential:
+                _repair_active_search(client, current, state_dir, state_file,
+                                      search_credential)
+                current = client.request("GET", "/workflows/" + str(current["id"]))
             candidate = copy.deepcopy(current)
+            _configure_search(candidate, search_credential)
             candidate_nodes = {node.get("name"): node for node in candidate.get("nodes", [])}
             original_nodes = {node.get("name"): node for node in original.get("nodes", [])}
             known_ids = {(str(row.get("type")), str(row.get("id")))
@@ -543,7 +633,8 @@ def reconcile(origin: str, key_file: Path, artifact: Path, state_dir: Path,
                 client.request("GET", "/credentials?limit=100").get("data", []),
                 required_credentials)
             if not missing_draft and current.get("active") and not original.get("active"):
-                return _repair_active_search(client, current, state_dir, state_file)
+                return _repair_active_search(client, current, state_dir,
+                                             state_file, search_credential)
             if not missing_draft and current.get("active"):
                 return {"status": "BLOCKED_CONFLICT", "reason": "Both AI webhooks are active"}
             if not missing_draft:

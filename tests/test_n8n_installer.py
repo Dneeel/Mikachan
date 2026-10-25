@@ -490,6 +490,48 @@ def test_ai_key_is_verified_before_private_save(manager, monkeypatch):
     assert key_file.read_text().strip() == "a" * 40
 
 
+def test_tavily_key_is_verified_and_only_saved_as_n8n_credential(manager, monkeypatch):
+    manager.install()
+    key_file = manager.root / "ai/api-key"
+    n8n.atomic(key_file, "n" * 40 + "\n")
+    monkeypatch.setattr(manager, "_reconcile_ai", lambda: {"status": "ACTIVE"})
+    calls = []
+
+    class Response:
+        status = 200
+
+        def __init__(self, body):
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, *_args):
+            return self.body
+
+    def urlopen(request, **_kwargs):
+        calls.append(request)
+        if request.full_url == "https://api.tavily.com/search":
+            return Response(b'{"results":[]}')
+        if request.get_method() == "GET":
+            return Response(b'{"data":[]}')
+        return Response(b'{"id":"cred-1"}')
+
+    monkeypatch.setattr(n8n.urllib.request, "urlopen", urlopen)
+    secret = "tvly-" + "x" * 40
+    assert manager.connect_tavily(secret) == {"status": "CONNECTED",
+                                             "workflow_status": "ACTIVE"}
+    created = json.loads(calls[-1].data)
+    assert created["type"] == "httpHeaderAuth"
+    assert created["data"]["allowedDomains"] == "api.tavily.com"
+    assert created["data"]["value"] == "Bearer " + secret
+    assert secret not in key_file.read_text()
+    assert secret not in manager.journal.read_text()
+
+
 def test_automatic_memory_respects_small_vps_budget(manager, monkeypatch, tmp_path):
     release = tmp_path / "release"
     (release / "deploy/n8n").mkdir(parents=True)

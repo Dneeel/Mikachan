@@ -76,13 +76,17 @@ duplicate writes on retry. The workflow and container are offline tested;
 neither has been exercised on the owner's VPS, so live memory behavior remains
 unverified. General chat does not automatically create durable facts.
 
-Tavily Search is the sole attached search tool for Mika and Serious. The
-Tavily Research, Wikipedia and Google News tools are removed from the managed
-workflow. Search output still needs source links and date checks; a failed tool
-must produce a visible limited response through the existing result normalizer.
-Reducing the tool set also reduces model tool schemas, but it does not prove
-that Groq's token quota or Tavily OAuth is healthy. Verify both in live n8n
-executions after deployment.
+Search requests take one bounded Tavily HTTP request before either Agent. Up to
+three titles, URLs and short snippets are passed to a single Groq call; ordinary
+chat bypasses Tavily. This avoids the extra Groq calls made by the former MCP
+tool path. The Tavily key lives only in n8n's encrypted **Mikachan Tavily Search**
+Header Auth credential, restricted to `api.tavily.com`. Connect it once through
+**n8n-manage → AI Search · Tavily** or `n8n-manage ai-search-connect` after the
+n8n API key is connected. The key is not saved in Mikachan files. Without it,
+search prompts receive an explicit unavailable-source context while other AI
+routes remain usable. Search snippets are untrusted; the Agent must check dates
+and cite returned URLs. Provider quota and Telegram delivery still require live
+verification on each installation.
 
 Two Cloudflare Workers AI model nodes are packaged for Mika and Serious,
 using `@cf/google/gemma-4-26b-a4b-it`. Groq remains the default. Under
