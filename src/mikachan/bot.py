@@ -371,6 +371,10 @@ class App:
         """Send only an approved command and its needed reply data to n8n."""
         if not m.from_user or not self.authorized(m.from_user.id, m.chat.id, m.chat.type):
             return
+        if text.strip() in {"میکا", "/mika"} and not m.reply_to_message:
+            await m.reply(response("called", self.personality_mode(
+                m.from_user.id, m.chat.type)))
+            return
         if not self.store.rate(m.from_user.id, "n8n_relay", 6):
             await m.reply("Too many audio or AI requests. Try again shortly.")
             return

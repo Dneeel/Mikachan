@@ -159,6 +159,9 @@ def test_artifact_has_two_isolated_agents_and_preserves_media_edges():
     rebuilt = build(graph)
     assert len(rebuilt["nodes"]) == len(graph["nodes"])
     nodes = {node["name"]: node for node in graph["nodes"]}
+    analyze = nodes["Analyze Message"]["parameters"]["jsCode"]
+    assert "cleanText || fallback" in analyze
+    assert "only addressed you by name" in analyze
     assert "verifiedOwner: $json.message.verified_owner === true" in \
         nodes["AI Agent"]["parameters"]["options"]["systemMessage"]
     assert len([node for node in graph["nodes"] if node["type"] ==

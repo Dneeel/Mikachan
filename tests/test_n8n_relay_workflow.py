@@ -127,6 +127,21 @@ async def test_secondary_owner_has_private_mommy_context_without_daniel_identity
 
 
 @pytest.mark.asyncio
+async def test_bare_mika_call_responds_without_empty_agent_prompt():
+    app = App.__new__(App)
+    app.store = SimpleNamespace(rate=lambda *_args: True, access_registry=None)
+    app.n8n_gateway = SimpleNamespace(relay_telegram=AsyncMock())
+    app.settings = SimpleNamespace(owner_telegram_id=7, mommy_ids=set())
+    app.authorized = lambda uid, _chat, _type: uid == 7
+    message = SimpleNamespace(from_user=SimpleNamespace(id=7),
+        chat=SimpleNamespace(id=7, type="private"), message_id=15,
+        reply_to_message=None, reply=AsyncMock())
+    await app.relay_n8n_command(message, "میکا")
+    message.reply.assert_awaited_once_with("I'm here, darling. What do you need?")
+    app.n8n_gateway.relay_telegram.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_plain_reply_to_bot_is_marked_for_ai_row_verification():
     app = App.__new__(App)
     app.store = SimpleNamespace(rate=lambda *_args: True)

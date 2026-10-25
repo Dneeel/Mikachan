@@ -18,6 +18,8 @@ def mode_for(user_id: int, authorized: set[int], mommy_ids: set[int],
 def response(event: str, mode: Mode) -> str:
     templates = {
         "ready": ("Ready when you are.", "I'm here, darling. Tell me what you need."),
+        "called": ("I'm here. What do you need?",
+                   "I'm here, darling. What do you need?"),
         "unavailable": ("That source is unavailable right now.",
                         "That source is unavailable right now, darling."),
     }
