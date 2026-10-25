@@ -27,6 +27,7 @@ without any AI credential; the bot's ordinary commands continue working.
   activates the draft, and verifies the result. A failed activation restores
   the original webhook. Incomplete drafts remain inactive with an exact list of
   missing node credentials; they never take over Telegram delivery.
+  A PostgreSQL-backed draft may omit the disconnected Simple Memory nodes.
 
 ## One-time owner actions
 

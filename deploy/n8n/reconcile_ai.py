@@ -50,11 +50,15 @@ def _draft_missing_credentials(draft: dict[str, Any], desired: dict[str, Any],
         return ["POST /webhook/mikachan-relay with Header Auth"]
     known = {(str(row.get("type")), str(row.get("id"))) for row in credentials}
     missing = []
+    postgres_memory = {"Mika Postgres Memory", "Serious Postgres Memory"} <= nodes.keys()
     for template in desired.get("nodes", []):
         if template.get("disabled"):
             continue
         node = nodes.get(template.get("name"))
         if not node or node.get("disabled"):
+            if postgres_memory and template.get("name") in {
+                    "Mika Simple Memory", "Serious Simple Memory"}:
+                continue
             missing.append(str(template.get("name")) + " node")
             continue
         for kind in required.get(str(template.get("name")), set(template.get("credentials", {}))):
@@ -520,13 +524,19 @@ def reconcile(origin: str, key_file: Path, artifact: Path, state_dir: Path,
                 return {"status": "BLOCKED_CONFLICT", "reason": "Both AI webhooks are active"}
             candidate = copy.deepcopy(current)
             candidate_nodes = {node.get("name"): node for node in candidate.get("nodes", [])}
+            original_nodes = {node.get("name"): node for node in original.get("nodes", [])}
             known_ids = {(str(row.get("type")), str(row.get("id")))
                          for row in client.request("GET", "/credentials?limit=100").get("data", [])}
             for template in desired["nodes"]:
                 node = candidate_nodes.get(template.get("name"))
                 if not node or node.get("disabled"):
                     continue
-                for kind, ref in template.get("credentials", {}).items():
+                for kind in required_credentials.get(str(template.get("name")), set()):
+                    ref = template.get("credentials", {}).get(kind, {})
+                    inherited = original_nodes.get(template.get("name"), {}).get(
+                        "credentials", {}).get(kind, {})
+                    if (kind, str(inherited.get("id"))) in known_ids:
+                        node.setdefault("credentials", {}).setdefault(kind, inherited)
                     if (kind, str(ref.get("id"))) in known_ids:
                         node.setdefault("credentials", {}).setdefault(kind, ref)
             if _fingerprint(candidate) != _fingerprint(current):

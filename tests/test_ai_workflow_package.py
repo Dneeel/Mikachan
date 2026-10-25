@@ -37,6 +37,14 @@ def test_ready_draft_requires_real_credentials_and_private_webhook():
     wrong_path["nodes"][0]["parameters"]["path"] = "other"
     assert any("POST /webhook/mikachan-relay" in reason for reason in
                _draft_missing_credentials(wrong_path, desired, available, required))
+    postgres_draft = {"nodes": [hook, agent,
+        {"name": "Mika Postgres Memory", "type": "memory"},
+        {"name": "Serious Postgres Memory", "type": "memory"}]}
+    with_old_memory = {"nodes": [*desired["nodes"],
+        {"name": "Mika Simple Memory", "type": "memory"},
+        {"name": "Serious Simple Memory", "type": "memory"}]}
+    assert _draft_missing_credentials(postgres_draft, with_old_memory, available,
+                                      required) == []
 
 
 @pytest.mark.parametrize("fail_activation", [False, True])
@@ -82,8 +90,11 @@ def test_reconcile_repairs_credentials_and_activates_existing_draft(tmp_path, mo
     key = tmp_path / "api-key"
     key.write_text("x" * 40)
     os.chmod(key, 0o600)
-    original = {**graph, "settings": {"owner_note": True}, "id": "original",
+    original = {**graph, "nodes": copy.deepcopy(graph["nodes"]),
+                "settings": {"owner_note": True}, "id": "original",
                 "active": True, "versionId": "old-v1"}
+    original["nodes"][1]["credentials"]["groqApi"] = {
+        "name": "Owner selected Groq", "id": "owner-groq-id"}
     draft = {"name": "AI · Setup Draft", "nodes": [
         {k: v for k, v in webhook.items() if k != "credentials"},
         {k: v for k, v in model.items() if k != "credentials"}],
@@ -103,7 +114,9 @@ def test_reconcile_repairs_credentials_and_activates_existing_draft(tmp_path, mo
             if path.startswith("/credentials?"):
                 return {"data": [{"type": "httpHeaderAuth", "name": "Mikachan Private Relay",
                                   "id": "header-id"},
-                                 {"type": "groqApi", "name": "Groq account", "id": "groq-id"}]}
+                                 {"type": "groqApi", "name": "Groq account", "id": "groq-id"},
+                                 {"type": "groqApi", "name": "Owner selected Groq",
+                                  "id": "owner-groq-id"}]}
             if path == "/workflows/original" and method == "GET":
                 return original
             if path == "/workflows/draft" and method == "GET":
@@ -124,7 +137,7 @@ def test_reconcile_repairs_credentials_and_activates_existing_draft(tmp_path, mo
     assert result == {"status": "ACTIVE", "workflow_id": "draft"}
     assert original["active"] is False and draft["active"] is True
     assert draft["nodes"][0]["credentials"]["httpHeaderAuth"]["id"] == "header-id"
-    assert draft["nodes"][1]["credentials"]["groqApi"]["id"] == "groq-id"
+    assert draft["nodes"][1]["credentials"]["groqApi"]["id"] == "owner-groq-id"
     assert events.index(("POST", "/workflows/original/deactivate")) < \
         events.index(("POST", "/workflows/draft/activate"))
 
