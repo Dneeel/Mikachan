@@ -20,6 +20,13 @@ without any AI credential; the bot's ordinary commands continue working.
   required columns before use.
 - Future Mikachan and n8n manager updates retry workflow reconciliation when
   the private API key remains available. The key is never kept in Git.
+- If an Owner-edited original workflow requires a separate Setup Draft, the
+  reconciler fills only empty credential slots with exact named n8n credentials.
+  Once every enabled node has a valid credential and the draft has the approved
+  authenticated POST webhook, it backs up both graphs, deactivates the original,
+  activates the draft, and verifies the result. A failed activation restores
+  the original webhook. Incomplete drafts remain inactive with an exact list of
+  missing node credentials; they never take over Telegram delivery.
 
 ## One-time owner actions
 

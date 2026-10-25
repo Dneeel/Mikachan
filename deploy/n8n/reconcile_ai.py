@@ -34,6 +34,65 @@ def _fingerprint(graph: dict[str, Any]) -> str:
         sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
+def _draft_missing_credentials(draft: dict[str, Any], desired: dict[str, Any],
+                               credentials: list[dict[str, Any]],
+                               required: dict[str, set[str]]) -> list[str]:
+    """Check real n8n credential IDs before switching the production webhook."""
+    nodes = {node.get("name"): node for node in draft.get("nodes", [])}
+    hooks = [node for node in draft.get("nodes", []) if node.get("type") ==
+             "n8n-nodes-base.webhook" and not node.get("disabled")]
+    if len(hooks) != 1 or any(node.get("type") == "n8n-nodes-base.telegramTrigger"
+                              for node in draft.get("nodes", [])):
+        return ["one authenticated webhook and no Telegram Trigger"]
+    params = hooks[0].get("parameters", {})
+    if (params.get("path") != "mikachan-relay" or params.get("httpMethod") != "POST" or
+            params.get("authentication") != "headerAuth"):
+        return ["POST /webhook/mikachan-relay with Header Auth"]
+    known = {(str(row.get("type")), str(row.get("id"))) for row in credentials}
+    missing = []
+    for template in desired.get("nodes", []):
+        if template.get("disabled"):
+            continue
+        node = nodes.get(template.get("name"))
+        if not node or node.get("disabled"):
+            missing.append(str(template.get("name")) + " node")
+            continue
+        for kind in required.get(str(template.get("name")), set(template.get("credentials", {}))):
+            ref = node.get("credentials", {}).get(kind, {})
+            if (kind, str(ref.get("id"))) not in known:
+                missing.append(str(template.get("name")) + " credential")
+    return missing
+
+
+def _activate_draft(client: Client, original: dict[str, Any], draft: dict[str, Any],
+                    state_dir: Path, state_file: Path) -> dict[str, str]:
+    """Switch the one production webhook and restore the old one on failure."""
+    state_dir.mkdir(parents=True, exist_ok=True)
+    _save(state_dir / "cutover-original-backup.json", original)
+    _save(state_dir / "cutover-draft-backup.json", draft)
+    was_active = bool(original.get("active"))
+    try:
+        if was_active:
+            client.request("POST", "/workflows/" + str(original["id"]) +
+                           "/deactivate", {})
+        client.request("POST", "/workflows/" + str(draft["id"]) + "/activate", {})
+        active = client.request("GET", "/workflows/" + str(draft["id"]))
+        if not active.get("active") or _fingerprint(active) != _fingerprint(draft):
+            raise ReconcileError("Candidate webhook activation did not verify")
+    except ReconcileError:
+        try:
+            client.request("POST", "/workflows/" + str(draft["id"]) + "/deactivate", {})
+            if was_active:
+                client.request("POST", "/workflows/" + str(original["id"]) +
+                               "/activate", {})
+        except ReconcileError:
+            raise ReconcileError("AI webhook cutover failed; inspect both workflows") from None
+        raise
+    _save(state_file, {"id": draft["id"], "fingerprint": _fingerprint(draft),
+                       "version_id": active.get("versionId")})
+    return {"status": "ACTIVE", "workflow_id": str(draft["id"])}
+
+
 def _private_file(path: Path) -> str:
     if path.is_symlink() or not path.is_file():
         raise ReconcileError("n8n API key file is unavailable")
@@ -391,7 +450,10 @@ def reconcile(origin: str, key_file: Path, artifact: Path, state_dir: Path,
     if len(matches) > 1:
         return {"status": "BLOCKED_CONFLICT", "reason": "Duplicate named workflows"}
     current = client.request("GET", "/workflows/" + str(matches[0]["id"])) if matches else None
+    original = current
     conflict = False
+    required_credentials = {str(node["name"]): set(node.get("credentials", {}))
+                            for node in desired["nodes"] if not node.get("disabled")}
     needed = {(kind, ref.get("name")) for node in desired["nodes"]
               if not node.get("disabled")
               for kind, ref in node.get("credentials", {}).items()}
@@ -422,6 +484,10 @@ def reconcile(origin: str, key_file: Path, artifact: Path, state_dir: Path,
     # Any other owner edit still takes the separate draft path below.
     base_fingerprint = _fingerprint(desired)
     _attach_postgres_memory(client, desired, memory_root)
+    for node in desired["nodes"]:
+        if not node.get("disabled"):
+            required_credentials.setdefault(str(node["name"]), set()).update(
+                node.get("credentials", {}))
     wanted = _fingerprint(desired)
     # These two search tools and missing query values are deterministic repairs
     # of an earlier managed graph. Treat that exact delta as managed, while any
@@ -439,6 +505,7 @@ def reconcile(origin: str, key_file: Path, artifact: Path, state_dir: Path,
             previous.get("version_id") != current.get("versionId")) and \
             _fingerprint(current) != base_fingerprint and not known_repair:
         conflict = True
+        assert original is not None
         # Never overwrite the owner's changed workflow. Import a separate draft.
         desired["name"] += " · Setup Draft"
         wanted = _fingerprint(desired)
@@ -448,6 +515,36 @@ def reconcile(origin: str, key_file: Path, artifact: Path, state_dir: Path,
         if len(drafts) > 1:
             return {"status": "BLOCKED_CONFLICT", "reason": "Duplicate setup drafts"}
         current = client.request("GET", "/workflows/" + str(drafts[0]["id"])) if drafts else None
+        if current:
+            if current.get("active") and original.get("active"):
+                return {"status": "BLOCKED_CONFLICT", "reason": "Both AI webhooks are active"}
+            candidate = copy.deepcopy(current)
+            candidate_nodes = {node.get("name"): node for node in candidate.get("nodes", [])}
+            known_ids = {(str(row.get("type")), str(row.get("id")))
+                         for row in client.request("GET", "/credentials?limit=100").get("data", [])}
+            for template in desired["nodes"]:
+                node = candidate_nodes.get(template.get("name"))
+                if not node or node.get("disabled"):
+                    continue
+                for kind, ref in template.get("credentials", {}).items():
+                    if (kind, str(ref.get("id"))) in known_ids:
+                        node.setdefault("credentials", {}).setdefault(kind, ref)
+            if _fingerprint(candidate) != _fingerprint(current):
+                _save(state_dir / "draft-before-credential-repair.json", current)
+                client.request("PUT", "/workflows/" + str(current["id"]), _body(candidate))
+                current = client.request("GET", "/workflows/" + str(current["id"]))
+            missing_draft = _draft_missing_credentials(current, desired,
+                client.request("GET", "/credentials?limit=100").get("data", []),
+                required_credentials)
+            if not missing_draft and current.get("active") and not original.get("active"):
+                return {"status": "ACTIVE", "workflow_id": str(current["id"])}
+            if not missing_draft and current.get("active"):
+                return {"status": "BLOCKED_CONFLICT", "reason": "Both AI webhooks are active"}
+            if not missing_draft:
+                return _activate_draft(client, original, current, state_dir, state_file)
+            return {"status": "IMPORTED_SETUP_REQUIRED", "workflow_id": str(current["id"]),
+                    "reason": "Complete credentials on the setup draft: " +
+                              ", ".join(missing_draft)}
     if missing and current and current.get("active") and not conflict:
         return {"status": "NOT_CONFIGURED",
                 "reason": "Active workflow was preserved; missing credentials: " + ", ".join(missing)}
@@ -494,9 +591,15 @@ def reconcile(origin: str, key_file: Path, artifact: Path, state_dir: Path,
     _save(state_file, {"id": workflow_id, "fingerprint": _fingerprint(desired),
                        "version_id": installed.get("versionId")})
     if conflict:
+        assert original is not None
+        missing_draft = _draft_missing_credentials(installed, desired,
+            client.request("GET", "/credentials?limit=100").get("data", []),
+            required_credentials)
+        if not missing_draft:
+            return _activate_draft(client, original, installed, state_dir, state_file)
         return {"status": "IMPORTED_SETUP_REQUIRED", "workflow_id": workflow_id,
-                "reason": "Existing workflow preserved. Configure and activate the setup draft. " +
-                          ("Missing: " + ", ".join(missing) if missing else "")}
+                "reason": "Existing workflow preserved. Complete setup draft: " +
+                          ", ".join(missing_draft)}
     if missing:
         return {"status": "IMPORTED_SETUP_REQUIRED", "workflow_id": workflow_id,
                 "reason": "Attach credentials in the n8n editor, then activate manually: " +

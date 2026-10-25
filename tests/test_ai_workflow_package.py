@@ -5,13 +5,128 @@ import os
 import copy
 from pathlib import Path
 
+import pytest
+
 from deploy.n8n.ai_assets import core_prompt, style_seeds
 from deploy.n8n.build_ai_workflow import build
 from deploy.n8n.seed_ai_style import seed_sql
-from deploy.n8n.reconcile_ai import _attach_search_fallback, _fingerprint, _map_reply_table, reconcile
+from deploy.n8n.reconcile_ai import (ReconcileError, _activate_draft,
+    _attach_search_fallback, _draft_missing_credentials, _fingerprint,
+    _map_reply_table, reconcile)
 
 
 ARTIFACT = Path(__file__).resolve().parents[1] / "deploy/n8n/mikachan_ai_workflow.json"
+
+
+def test_ready_draft_requires_real_credentials_and_private_webhook():
+    hook = {"name": "Private Webhook", "type": "n8n-nodes-base.webhook",
+            "parameters": {"path": "mikachan-relay", "httpMethod": "POST",
+                           "authentication": "headerAuth"},
+            "credentials": {"httpHeaderAuth": {"id": "secret-id"}}}
+    agent = {"name": "AI Agent", "type": "agent",
+             "credentials": {"groqApi": {"id": "model-id"}}}
+    desired = {"nodes": [hook, agent]}
+    available = [{"type": "httpHeaderAuth", "id": "secret-id"},
+                 {"type": "groqApi", "id": "model-id"}]
+    required = {"Private Webhook": {"httpHeaderAuth"}, "AI Agent": {"groqApi"}}
+    assert _draft_missing_credentials(desired, desired, available, required) == []
+    without_model = {"nodes": [hook, {"name": "AI Agent", "type": "agent"}]}
+    assert _draft_missing_credentials(without_model, desired, available, required) == [
+        "AI Agent credential"]
+    wrong_path = copy.deepcopy(desired)
+    wrong_path["nodes"][0]["parameters"]["path"] = "other"
+    assert any("POST /webhook/mikachan-relay" in reason for reason in
+               _draft_missing_credentials(wrong_path, desired, available, required))
+
+
+@pytest.mark.parametrize("fail_activation", [False, True])
+def test_draft_cutover_verifies_or_restores_original(tmp_path, fail_activation):
+    original = {"id": "old", "active": True, "name": "AI", "nodes": [],
+                "connections": {}, "settings": {}}
+    draft = {**original, "id": "new", "active": False, "name": "AI · Setup Draft"}
+    calls = []
+
+    class Client:
+        def request(self, method, path, _body=None):
+            calls.append((method, path))
+            if path == "/workflows/new" and method == "GET":
+                return {**draft, "active": not fail_activation, "versionId": "v2"}
+            if path == "/workflows/new/activate" and fail_activation:
+                raise ReconcileError("activation failed")
+            return {}
+
+    if fail_activation:
+        with pytest.raises(ReconcileError):
+            _activate_draft(Client(), original, draft, tmp_path, tmp_path / "state.json")
+        assert ("POST", "/workflows/old/activate") in calls
+        assert not (tmp_path / "state.json").exists()
+    else:
+        assert _activate_draft(Client(), original, draft, tmp_path,
+                               tmp_path / "state.json") == {"status": "ACTIVE", "workflow_id": "new"}
+        assert calls[:2] == [("POST", "/workflows/old/deactivate"),
+                             ("POST", "/workflows/new/activate")]
+        assert (tmp_path / "cutover-original-backup.json").is_file()
+
+
+def test_reconcile_repairs_credentials_and_activates_existing_draft(tmp_path, monkeypatch):
+    webhook = {"name": "Private Webhook", "type": "n8n-nodes-base.webhook",
+               "parameters": {"path": "mikachan-relay", "httpMethod": "POST",
+                              "authentication": "headerAuth"},
+               "credentials": {"httpHeaderAuth": {"name": "Mikachan Private Relay",
+                                                   "id": "foreign"}}}
+    model = {"name": "Model", "type": "model",
+             "credentials": {"groqApi": {"name": "Groq account", "id": "foreign"}}}
+    graph = {"name": "AI", "nodes": [webhook, model], "connections": {}, "settings": {}}
+    artifact = tmp_path / "workflow.json"
+    artifact.write_text(json.dumps(graph))
+    key = tmp_path / "api-key"
+    key.write_text("x" * 40)
+    os.chmod(key, 0o600)
+    original = {**graph, "settings": {"owner_note": True}, "id": "original",
+                "active": True, "versionId": "old-v1"}
+    draft = {"name": "AI · Setup Draft", "nodes": [
+        {k: v for k, v in webhook.items() if k != "credentials"},
+        {k: v for k, v in model.items() if k != "credentials"}],
+        "connections": {}, "settings": {}, "id": "draft", "active": False,
+        "versionId": "draft-v1"}
+    events = []
+
+    class Client:
+        def __init__(self, _origin, _key):
+            pass
+
+        def request(self, method, path, body=None):
+            events.append((method, path))
+            if path.startswith("/workflows?"):
+                return {"data": [{"id": "original", "name": "AI"},
+                                 {"id": "draft", "name": "AI · Setup Draft"}]}
+            if path.startswith("/credentials?"):
+                return {"data": [{"type": "httpHeaderAuth", "name": "Mikachan Private Relay",
+                                  "id": "header-id"},
+                                 {"type": "groqApi", "name": "Groq account", "id": "groq-id"}]}
+            if path == "/workflows/original" and method == "GET":
+                return original
+            if path == "/workflows/draft" and method == "GET":
+                return draft
+            if path == "/workflows/draft" and method == "PUT":
+                draft.update(body, versionId="draft-v2")
+                return {"id": "draft"}
+            if path == "/workflows/original/deactivate":
+                original["active"] = False
+                return {}
+            if path == "/workflows/draft/activate":
+                draft["active"] = True
+                return {}
+            raise AssertionError((method, path))
+
+    monkeypatch.setattr("deploy.n8n.reconcile_ai.Client", Client)
+    result = reconcile("https://n8n.example.org", key, artifact, tmp_path / "state")
+    assert result == {"status": "ACTIVE", "workflow_id": "draft"}
+    assert original["active"] is False and draft["active"] is True
+    assert draft["nodes"][0]["credentials"]["httpHeaderAuth"]["id"] == "header-id"
+    assert draft["nodes"][1]["credentials"]["groqApi"]["id"] == "groq-id"
+    assert events.index(("POST", "/workflows/original/deactivate")) < \
+        events.index(("POST", "/workflows/draft/activate"))
 
 
 def test_canonical_assets_and_seed_provenance():
