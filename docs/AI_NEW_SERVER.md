@@ -76,12 +76,13 @@ duplicate writes on retry. The workflow and container are offline tested;
 neither has been exercised on the owner's VPS, so live memory behavior remains
 unverified. General chat does not automatically create durable facts.
 
-Tavily remains the primary search tool. Each agent also receives a bounded
-Wikipedia search for background and Google News RSS for headline discovery,
-both without credentials. These are narrower than a general live web search.
-The prompt requires source and date checks; a failed tool should still yield a
-visible limited response through the existing result normalizer. Live Agent
-tool-calling behavior remains provider dependent.
+Tavily Search is the sole attached search tool for Mika and Serious. The
+Tavily Research, Wikipedia and Google News tools are removed from the managed
+workflow. Search output still needs source links and date checks; a failed tool
+must produce a visible limited response through the existing result normalizer.
+Reducing the tool set also reduces model tool schemas, but it does not prove
+that Groq's token quota or Tavily OAuth is healthy. Verify both in live n8n
+executions after deployment.
 
 Two Cloudflare Workers AI model nodes are packaged for Mika and Serious,
 using `@cf/google/gemma-4-26b-a4b-it`. Groq remains the default. Under

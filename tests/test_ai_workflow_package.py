@@ -11,7 +11,8 @@ from deploy.n8n.ai_assets import core_prompt, style_seeds
 from deploy.n8n.build_ai_workflow import build
 from deploy.n8n.seed_ai_style import seed_sql
 from deploy.n8n.reconcile_ai import (ReconcileError, _activate_draft,
-    _attach_search_fallback, _draft_missing_credentials, _fingerprint,
+    _configure_search, _draft_missing_credentials, _fingerprint,
+    _repair_active_search,
     _map_reply_table, reconcile)
 
 
@@ -195,28 +196,61 @@ def test_artifact_has_two_isolated_agents_and_preserves_media_edges():
     assert "agent_type" in nodes["Save AI Reply"]["parameters"]["columns"]["value"]
 
 
-def test_existing_search_fallback_query_values_are_repaired():
+def test_single_search_removes_legacy_tools_and_is_idempotent():
     graph = json.loads(ARTIFACT.read_text(encoding="utf-8"))
-    _attach_search_fallback(graph)
-    nodes = {node["name"]: node for node in graph["nodes"]}
-    for label in ("Mika", "Serious"):
-        for kind in ("Wikipedia", "News"):
-            rows = nodes[f"{label} {kind} Fallback"]["parameters"]["parametersQuery"]["values"]
-            assert rows and all("value" in row and row["value"] for row in rows)
+    graph["nodes"].append({"name": "Mika News Fallback", "type": "legacy"})
+    graph["connections"]["Mika News Fallback"] = {"ai_tool": [[]]}
+    _configure_search(graph)
+    assert "Mika News Fallback" not in {n["name"] for n in graph["nodes"]}
+    before = _fingerprint(graph)
+    _configure_search(graph)
+    assert _fingerprint(graph) == before
 
 
-def test_reconcile_repairs_known_search_query_gap_without_draft(tmp_path, monkeypatch):
+def test_active_draft_single_search_update_is_verified(tmp_path):
+    draft = json.loads(ARTIFACT.read_text(encoding="utf-8"))
+    draft.update(id="draft", active=True, versionId="old")
+    draft["nodes"].append({"name": "Mika Wikipedia Fallback", "type": "legacy"})
+    draft["connections"]["Mika Wikipedia Fallback"] = {"ai_tool": [[]]}
+    state = copy.deepcopy(draft)
+    events = []
+
+    class Client:
+        def request(self, method, path, body=None):
+            events.append((method, path))
+            if method == "PUT":
+                state.update(body, versionId="new")
+            elif path.endswith("/deactivate"):
+                state["active"] = False
+            elif path.endswith("/activate"):
+                state["active"] = True
+            elif method == "GET":
+                return state
+            return {}
+
+    assert _repair_active_search(Client(), draft, tmp_path,
+                                 tmp_path / "state.json")["status"] == "ACTIVE"
+    assert state["active"] is True
+    assert "Mika Wikipedia Fallback" not in {n["name"] for n in state["nodes"]}
+    memory = {n["name"]: n for n in state["nodes"]}
+    for name in ("Mika Simple Memory", "Serious Simple Memory"):
+        assert memory[name]["parameters"]["contextWindowLength"] == 4
+    assert ("POST", "/workflows/draft/deactivate") in events
+    assert (tmp_path / "before-single-search-update.json").is_file()
+
+
+def test_reconcile_removes_legacy_search_tool_without_draft(tmp_path, monkeypatch):
     graph = {"name": "AI", "nodes": [
         {"name": name, "parameters": {"options": {"systemMessage": "Search carefully."}}}
         for name in ("AI Agent", "Mika Serious Agent")],
         "connections": {}, "settings": {}}
-    _attach_search_fallback(graph)
+    _configure_search(graph)
     current = copy.deepcopy(graph)
     current["id"] = "existing"
     current["versionId"] = "v1"
     current["active"] = True
-    next(node for node in current["nodes"] if node["name"] ==
-         "Serious News Fallback")["parameters"]["parametersQuery"]["values"][0].pop("value")
+    current["nodes"].append({"name": "Serious News Fallback", "type": "legacy"})
+    current["connections"]["Serious News Fallback"] = {"ai_tool": [[]]}
     artifact = tmp_path / "workflow.json"
     artifact.write_text(json.dumps(graph))
     key = tmp_path / "api-key"
@@ -394,22 +428,17 @@ def test_disabled_optional_model_does_not_block_active_workflow(tmp_path, monkey
     assert result["status"] == "ACTIVE"
 
 
-def test_search_fallback_keeps_tavily_and_has_bounded_public_sources():
-    from deploy.n8n.reconcile_ai import _attach_search_fallback
-
+def test_tavily_search_is_the_only_tool_for_each_agent():
     graph = json.loads((Path(__file__).resolve().parents[1] /
         "deploy/n8n/mikachan_ai_workflow.json").read_text())
-    _attach_search_fallback(graph)
+    _configure_search(graph)
     tools = {node["name"]: node for node in graph["nodes"]}
-    assert "Tavily MCP" in tools
-    for label in ("Mika", "Serious"):
-        for source in ("Wikipedia", "News"):
-            name = f"{label} {source} Fallback"
-            assert tools[name]["parameters"].get("authentication", "none") == "none"
-            assert graph["connections"][name]["ai_tool"][0][0]["node"] == \
-                ("AI Agent" if label == "Mika" else "Mika Serious Agent")
-            assert tools[name]["parameters"]["placeholderDefinitions"]["values"][0]["name"] == "query"
-    assert tools["Mika News Fallback"]["parameters"]["maxLength"] == 8000
+    assert not any("Wikipedia Fallback" in name or "News Fallback" in name
+                   for name in tools)
+    for name, agent in (("Tavily MCP", "AI Agent"),
+                        ("Tavily MCP1", "Mika Serious Agent")):
+        assert tools[name]["parameters"]["includeTools"] == ["tavily_search"]
+        assert graph["connections"][name]["ai_tool"][0][0]["node"] == agent
 
 
 def test_ai_telegram_replies_use_original_webhook_message_after_agent():
@@ -422,8 +451,8 @@ def test_ai_telegram_replies_use_original_webhook_message_after_agent():
         assert "Telegram Trigger').first()" in \
             params["additionalFields"]["reply_to_message_id"]
         assert params.get("operation", "sendMessage") != "sendMessageDraft"
-    assert nodes["Mika Simple Memory"]["parameters"]["contextWindowLength"] == 8
-    assert nodes["Serious Simple Memory"]["parameters"]["contextWindowLength"] == 8
+    assert nodes["Mika Simple Memory"]["parameters"]["contextWindowLength"] == 4
+    assert nodes["Serious Simple Memory"]["parameters"]["contextWindowLength"] == 4
 
 
 def test_verified_base_graph_gets_additive_memory_without_replacing_owner_edits(

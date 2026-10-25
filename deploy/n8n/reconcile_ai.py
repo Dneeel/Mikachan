@@ -334,83 +334,79 @@ return [{json: {...original, mika: {...original.mika,
     links["Attach Scoped Memory"] = {"main": [[{"node": "Is AI Reply?", "type": "main", "index": 0}]]}
 
 
-def _attach_search_fallback(desired: dict[str, Any]) -> None:
-    """Add bounded, credential-free reference tools without replacing Tavily.
-
-    Wikipedia is an encyclopedia fallback; Google News RSS is a discovery
-    feed, not proof of an article. Neither is described as a live web crawler.
-    """
-    definitions = (
-        ("Wikipedia", "https://en.wikipedia.org/w/api.php",
-         {"action": "query", "list": "search", "srsearch": "{query}",
-          "format": "json", "srlimit": "5"},
-         "Search Wikipedia for background information. Results can be stale. "
-         "Use page URLs under https://en.wikipedia.org/wiki/ only after verifying titles."),
-        ("News", "https://news.google.com/rss/search",
-         {"q": "{query} when:1d", "hl": "en-US", "gl": "US", "ceid": "US:en"},
-         "Find recent news headlines with dates and publisher names. RSS links "
-         "lead to Google News; verify the original article before making a claim."),
-    )
-    existing = {node["name"] for node in desired["nodes"]}
-    if not {"AI Agent", "Mika Serious Agent"} & existing:
-        return
-    for agent, label in (("AI Agent", "Mika"), ("Mika Serious Agent", "Serious")):
-        if agent not in existing:
-            raise ReconcileError("AI agent is missing from fallback search graph")
-        for ordinal, (kind, url, query, description) in enumerate(definitions):
-            name = f"{label} {kind} Fallback"
-            if name in existing:
-                current = next(node for node in desired["nodes"] if node["name"] == name)
-                linked = desired["connections"].get(name, {}).get("ai_tool", [[]])
-                if current.get("type") != "@n8n/n8n-nodes-langchain.toolHttpRequest" or \
-                        not any(edge.get("node") == agent for row in linked for edge in row):
-                    raise ReconcileError("Existing search fallback is not wired to its agent")
-                # The first live revision contained key-only query rows. Keep
-                # owner-added options, but repair missing template values so
-                # the tool actually sends a search phrase and bounded result.
-                rows = current.get("parameters", {}).get("parametersQuery", {}).get("values", [])
-                if not isinstance(rows, list) or {row.get("name") for row in rows
-                        if isinstance(row, dict)} != set(query):
-                    raise ReconcileError("Existing search fallback query needs owner review")
-                for row in rows:
-                    if not isinstance(row, dict):
-                        raise ReconcileError("Existing search fallback query is malformed")
-                    row.setdefault("value", query[row["name"]])
-                continue
-            desired["nodes"].append({"id": hashlib.sha256(name.encode()).hexdigest()[:32],
-                "name": name, "type": "@n8n/n8n-nodes-langchain.toolHttpRequest",
-                "typeVersion": 1.1, "position": [1150 + ordinal * 220,
-                    1000 if label == "Mika" else 1230],
-                "parameters": {"toolDescription": description, "method": "GET",
-                    "url": url, "authentication": "none", "sendQuery": True,
-                    "specifyQuery": "keypair", "parametersQuery": {"values": [
-                        {"name": key, "value": value} for key, value in query.items()]},
-                    "placeholderDefinitions": {"values": [{"name": "query",
-                        "description": "A concise factual search phrase; no URLs or private data",
-                        "type": "string"}]},
-                    "optimizeResponse": kind == "News", "responseType": "text",
-                    "truncateResponse": True, "maxLength": 8000}})
-            desired["connections"][name] = {"ai_tool": [[{"node": agent,
-                "type": "ai_tool", "index": 0}]]}
-        agent_node = next(node for node in desired["nodes"] if node["name"] == agent)
-        prompt = agent_node["parameters"]["options"]["systemMessage"]
-        if "## SEARCH FALLBACK" in prompt:
+def _configure_search(desired: dict[str, Any]) -> None:
+    """Expose only Tavily Search to each Agent; never recreate removed tools."""
+    removed = {"Tavily MCP2", "Mika Wikipedia Fallback", "Mika News Fallback",
+               "Serious Wikipedia Fallback", "Serious News Fallback"}
+    desired["nodes"] = [node for node in desired["nodes"]
+                        if node.get("name") not in removed]
+    for name in removed:
+        desired["connections"].pop(name, None)
+    nodes = {node.get("name"): node for node in desired["nodes"]}
+    for name in ("Mika Simple Memory", "Serious Simple Memory",
+                 "Mika Postgres Memory", "Serious Postgres Memory"):
+        node = nodes.get(name)
+        if node:
+            params = node.get("parameters", {})
+            window = params.get("contextWindowLength")
+            if isinstance(window, int) and window > 4:
+                params["contextWindowLength"] = 4
+    for tool, agent in (("Tavily MCP", "AI Agent"),
+                        ("Tavily MCP1", "Mika Serious Agent")):
+        if tool not in nodes or agent not in nodes:
+            # Small test graphs and workflows without both agents have no
+            # Tavily tool to configure. Full imports are validated separately.
             continue
-        agent_node["parameters"]["options"]["systemMessage"] = prompt + (
-            "\n\n## SEARCH FALLBACK\n"
-            "If Tavily fails or its quota is exhausted, use Wikipedia for background "
-            "or the Google News RSS tool for recent headlines. Wikipedia is not "
-            "current news. News RSS is a discovery feed; verify article dates, "
-            "original publishers and links. Never invent citations. If no source "
-            "can be verified, say so and still send a visible reply.")
+        node = nodes[tool]
+        if node.get("type") != "@n8n/mcp-registry.tavily":
+            raise ReconcileError("Tavily search node type changed")
+        node["parameters"]["include"] = "selected"
+        node["parameters"]["includeTools"] = ["tavily_search"]
+        node["parameters"].setdefault("options", {})["timeout"] = 30000
+        desired["connections"][tool] = {"ai_tool": [[{
+            "node": agent, "type": "ai_tool", "index": 0}]]}
     for node in desired["nodes"]:
-        note = node.get("parameters", {}).get("content")
-        if isinstance(note, str) and "A self-hosted search fallback is not installed." in note:
-            node["parameters"]["content"] = note.replace(
-                "A self-hosted search fallback is not installed.",
-                "Wikipedia background search and Google News RSS headline discovery "
-                "are attached as credential-free fallbacks. Neither is a full live-web "
-                "crawler; verify dates and original sources before citing them.")
+        if node.get("name") in {"AI Agent", "Mika Serious Agent"}:
+            options = node.get("parameters", {}).get("options", {})
+            prompt = options.get("systemMessage")
+            if isinstance(prompt, str) and "\n\n## SEARCH FALLBACK\n" in prompt:
+                options["systemMessage"] = prompt.split("\n\n## SEARCH FALLBACK\n", 1)[0]
+        content = node.get("parameters", {}).get("content")
+        if isinstance(content, str) and content.startswith("## Web search · current state"):
+            node["parameters"]["content"] = (
+                "## Web search · Tavily Search only\n"
+                "Mika and Serious each use tavily_search. Research, Wikipedia and "
+                "News RSS tools are disabled. Search results require source links and "
+                "dates; if Tavily or the model fails, report that live news is unavailable.")
+
+
+def _repair_active_search(client: Client, draft: dict[str, Any],
+                          state_dir: Path, state_file: Path) -> dict[str, str]:
+    """Apply the one-tool contract to the active draft with rollback."""
+    updated = copy.deepcopy(draft)
+    _configure_search(updated)
+    if _fingerprint(updated) == _fingerprint(draft):
+        return {"status": "ACTIVE", "workflow_id": str(draft["id"])}
+    _save(state_dir / "before-single-search-update.json", draft)
+    path = "/workflows/" + str(draft["id"])
+    try:
+        client.request("POST", path + "/deactivate", {})
+        client.request("PUT", path, _body(updated))
+        client.request("POST", path + "/activate", {})
+        active = client.request("GET", path)
+        if not active.get("active") or _fingerprint(active) != _fingerprint(updated):
+            raise ReconcileError("Single-search workflow did not verify")
+    except ReconcileError:
+        try:
+            client.request("POST", path + "/deactivate", {})
+            client.request("PUT", path, _body(draft))
+            client.request("POST", path + "/activate", {})
+        except ReconcileError:
+            raise ReconcileError("Search update failed; restore the workflow backup") from None
+        raise
+    _save(state_file, {"id": draft["id"], "fingerprint": _fingerprint(updated),
+                       "version_id": active.get("versionId")})
+    return {"status": "ACTIVE", "workflow_id": str(draft["id"])}
 
 
 def _select_models(desired: dict[str, Any], state_dir: Path) -> None:
@@ -482,7 +478,7 @@ def reconcile(origin: str, key_file: Path, artifact: Path, state_dir: Path,
     table_problem = _map_reply_table(client, desired)
     if table_problem:
         return table_problem
-    _attach_search_fallback(desired)
+    _configure_search(desired)
     # A verified base graph may receive our additive memory wiring even when
     # its API version changed after the last local state file was written.
     # Any other owner edit still takes the separate draft path below.
@@ -499,7 +495,7 @@ def reconcile(origin: str, key_file: Path, artifact: Path, state_dir: Path,
     repaired_current = copy.deepcopy(current) if current else None
     if repaired_current:
         try:
-            _attach_search_fallback(repaired_current)
+            _configure_search(repaired_current)
         except ReconcileError:
             repaired_current = None
     known_repair = bool(repaired_current and
@@ -547,7 +543,7 @@ def reconcile(origin: str, key_file: Path, artifact: Path, state_dir: Path,
                 client.request("GET", "/credentials?limit=100").get("data", []),
                 required_credentials)
             if not missing_draft and current.get("active") and not original.get("active"):
-                return {"status": "ACTIVE", "workflow_id": str(current["id"])}
+                return _repair_active_search(client, current, state_dir, state_file)
             if not missing_draft and current.get("active"):
                 return {"status": "BLOCKED_CONFLICT", "reason": "Both AI webhooks are active"}
             if not missing_draft:
