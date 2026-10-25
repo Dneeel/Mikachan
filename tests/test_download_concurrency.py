@@ -287,3 +287,104 @@ async def test_pornhub_410_refetches_signed_cdn_url_once(tmp_path, monkeypatch):
         tmp_path, 10_000_000, "480")
     assert result == [replacement] and download.calls == 2
     assert not stale.exists()
+
+
+@pytest.mark.asyncio
+async def test_pornhub_474_uses_bounded_direct_format_fallback(tmp_path):
+    worker = Worker(SimpleNamespace(), SimpleNamespace(), SimpleNamespace())
+    stale = tmp_path / "stale.part"
+    stale.write_bytes(b"partial")
+    video = tmp_path / "video.mp4"
+    worker._ytdlp = AsyncMock(side_effect=ValueError(
+        "Pornhub CDN rejected this server's request (HTTP 474)"))
+    worker._pornhub_direct_format = AsyncMock(return_value=video)
+    url = "https://www.pornhub.com/view_video.php?viewkey=6ac5dd5aca7cb"
+    assert await worker._ytdlp_with_fresh_url(url, tmp_path, 10_000_000, "480") == [video]
+    worker._pornhub_direct_format.assert_awaited_once_with(
+        url, tmp_path, 10_000_000, "480")
+    assert not stale.exists()
+
+
+@pytest.mark.asyncio
+async def test_pornhub_direct_fallback_checks_post_and_cdn_identity(tmp_path, monkeypatch):
+    import json
+    import mikachan.jobs as jobs
+    worker = Worker(SimpleNamespace(), SimpleNamespace(), SimpleNamespace())
+    monkeypatch.setattr(jobs, "validate_dns", lambda _url: None)
+    fixture = tmp_path / "video.mp4"
+    fixture.write_bytes(b"test fixture")
+    payload = {"id": "6ac5dd5aca7cb", "formats": [{"format_id": "480p",
+        "height": 480, "ext": "mp4", "protocol": "https",
+        "url": "https://ev.phncdn.com/video.mp4?token=short-lived",
+        "http_headers": {"Referer": "https://www.pornhub.com/",
+                         "Cookie": "must-not-be-copied"}}]}
+    async def launch(*_args, **_kwargs):
+        return SimpleNamespace(communicate=AsyncMock(
+            return_value=(json.dumps(payload).encode(), b"")), returncode=0)
+    monkeypatch.setattr(jobs.asyncio, "create_subprocess_exec", launch)
+    worker._pornhub_ranges = AsyncMock(return_value=fixture)
+    monkeypatch.setattr(jobs, "verify", AsyncMock(return_value={"video": True}))
+    url = "https://www.pornhub.com/view_video.php?viewkey=6ac5dd5aca7cb"
+    assert await worker._pornhub_direct_format(url, tmp_path, 10_000_000, "480") == fixture
+    assert worker._pornhub_ranges.await_args.args[3] == {
+        "Referer": "https://www.pornhub.com/"}
+    payload["id"] = "another-post"
+    with pytest.raises(ValueError, match="identity"):
+        await worker._pornhub_direct_format(url, tmp_path, 10_000_000, "480")
+    payload["id"] = "6ac5dd5aca7cb"
+    payload["formats"][0]["url"] = "https://unrelated.example/video.mp4"
+    with pytest.raises(ValueError, match="domain"):
+        await worker._pornhub_direct_format(url, tmp_path, 10_000_000, "480")
+
+
+@pytest.mark.asyncio
+async def test_pornhub_ranged_transfer_retries_474_and_checks_byte_offsets(tmp_path, monkeypatch):
+    import httpx
+    import mikachan.jobs as jobs
+    monkeypatch.setattr(jobs, "validate_dns", lambda _url: None)
+    monkeypatch.setattr(jobs.asyncio, "sleep", AsyncMock())
+    seen = []
+    def handler(request):
+        byte_range = request.headers["range"]
+        seen.append(byte_range)
+        if byte_range == "bytes=0-0":
+            return httpx.Response(206, headers={"Content-Range": "bytes 0-0/11"}, content=b"h")
+        if seen.count(byte_range) == 1:
+            return httpx.Response(474)
+        assert byte_range == "bytes=0-10"
+        return httpx.Response(206, headers={"Content-Range": "bytes 0-10/11"},
+                              content=b"hello world")
+    original = httpx.AsyncClient
+    monkeypatch.setattr(jobs.httpx, "AsyncClient",
+        lambda **kwargs: original(transport=httpx.MockTransport(handler), **kwargs))
+    worker = Worker(SimpleNamespace(), SimpleNamespace(), SimpleNamespace())
+    path = await worker._pornhub_ranges("https://ev.phncdn.com/signed.mp4", tmp_path,
+                                       100, {"Referer": "https://www.pornhub.com/"})
+    assert path.read_bytes() == b"hello world"
+    assert seen == ["bytes=0-0", "bytes=0-10", "bytes=0-10"]
+
+
+@pytest.mark.asyncio
+async def test_pornhub_ranged_transfer_resumes_only_missing_bytes(tmp_path, monkeypatch):
+    import httpx
+    import mikachan.jobs as jobs
+    monkeypatch.setattr(jobs, "validate_dns", lambda _url: None)
+    target = tmp_path / "pornhub-video.mp4"
+    target.write_bytes(b"hello ")
+    seen = []
+    def handler(request):
+        byte_range = request.headers["range"]
+        seen.append(byte_range)
+        if byte_range == "bytes=0-0":
+            return httpx.Response(206, headers={"Content-Range": "bytes 0-0/11"}, content=b"h")
+        assert byte_range == "bytes=6-10"
+        return httpx.Response(206, headers={"Content-Range": "bytes 6-10/11"},
+                              content=b"world")
+    original = httpx.AsyncClient
+    monkeypatch.setattr(jobs.httpx, "AsyncClient",
+        lambda **kwargs: original(transport=httpx.MockTransport(handler), **kwargs))
+    worker = Worker(SimpleNamespace(), SimpleNamespace(), SimpleNamespace())
+    path = await worker._pornhub_ranges("https://ev.phncdn.com/signed.mp4", tmp_path,
+                                       100, {}, resume=True)
+    assert path.read_bytes() == b"hello world"
+    assert seen == ["bytes=0-0", "bytes=6-10"]
