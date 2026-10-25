@@ -3,7 +3,6 @@
 import asyncio
 import hashlib
 import html
-import importlib.util
 import json
 import os
 import re
@@ -111,8 +110,12 @@ def extractor_error(url: str, stderr: bytes) -> str:
         return "This type of source link is not supported"
     if "http error 403" in detail or "forbidden" in detail:
         return "This source denied anonymous access"
-    if any(x in detail for x in ("not available", "video unavailable", "deleted", "removed",
-                                "disabled")):
+    if provider == "pornhub" and "http error 474" in detail:
+        return "Pornhub CDN rejected this server's request (HTTP 474); try again from a permitted network"
+    if "http error 429" in detail or "rate limit" in detail:
+        return "Source rate limit reached; try again later"
+    if any(x in detail for x in ("video unavailable", "video is unavailable",
+                                "removed by the uploader", "deleted by the uploader")):
         return "This public item is unavailable or has been removed"
     return "Source extractor could not access this public item"
 
@@ -221,7 +224,8 @@ class Worker:
             return {}
         validate_dns(url)
         proc = await asyncio.create_subprocess_exec(
-            sys.executable, "-m", "yt_dlp", "--ignore-config", *site_cookie_args(url),
+            sys.executable, "-m", "yt_dlp", "--ignore-config",
+            "--compat-options", "no-certifi", *site_cookie_args(url),
             "--no-playlist", "--dump-single-json", "--skip-download", "--no-warnings", url,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
             start_new_session=True, env=extractor_env())
@@ -1153,13 +1157,18 @@ class Worker:
             "artist": username, "description": bio,
         }
         self.store.set_job_context(jid, context)
-        markup = InlineKeyboardMarkup(inline_keyboard=[
+        profile_rows = [
             [InlineKeyboardButton(text="🔗 Link", url=url),
              InlineKeyboardButton(text="🖼 Original avatar", callback_data=f"j:{jid}:avatar")],
-            [InlineKeyboardButton(text="⬇️ Latest post", callback_data=f"j:{jid}:latest"),
-             InlineKeyboardButton(text="⭕ Stories", callback_data=f"j:{jid}:stories")],
             [InlineKeyboardButton(text="👀 Follow", callback_data=f"j:{jid}:follow")],
-        ])
+        ]
+        if provider != "twitter":
+            profile_rows.insert(1, [InlineKeyboardButton(
+                text="⬇️ Latest post", callback_data=f"j:{jid}:latest")])
+        if provider == "instagram":
+            profile_rows.insert(-1, [InlineKeyboardButton(
+                text="⭕ Stories", callback_data=f"j:{jid}:stories")])
+        markup = InlineKeyboardMarkup(inline_keyboard=profile_rows)
         if not self.store.transition(jid, "RESOLVING", "DELIVERING"):
             return True
         try:
@@ -1444,7 +1453,7 @@ class Worker:
             suffix = path.suffix.lower()
             video_codec = ""
             audio_codec = ""
-            if check["video"] and suffix == ".mp4":
+            if check["video"]:
                 probe = await asyncio.create_subprocess_exec(
                     "ffprobe", "-v", "error", "-show_entries",
                     "stream=codec_type,codec_name", "-of", "json",
@@ -1470,12 +1479,19 @@ class Worker:
                 or check["audio"] and audio_codec != "aac"
             ):
                 target = path.with_name(path.stem + ".telegram.mp4")
+                # Many long videos already contain H.264. Copy that stream
+                # into MP4 and encode only an incompatible audio track. A
+                # full video transcode on a small VPS can be many times slower
+                # than the network transfer.
+                video_args = (["-c:v", "copy"] if video_codec in {"h264", "avc1"} else
+                              ["-c:v", "libx264", "-preset", "veryfast", "-crf", "25",
+                               "-pix_fmt", "yuv420p", "-vf", "scale=min(1280\\,iw):-2"])
+                audio_args = (["-c:a", "copy"] if audio_codec == "aac" else
+                              ["-c:a", "aac", "-b:a", "128k"])
                 proc = await asyncio.create_subprocess_exec(
                     "ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(path),
-                    "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "libx264",
-                    "-preset", "veryfast", "-crf", "25", "-pix_fmt", "yuv420p",
-                    "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart",
-                    "-vf", "scale=min(1280\\,iw):-2", str(target),
+                    "-map", "0:v:0", "-map", "0:a:0?", *video_args,
+                    *audio_args, "-movflags", "+faststart", str(target),
                     stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
                     start_new_session=True,
                 )
@@ -1767,10 +1783,11 @@ class Worker:
             sys.executable,
             "-m", "yt_dlp",
             "--ignore-config",
+            "--compat-options", "no-certifi",
             *site_cookie_args(url),
-            # Impersonation needs the optional curl_cffi package to be installed.
-            *(["--impersonate", "chrome"] if source(url) == "pornhub" and
-              importlib.util.find_spec("curl_cffi") is not None else []),
+            # Pornhub's page may accept Chrome impersonation while its media
+            # CDN rejects the same fingerprint (observed HTTP 474). Use the
+            # normal client for the actual video transfer.
             "--playlist-end",
             "10",
             *(["--concurrent-fragments", "4"] if source(url) == "youtube" else []),

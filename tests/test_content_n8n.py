@@ -166,6 +166,71 @@ async def test_earth_root_exact_three_and_no_inaturalist_cat_path():
 
 
 @pytest.mark.asyncio
+async def test_nature_uses_another_real_image_and_skips_image_less_hits(monkeypatch):
+    provider = ContentProviders()
+    provider.wiki_search = AsyncMock(return_value=(["Same", "Text only", "New image"], 3))
+    provider.wiki_article = AsyncMock(side_effect=lambda title: Item(title, "Fact",
+        f"https://en.wikipedia.org/wiki/{title}", "Wikipedia",
+        "https://upload.wikimedia.org/new.jpg" if title == "New image" else ""))
+    monkeypatch.setattr("mikachan.content_providers.random.shuffle", lambda values: None)
+    item = await provider.nature("badlands", "Same")
+    assert item.title == "New image" and item.image_url
+    assert [call.args[0] for call in provider.wiki_article.await_args_list] == [
+        "Text only", "New image"]
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_artist_search_filters_unrelated_creators_and_uses_artist_field():
+    def handler(request):
+        assert request.url.params.get("artists") == "Leonardo da Vinci"
+        assert "q" not in request.url.params
+        return httpx.Response(200, json={"info": {"total": 2}, "data": [
+            {"title": "Attributed work", "id": 1, "share_license_status": "CC0",
+             "url": "https://www.clevelandart.org/art/1",
+             "images": {"web": {"url": "https://openaccess-cdn.clevelandart.org/a.jpg"}},
+             "creators": [{"description": "Leonardo da Vinci (Italian)"}]},
+            {"title": "Unrelated work", "id": 2, "share_license_status": "CC0",
+             "images": {"web": {"url": "https://openaccess-cdn.clevelandart.org/b.jpg"}},
+             "creators": [{"description": "Another painter"}]},
+        ]})
+    provider = ContentProviders(httpx.MockTransport(handler))
+    items, _total = await provider.art_search("Leonardo da Vinci", artist=True)
+    assert [item.title for item in items] == ["Attributed work"]
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_art_artist_has_page_and_item_has_no_details_button():
+    content = ContentUI(_db(), FakeBot())
+    state = {"cmd": "/art", "view": "artist", "query": "Leonardo da Vinci",
+             "total": 3, "lang": "en"}
+    body, rows, _ = content._screen(state)
+    assert "Leonardo da Vinci" in body
+    assert any(action == "artist_works" for row in rows for _label, action in row)
+    state.update(view="item", item=asdict(Item("Work", "Description", "https://example.org",
+        "Museum", credit="Leonardo da Vinci")))
+    _body, rows, _image = content._screen(state)
+    assert all("Details" not in label for row in rows for label, _action in row)
+    assert any(action == "creator" for row in rows for _label, action in row)
+
+
+@pytest.mark.asyncio
+async def test_another_artwork_keeps_selected_artist():
+    content = ContentUI(_db(), FakeBot())
+    work = Item("Second", "A work", "https://www.clevelandart.org/art/2",
+                "Cleveland Museum of Art", credit="Leonardo da Vinci", identifier="2")
+    content.providers.art_search = AsyncMock(return_value=([work], 2))
+    state = {"cmd": "/art", "view": "item", "intent": "artist",
+             "query": "Leonardo da Vinci", "total": 2,
+             "item": asdict(Item("First", "A work", "https://www.clevelandart.org/art/1",
+                              "Cleveland Museum of Art", identifier="1"))}
+    await content._navigate(state, "another")
+    assert state["item"]["title"] == "Second"
+    content.providers.art_search.assert_awaited_with("Leonardo da Vinci", 0, artist=True)
+
+
+@pytest.mark.asyncio
 async def test_content_session_actor_chat_message_and_ttl_binding():
     db = _db()
     content = ContentUI(db, FakeBot())

@@ -24,7 +24,7 @@ def source_url(raw: str) -> str:
         raise ValueError("subscription URL is invalid") from None
     host = (parsed.hostname or "").rstrip(".").lower()
     if parsed.scheme not in {"https", "http"} or not host or parsed.username or parsed.password \
-            or parsed.fragment or port not in {None, 80, 443}:
+            or parsed.fragment or port not in {None, 80, 443, 8854}:
         raise ValueError("use a public HTTP(S) subscription URL without credentials in authority")
     if host == "localhost" or host.endswith((".localhost", ".local", ".internal")):
         raise ValueError("private network destination refused")
@@ -72,7 +72,11 @@ async def fetch_subscription(raw: str) -> bytes:
                         location = response.headers.get("Location", "")
                         if not location:
                             raise ValueError("subscription redirect is incomplete")
-                        current = source_url(urljoin(current, location))
+                        next_url = source_url(urljoin(current, location))
+                        if (urlsplit(current).query and
+                                urlsplit(next_url).hostname != urlsplit(current).hostname):
+                            raise ValueError("access-bearing subscription redirect crossed hosts")
+                        current = next_url
                         continue
                     if response.status != 200:
                         raise ValueError(f"subscription fetch returned HTTP {response.status}")

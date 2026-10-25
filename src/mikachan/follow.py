@@ -1042,13 +1042,14 @@ class FollowService:
                     # First check after upgrading the detector re-baselines an old
                     # signed URL without inventing an avatar edit.
                     continue
-                value = "Avatar updated" if key == "avatar" else html.escape(profile[key][:500])
+                value = "" if key == "avatar" else "\n\n" + html.escape(profile[key][:500])
                 get_token = secrets.token_urlsafe(7)
                 buttons = [[InlineKeyboardButton(text="⬇️ Get it", callback_data=f"fd:{row['id']}:{get_token}"),
                             InlineKeyboardButton(text="🔗 View original", url=target.url)]]
                 await self.bot.send_message(row["chat_id"],
-                    f"👀 <b>{target.platform.title()} · @{html.escape(target.handle)}</b>\n"
-                    f"{LABELS[key]}\n\n{value}",
+                    f"👀 <b>{target.platform.title()}</b>\n"
+                    f"👤 @{html.escape(target.handle)}\n"
+                    f"{LABELS[key]}{value}",
                     reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
                 self.db.db.execute("INSERT INTO follow_downloads "
                     "(token,follow_id,user_id,url,expires,kind,value) VALUES (?,?,?,?,?,?,?)",
@@ -1081,7 +1082,8 @@ class FollowService:
             InlineKeyboardButton(text="🔗 View original", url=url),
         ]])
         await self.bot.send_message(row["chat_id"],
-            f"👀 <b>{target.platform.title()} · @{html.escape(target.handle)}</b>\n"
+            f"👀 <b>{target.platform.title()}</b>\n"
+            f"👤 @{html.escape(target.handle)}\n"
             f"New {html.escape(kind)}{': ' + html.escape(title[:200]) if title else ''}",
             reply_markup=markup)
         self.db.db.execute("DELETE FROM follow_downloads WHERE expires<?", (time.time(),))

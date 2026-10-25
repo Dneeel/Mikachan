@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import re
 import secrets
 import time
 from dataclasses import dataclass, field
@@ -387,9 +388,13 @@ class MikaSubUI:
                      [("📄 TXT", "txt"), ("🙏 Thanks", "thanks")],
                      [("◀ Back", "home")]]))
                 session.messages.add(progress.message_id)
-            except (ValueError, OSError, asyncio.TimeoutError):
-                await progress.edit_text("⚠️ Subscription unavailable or unsupported. "
-                    "Its URL was not saved or published.")
+            except (ValueError, OSError, asyncio.TimeoutError) as exc:
+                status = re.fullmatch(r"subscription fetch returned HTTP (\d{3})", str(exc))
+                reason = (f"The source returned HTTP {status[1]}. " if status else
+                          "The source could not be read or its format is unsupported. ")
+                await progress.edit_text("⚠️ " + reason +
+                    "Its URL was not saved or published. Check the source endpoint; "
+                    "HTTPS is preferred when the URL contains an access token.")
             return True
         return False
 

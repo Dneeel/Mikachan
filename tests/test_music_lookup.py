@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from mikachan.catalog import CatalogTrack, recording_search_alias
-from mikachan.music_ui import _genius_lyrics, verified_lyrics
+from mikachan.music_ui import _genius_lyrics, lyrics_from_query, verified_lyrics
 
 
 def response(payload: object) -> MagicMock:
@@ -14,6 +14,26 @@ def response(payload: object) -> MagicMock:
 
 
 class MusicLookupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_noisy_song_query_resolves_confirmed_artist_and_title(self):
+        client = MagicMock()
+        client.get = AsyncMock(return_value=response({"results": [
+            {"trackName": "Flying", "artistName": "Anathema"},
+            {"trackName": "Flying", "artistName": "Other Artist"},
+        ]}))
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=None)
+        with patch("mikachan.music_ui.httpx.AsyncClient", return_value=client), \
+             patch("mikachan.music_ui.verified_lyrics", new_callable=AsyncMock,
+                   return_value="verified lines") as lyrics:
+            result = await lyrics_from_query("Slowed anathema song flying VaG ranT")
+        self.assertEqual(result, ("Flying", "Anathema", "verified lines"))
+        lyrics.assert_awaited_once_with("Flying", "Anathema")
+
+    async def test_ambiguous_single_word_does_not_guess_a_recording(self):
+        with patch("mikachan.music_ui.verified_lyrics", new_callable=AsyncMock) as lyrics:
+            self.assertIsNone(await lyrics_from_query("flying"))
+        lyrics.assert_not_awaited()
+
     async def test_prefers_complete_lyrics_for_matching_duration(self):
         partial = {"trackName": "Soldier Side", "artistName": "System Of A Down",
                    "duration": 54, "plainLyrics": "one\ntwo\nthree\nfour"}

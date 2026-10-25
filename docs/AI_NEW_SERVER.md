@@ -86,8 +86,11 @@ The model does **not** switch on credential creation. Listing a model does not
 prove that inference fits the account's Free allowance or that this model can
 call the current tools; those need a controlled live check before selection.
 
-TikTok `/explore` uses a public third-party feed/search endpoint with no paid
-API key. Public discovery can be rate limited or blocked, especially for topic
-search. In that case Mikachan reports the source failure; it does not invent a
-post or silently change the topic. Telegram receives media directly from the
-provider URL, so no explore media file remains on the VPS.
+TikTok `/explore` uses a public third-party hashtag lookup followed by that
+hashtag's post feed. The one-request-per-second challenge budget is enforced
+and returned posts are reused for One More before another fetch. A general
+feed is the fallback when a verified hashtag feed is unavailable; fallback
+posts must actually mention the requested topic. Public discovery can still be
+rate limited or blocked. Mikachan does not invent a post or silently change
+the topic. Telegram receives media directly from the provider URL, so no
+explore media file remains on the VPS.

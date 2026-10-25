@@ -234,9 +234,13 @@ class UserbotBridge:
                         break
                     if profile_ready_at is None:
                         profile_ready_at = time.monotonic() + 4
-                if goal == "posts" and any(self._instagram_has_button(item, "next 5 post")
-                                           for item in found.values()):
-                    break
+                if goal == "posts" and any(
+                        self._instagram_has_button(item, "next 5 post") and
+                        "sent 5 post" in str(getattr(item, "raw_text", "") or "").casefold()
+                        for item in found.values()):
+                    # The upstream completion marker is stronger evidence than
+                    # a media count: a carousel can contain several messages.
+                    quiet_until = min(quiet_until, time.monotonic() + 2)
                 if goal == "menu" and any(getattr(item, "buttons", None) for item in fresh):
                     break
             pending = goal == "profile" and any(

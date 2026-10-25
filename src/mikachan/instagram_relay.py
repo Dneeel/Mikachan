@@ -263,7 +263,8 @@ class InstagramRelay:
         self.menus = {k: v for k, v in self.menus.items() if v.expires > now}
         if len(self.menus) >= 100:
             self.menus.pop(next(iter(self.menus)))
-        self.menus[token] = Menu(user, chat, message, upstream.id, handle, now + 900, actions)
+        self.menus[token] = Menu(user, chat, message, int(getattr(upstream, "id", upstream)),
+                                 handle, now + 900, actions)
 
     async def show_profile(self, chat: int, user: int, handle: str) -> None:
         if not re.fullmatch(r"[A-Za-z0-9._]{1,30}", handle):
@@ -397,13 +398,14 @@ class InstagramRelay:
 
     async def _send_results(self, chat: int, user: int, handle: str,
                             messages: list, *, stories: bool = False,
-                            skip_ids: set[int] | None = None) -> tuple[int, object | None, int]:
+                            skip_ids: set[int] | None = None,
+                            expected_media: bool = False) -> tuple[int, object | None, int]:
         fallback = f"https://www.instagram.com/stories/{handle}/" if stories else None
         count = 0
         skipped = 0
         menu = None
-        trusted_batch = any(self._media(message) and _recognized_media(message)
-                            for message in messages)
+        trusted_batch = expected_media or any(self._media(message) and _recognized_media(message)
+                                              for message in messages)
         for message in messages:
             if message.id in (skip_ids or set()):
                 continue
@@ -484,6 +486,15 @@ class InstagramRelay:
             await query.answer()
             await self.on_follow(menu.chat, menu.user, target)
             return True
+        if action == "profile" and "profile" in menu.buttons:
+            await query.answer("Opening profile…")
+            self.menus.pop(token, None)
+            await self.show_profile(menu.chat, menu.user, menu.handle)
+            try:
+                await query.message.delete()
+            except (TelegramBadRequest, TelegramForbiddenError):
+                await query.message.edit_reply_markup(reply_markup=None)
+            return True
         selected = menu.buttons.get(action)
         if not selected:
             await query.answer("This option is unavailable")
@@ -494,20 +505,21 @@ class InstagramRelay:
         self.active_menus.add(token)
         await query.answer("Loading…")
         stream_task = None
+        dismissed = False
         try:
             settle = (35 if action == "stories" else 20 if action.startswith("h") else
                       12 if action in {"posts", "next_posts"} else 3)
-            streamed: set[int] = set()
+            enqueued: set[int] = set()
+            delivered: set[int] = set()
             streamed_count = 0
-            streamed_skipped = 0
             stream_queue: asyncio.Queue = asyncio.Queue(maxsize=110)
             async def deliver(item) -> None:
-                if item.id in streamed or not _recognized_media(item):
+                if item.id in enqueued or not self._media(item):
                     return
-                streamed.add(item.id)
+                enqueued.add(item.id)
                 await stream_queue.put(item)
             async def stream_worker() -> None:
-                nonlocal streamed_count, streamed_skipped
+                nonlocal streamed_count
                 while True:
                     item = await stream_queue.get()
                     try:
@@ -517,15 +529,25 @@ class InstagramRelay:
                                 if action == "stories" else None, trusted_batch=True)
                         if sent:
                             streamed_count += 1
-                        else:
-                            streamed_skipped += 1
+                            delivered.add(item.id)
                     except Exception:
-                        streamed_skipped += 1
+                        pass  # The final batch pass retries anything not delivered.
                     finally:
                         stream_queue.task_done()
             streaming = action in {"stories", "posts", "next_posts"} or action.startswith("h")
             if streaming:
                 stream_task = asyncio.create_task(stream_worker())
+            if action in {"stories", "highlights", "posts", "next_posts"} or action.startswith("h"):
+                if hasattr(query.message, "delete"):
+                    try:
+                        await query.message.delete()
+                        dismissed = True
+                    except (TelegramBadRequest, TelegramForbiddenError):
+                        if hasattr(query.message, "edit_reply_markup"):
+                            await query.message.edit_reply_markup(reply_markup=None)
+                            dismissed = True
+                if dismissed:
+                    self.menus.pop(token, None)
             messages = await self.bridge.instagram_click(menu.upstream, *selected[:2], selected[2],
                 settle=settle, stop_on_highlight_done=action.startswith("h"),
                 on_media=deliver if streaming else None)
@@ -533,9 +555,8 @@ class InstagramRelay:
                 await stream_queue.join()
             count, next_menu, skipped = await self._send_results(
                 menu.chat, menu.user, menu.handle, messages, stories=action == "stories",
-                skip_ids=streamed)
+                skip_ids=delivered, expected_media=streaming)
             count += streamed_count
-            skipped += streamed_skipped
             if next_menu:
                 replacement = secrets.token_urlsafe(8)
                 markup, actions = self._menu_markup(replacement, next_menu,
@@ -546,7 +567,7 @@ class InstagramRelay:
                            else "Choose an option below.")
                 if skipped:
                     heading += f"\n⚠️ {skipped} media items exceeded the upload limit."
-                if getattr(query.message, "photo", None):
+                if dismissed or getattr(query.message, "photo", None):
                     sent = await self.bot.send_message(menu.chat, heading, reply_markup=markup)
                 else:
                     await query.message.edit_text(heading, reply_markup=markup)
@@ -555,14 +576,18 @@ class InstagramRelay:
                 self._remember_menu(replacement, menu.user, menu.chat, sent.message_id,
                                     menu.handle, next_menu, actions)
             elif count:
+                heading = ("✅ Done" if action == "stories" else
+                           "✅ Highlight downloaded" if action.startswith("h") else
+                           f"✅ Sent {count} posts.")
                 if skipped or len(messages) >= 110:
-                    await self.bot.send_message(menu.chat,
-                        f"⚠️ Delivered {count} items; {skipped} exceeded the upload limit. "
-                        "The provider batch may be incomplete.")
-                else:
-                    await self.bot.send_message(menu.chat, "✅ Done" if action == "stories"
-                                                else "✅ Highlight downloaded" if action.startswith("h")
-                                                else f"✅ Sent {count} posts.")
+                    heading += f"\n⚠️ {skipped} items could not be delivered; the batch may be incomplete."
+                replacement = secrets.token_urlsafe(8)
+                markup = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="👤 Profile", callback_data=f"ir:{replacement}:profile")],
+                    [InlineKeyboardButton(text="🙏 Thanks", callback_data=f"ir:{replacement}:close")]])
+                sent = await self.bot.send_message(menu.chat, heading, reply_markup=markup)
+                self._remember_menu(replacement, menu.user, menu.chat, sent.message_id,
+                                    menu.handle, menu.upstream, {"profile": (-1, -1, "")})
             else:
                 await self.bot.send_message(menu.chat, _unsupported_response(messages))
         except Exception:

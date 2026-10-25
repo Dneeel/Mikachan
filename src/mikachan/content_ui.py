@@ -104,7 +104,8 @@ class ContentUI:
         if not self.enabled or not message.from_user:
             return True
         self.db.execute("DELETE FROM content_sessions WHERE expires<?", (time.time(),))
-        state: dict[str, Any] = {"cmd": command, "view": "home", "lang": "en",
+        state: dict[str, Any] = {"cmd": command, "view": "home",
+                                 "lang": "fa" if command == "/quote" else "en",
                                  "history": [], "day": dt.datetime.now(dt.UTC).date().isoformat()}
         token = secrets.token_urlsafe(9)
         self.db.execute("INSERT INTO content_sessions VALUES (?,?,?,NULL,?,?)",
@@ -155,10 +156,13 @@ class ContentUI:
                 item = await self.providers.species(taxon_id=taxon_id)
             state.update(view="item", item=asdict(item))
         elif cmd == "/art":
-            items, total = await self.providers.art_search(query, 0)
+            is_artist = state.get("intent") == "artist"
+            items, total = await self.providers.art_search(query, 0, artist=is_artist)
             if not items:
-                raise ContentError("No rights-clear artwork matched this search")
-            state.update(view="list", items=[asdict(i) for i in items], page=0,
+                raise ContentError("No rights-clear works by this artist were found" if is_artist
+                                   else "No rights-clear artwork matched this search")
+            state.update(view="artist" if is_artist else "list",
+                         items=[asdict(i) for i in items], page=0,
                          total=total, intent=state.get("intent") or "search")
         elif cmd == "/wiki":
             if state.get("intent") == "images":
@@ -217,12 +221,28 @@ class ContentUI:
                 await self._cat(state)
             elif cmd == "/art":
                 previous_id = (state.get("item") or {}).get("identifier")
-                state.update(view="item", item=asdict(await self.providers.art_random(
-                    str(previous_id or ""))))
+                if state.get("intent") == "artist" and state.get("query"):
+                    artist = str(state["query"])
+                    total = max(1, int(state.get("total", 1)))
+                    pages = max(1, min(20, (total + 7) // 8))
+                    for _ in range(3):
+                        page = random.randrange(pages)
+                        works, _ = await self.providers.art_search(artist, page, artist=True)
+                        alternatives = [work for work in works
+                                        if work.identifier != str(previous_id or "")]
+                        if alternatives:
+                            state.update(view="item", item=asdict(random.choice(alternatives)))
+                            break
+                    else:
+                        raise ContentError("No different work by this artist was available")
+                else:
+                    state.update(view="item", item=asdict(await self.providers.art_random(
+                        str(previous_id or ""))))
             elif cmd == "/earth":
                 if state.get("intent") == "nature":
+                    previous_id = (state.get("item") or {}).get("identifier")
                     state.update(view="item", item=asdict(await self.providers.nature(
-                        str(state.get("query", "")))))
+                        str(state.get("query", "")), str(previous_id or ""))))
                 else:
                     prior = (state.get("item") or {}).get("identifier")
                     for _ in range(3):
@@ -248,8 +268,14 @@ class ContentUI:
             await self._query(state, str(state["item"]["identifier"]))
         elif action in {"species", "nature", "search", "artist", "images"}:
             state.update(view="prompt", intent=action)
-        elif action == "details" and cmd == "/art":
-            state["view"] = "details"
+        elif action == "artist_works" and cmd == "/art":
+            state["view"] = "list"
+        elif action == "creator" and cmd == "/art" and state.get("item"):
+            creator = str(state["item"].get("credit") or "").split(" (", 1)[0].strip()
+            if not creator:
+                raise ContentError("This artwork has no listed artist")
+            state["intent"] = "artist"
+            await self._query(state, creator)
         elif action == "author" and cmd == "/quote" and state.get("item"):
             quoted, _ = await self.providers.quote_page(str(state["item"]["title"]), state["lang"])
             state.update(view="list", items=[asdict(i) for i in quoted], page=0,
@@ -327,7 +353,8 @@ class ContentUI:
                 raise ContentError("Page is out of range")
             state["page"] = page
             if cmd == "/art":
-                items, _ = await self.providers.art_search(state["query"], page)
+                items, _ = await self.providers.art_search(state["query"], page,
+                    artist=state.get("intent") == "artist")
                 state["items"] = [asdict(i) for i in items]
             elif cmd == "/wiki":
                 titles, _ = await self.providers.wiki_search(state["query"], state["lang"], page)
@@ -406,10 +433,18 @@ class ContentUI:
                       f"{str(c.get('name'))[:20]}", f"taxon:{n}")]
                     for n, c in enumerate((state.get("candidates") or [])[:5])]
             return "🐾 <b>Choose a real taxon</b>", rows + [back], ""
+        if view == "artist" and cmd == "/art":
+            return (f"👨‍🎨 <b>{html.escape(str(state.get('query', 'Artist')))}</b>\n"
+                    f"{len(state.get('items') or [])} available works on this page · "
+                    f"{int(state.get('total', 0))} catalog records",
+                    [[("🖼 View works", "artist_works")],
+                     [("🔎 Another artist", "artist")], back], "")
         if view == "list":
             items = state.get("items") or []
             page = int(state.get("page", 0))
-            body = f"🔎 <b>Results</b> · page {page + 1}\n{html.escape(str(state.get('query', '')))}"
+            body = (f"👨‍🎨 <b>{html.escape(str(state.get('query', '')))}</b> · works · page {page + 1}"
+                    if cmd == "/art" and state.get("intent") == "artist" else
+                    f"🔎 <b>Results</b> · page {page + 1}\n{html.escape(str(state.get('query', '')))}")
             local_paging = cmd == "/quote" and bool(items) and isinstance(items[0], dict)
             visible = items[page * 8:(page + 1) * 8] if local_paging else items
             rows = [[(f"{page * 8 + n + 1}. {str(i.get('title') if isinstance(i, dict) else i)[:45]}",
@@ -464,12 +499,9 @@ class ContentUI:
                 + (f" · {html.escape(str(item['license']))}" if item.get("license") else "")
                 + (f" · {html.escape(str(item['date']))}" if item.get("date") else ""))
         rows = []
-        if view == "details" and cmd == "/art":
-            body = (f"🖼 <b>Artwork Details</b>\n{body}\n"
-                    f"Artist · {html.escape(str(item.get('credit') or 'Not listed'))}")
-        elif view == "item" and cmd == "/art":
-            rows.append([("📄 Details", "details")])
-        elif view == "item" and cmd == "/wiki":
+        if view == "item" and cmd == "/art" and item.get("credit"):
+            rows.append([("👨‍🎨 Artist", "creator")])
+        if view == "item" and cmd == "/wiki":
             rows.append([("📖 Read More", "readmore"), ("🖼 Article Images", "images")])
         if view == "daily":
             if len(state.get("items") or []) > 1:

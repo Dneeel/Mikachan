@@ -33,7 +33,7 @@ from .jobs import Worker
 from .catalog import _Meta
 from .search import KINDS, SOURCES, Searcher
 from .matching import match_score
-from .music_ui import listening_links, verified_lyrics
+from .music_ui import listening_links, lyrics_from_query, verified_lyrics
 from .security import allowed, clean_url, collection, links, source, validate_dns
 from .store import Store
 from .community import Community, CommunityStore
@@ -198,11 +198,11 @@ HELP_TEXT = (
     "Your private toolkit. Choose a task below.\n\n"
     "⬇️ <b>DOWNLOAD &amp; DISCOVER</b>\n"
     "Send a supported link → choose <b>Yes</b> or <b>No</b>.\n"
-    "/search QUERY · find media\n"
-    "/music QUERY · songs  |  /podcast QUERY · shows\n"
+    "/music QUERY · songs  |  /pod QUERY · shows\n"
+    "/lyric ARTIST - TITLE · find lyrics\n"
     "/book TITLE · local books  |  /queue · download status\n\n"
     "👀 <b>PROFILES &amp; FOLLOWING</b>\n"
-    "/instagram USER · /twitter USER · /tiktok USER · /youtube USER\n"
+    "/in USER · /tw USER · /tt USER · /yt USER\n"
     "/follow PROFILE_URL · watch a profile\n"
     "/explore #TOPIC · discover TikTok posts\n"
     "/following · manage and check follows\n\n"
@@ -488,9 +488,9 @@ class App:
                              text.startswith(("ارز ", "هواشناسی ", "اکنون ", "امروز ")) or
                              text in {"هواشناسی", "اکنون", "امروز"})
             builtin = command_name in {
-                "help", "search", "music", "podcast", "pod", "book", "id", "twitter", "instagram",
+                "help", "music", "pod", "lyric", "book", "id", "tw", "in",
                 "follow", "following", "explore",
-                "tiktok", "youtube", "settings", "queue", "status",
+                "tt", "yt", "settings", "queue", "status",
                 "fal", "poem", "quote", "pishi", "phishi", "earth", "art", "xotd", "wiki",
                 "dice", "nickname", "rules", "setrules",
                 "notes", "setnote", "delrules", "welcome", "del",
@@ -610,10 +610,12 @@ class App:
         cmd = word.split("@")[0].lower()
         if cmd == "/link":
             cmd = "/url"
+        if cmd in {"/search", "/podcast", "/twitter", "/instagram", "/tiktok", "/youtube"}:
+            return
         arg = arg.strip()
-        downloader_commands = {"/search", "/music", "/podcast", "/pod", "/book"}
-        follow_commands = {"/follow", "/following", "/explore", "/twitter", "/instagram",
-                           "/tiktok", "/youtube"}
+        downloader_commands = {"/music", "/pod", "/book", "/lyric"}
+        follow_commands = {"/follow", "/following", "/explore", "/tw", "/in",
+                           "/tt", "/yt"}
         utility_commands = {"/qr", "/scan", "/ocr", "/tr", "/pron", "/asr", "/style", "/mika",
                             "/tts", "/stt",
                             "/st", "/xst", "/weather", "/now",
@@ -725,6 +727,34 @@ class App:
                 self.store.prompt_query(m.from_user.id, m.chat.id, "book", 600)
                 await m.reply("📚 Send a book title or author in the next 10 minutes.")
             return
+        if cmd == "/lyric":
+            request = arg or (m.reply_to_message.text or m.reply_to_message.caption or ""
+                              if m.reply_to_message else "")
+            if not request:
+                await m.reply("Use /lyric ARTIST - TITLE, or reply to a song title with /lyric.")
+                return
+            if not self.store.rate(m.from_user.id, "lyrics", 4):
+                return
+            progress = await m.reply("📝 Finding the recording and its lyrics…")
+            try:
+                result = await lyrics_from_query(request)
+            except (httpx.HTTPError, TimeoutError, ValueError):
+                result = None
+            if result:
+                title, artist, lyric = result
+                header = f"📝 <b>{html.escape(title)}</b> · {html.escape(artist)}\n\n"
+                for offset in range(0, min(len(lyric), 12000), 3500):
+                    await self.bot.send_message(m.chat.id,
+                        (header if offset == 0 else "📝 Continued\n\n") +
+                        html.escape(lyric[offset:offset + 3500]))
+            else:
+                await m.reply("No confidently matched, complete lyrics were found. "
+                              "Try /lyric ARTIST - TITLE.")
+            try:
+                await progress.delete()
+            except Exception:
+                pass
+            return
         if await self.utilities.command(m, cmd, arg):
             return
         if cmd == "/help":
@@ -742,8 +772,8 @@ class App:
                 await self.show_follow(m.chat.id, m.from_user.id, target)
         elif cmd == "/following":
             await self.show_following(m.chat.id, m.from_user.id, m.chat.type)
-        elif cmd in ("/search", "/music", "/podcast", "/pod"):
-            mode = "podcast" if cmd == "/pod" else cmd[1:]
+        elif cmd in ("/music", "/pod"):
+            mode = "podcast" if cmd == "/pod" else "music"
             if arg:
                 if len(arg) <= 120:
                     await self.begin_search(m, arg, mode)
@@ -752,14 +782,16 @@ class App:
                     m.from_user.id, m.chat.id, mode, self.settings.search_session_ttl_seconds
                 )
                 await m.reply("Send your search query in the next 10 minutes.")
-        elif cmd in ("/twitter", "/instagram", "/tiktok", "/youtube"):
+        elif cmd in ("/tw", "/in", "/tt", "/yt"):
+            platform = {"/tw": "twitter", "/in": "instagram", "/tt": "tiktok",
+                        "/yt": "youtube"}[cmd]
             target = profile_target(arg) if arg.startswith(("http://", "https://")) else command_target(
-                f"{cmd[1:]} {arg}") if arg else None
-            if target and target.platform == cmd[1:]:
+                f"{platform} {arg}") if arg else None
+            if target and target.platform == platform:
                 await self.show_profile(m.chat.id, m.from_user.id, target)
             else:
                 await m.reply(
-                    f"Send a public {cmd[1:].title()} link or use {cmd} @handle to open Follow."
+                    f"Send a public {platform.title()} link or use {cmd} @handle to open Follow."
                 )
         elif cmd == "/queue":
             active = [j for j in self.store.jobs(m.from_user.id) if j["state"] in
@@ -1054,16 +1086,15 @@ class App:
                     pass
             return
         token = self.follow.db.profile_panel(user, chat, target)
-        rows = [
-            [("👀 Follow", f"p:{token}:follow")],
-            [("⬇️ Latest post", f"p:{token}:latest")],
-        ]
+        rows = [[("👀 Follow", f"p:{token}:follow")]]
+        if target.platform != "twitter":
+            rows.append([("⬇️ Latest post", f"p:{token}:latest")])
         if target.platform == "youtube":
             rows.append([("▶️ Latest Short", f"p:{token}:shorts")])
         if target.platform in {"instagram", "tiktok"}:
-            rows.append([("👤 Photo & bio", f"p:{token}:card"),
-                         ("⭕ Stories", f"p:{token}:stories")])
+            rows.append([("👤 Photo & bio", f"p:{token}:card")])
             if target.platform == "instagram":
+                rows.append([("⭕ Stories", f"p:{token}:stories")])
                 rows.append([("🎞 Latest Reel", f"p:{token}:reels")])
             rows.append([("🖼 Original profile photo", f"p:{token}:original")])
         markup = kb(rows)
@@ -1146,6 +1177,10 @@ class App:
             return
         target = Target(row["platform"], row["handle"], row["url"])
         action = parts[2]
+        if (target.platform == "twitter" and action == "latest" or
+                target.platform == "tiktok" and action == "stories"):
+            await acknowledge(q, "This profile action is no longer available")
+            return
         if target.platform == "instagram" and action != "follow":
             await acknowledge(q)
             await self.show_profile(q.message.chat.id, q.from_user.id, target)
@@ -1176,7 +1211,7 @@ class App:
                 await self.bot.send_message(q.message.chat.id,
                     "⚠️ This public profile is not accessible from the server. "
                     "Instagram may require a permitted login session.")
-        elif action == "stories" and target.platform in {"instagram", "tiktok"}:
+        elif action == "stories" and target.platform == "instagram":
             await self.show_stories(q.message.chat.id, q.from_user.id, target)
         elif action == "original" and target.platform in {"instagram", "tiktok"}:
             try:
@@ -1607,7 +1642,9 @@ class App:
                         raise ValueError("no public avatar URL")
                     photo = await profile_photo(raw)
                     await self.bot.send_document(q.message.chat.id, photo,
-                        caption=f"👤 @{html.escape(entry['handle'])} · current profile photo")
+                        caption=f"👀 <b>{html.escape(str(entry['platform']).title())}</b>\n"
+                                f"👤 @{html.escape(entry['handle'])}\n"
+                                "🔄 Current profile photo")
                 except (ValueError, TimeoutError, OSError, httpx.HTTPError, TelegramBadRequest):
                     await self.bot.send_message(q.message.chat.id,
                         "⚠️ The current profile photo is inaccessible. It may require login or have changed.")
@@ -1794,7 +1831,7 @@ class App:
                     await self.render_search(sid, q.from_user.id, q.message.chat.id,
                                              detail=int(context["search_index"]))
                 else:
-                    await q.message.edit_text("Search expired. Send /podcast to search again.")
+                    await q.message.edit_text("Search expired. Send /pod to search again.")
                 return
             if action == "follow":
                 collection_creator = profile_target(
@@ -2027,7 +2064,7 @@ class App:
                 and expired["expires"] <= time.time()
             ):
                 try:
-                    await q.message.edit_text("Search expired. Send /search to start again.")
+                    await q.message.edit_text("Search expired. Send /music or /pod to start again.")
                 except TelegramBadRequest:
                     pass
             return
@@ -2230,14 +2267,14 @@ class App:
                 BotCommand(command=x, description=y)
                 for x, y in (
                     ("help", "How to use"),
-                    ("search", "Search music and podcasts"),
                     ("music", "Search music"),
-                    ("podcast", "Search podcasts"),
+                    ("pod", "Search podcasts"),
+                    ("lyric", "Find lyrics for a song"),
                     ("book", "Find books in local sources"),
-                    ("twitter", "Twitter link help"),
-                    ("instagram", "Instagram link help"),
-                    ("tiktok", "TikTok link help"),
-                    ("youtube", "YouTube link help"),
+                    ("tw", "Twitter profile"),
+                    ("in", "Instagram profile"),
+                    ("tt", "TikTok profile"),
+                    ("yt", "YouTube profile"),
                     ("follow", "Follow a public profile"),
                     ("explore", "Discover TikTok posts"),
                     ("following", "Manage followed profiles"),

@@ -262,6 +262,7 @@ async def test_pornhub_format_selection_caps_height_and_prefers_https(
     fmt = seen[seen.index("-f") + 1]
     assert fmt.startswith(f"b[height<={height}][ext=mp4][protocol=https]")
     assert f"[height<={height}]" in fmt
+    assert "--impersonate" not in seen  # The CDN rejected that fingerprint with HTTP 474.
 
 
 @pytest.mark.asyncio

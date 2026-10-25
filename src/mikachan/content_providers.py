@@ -5,6 +5,7 @@ import json
 import random
 import re
 import time
+import unicodedata
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote, urljoin, urlsplit
@@ -128,9 +129,12 @@ class ContentProviders:
                         url, "CATAAS", url, identifier=cat_id)
         raise ContentError("Unknown cat source")
 
-    async def art_search(self, query: str, page: int = 0) -> tuple[list[Item], int]:
+    async def art_search(self, query: str, page: int = 0, *,
+                         artist: bool = False) -> tuple[list[Item], int]:
+        parameters: dict[str, Any] = {"has_image": 1, "limit": 8, "skip": page * 8}
+        parameters["artists" if artist else "q"] = query[:100] or "painting"
         data = await self.json("https://openaccess-api.clevelandart.org/api/artworks/",
-            {"q": query[:100] or "painting", "has_image": 1, "limit": 8, "skip": page * 8})
+                               parameters)
         if not isinstance(data, dict):
             raise ContentError("Art catalog returned invalid data")
         total = int(data.get("info", {}).get("total", 0))
@@ -143,13 +147,21 @@ class ContentProviders:
             if not str(image).startswith("https://openaccess-cdn.clevelandart.org/"):
                 continue
             artists = row.get("creators") or []
-            artist = artists[0].get("description", "") if artists else ""
-            fields = [artist, row.get("creation_date", ""), row.get("technique", "")]
+            creator_name = artists[0].get("description", "") if artists else ""
+            if parameters.get("artists"):
+                def normalize(value: str) -> str:
+                    return "".join(char for char in unicodedata.normalize(
+                        "NFKD", value.casefold()) if not unicodedata.combining(char))
+                if normalize(query.strip()) not in normalize(str(creator_name)):
+                    continue
+            fields = [creator_name, row.get("creation_date", ""), row.get("technique", "")]
             description = " · ".join(str(v) for v in fields if v)
             items.append(Item(str(row.get("title") or "Untitled")[:180], description[:700],
                               str(row.get("url") or ""), "Cleveland Museum of Art",
-                              str(image), str(artist), str(row["share_license_status"]),
+                              str(image), str(creator_name), str(row["share_license_status"]),
                               identifier=str(row.get("id", ""))))
+        if parameters.get("artists") and total <= (page + 1) * 8:
+            total = page * 8 + len(items)
         return items, total
 
     async def art_random(self, exclude_id: str = "") -> Item:
@@ -281,13 +293,16 @@ class ContentProviders:
         for tag in soup.select("script,style,sup.reference,.mw-editsection, .reference, .noprint"):
             tag.decompose()
         items = []
-        for node in soup.select("div.mw-parser-output > ul > li"):
+        for node in soup.select("div.mw-parser-output ul > li"):
+            if node.find_parent(class_=re.compile(r"navbox|toc|infobox|metadata|references")):
+                continue
             for nested in node.select("ul,ol"):
                 nested.decompose()
             text = node.get_text(" ", strip=True)
-            if 25 <= len(text) <= 280 and not text.startswith(("See also", "Retrieved from")):
+            if 35 <= len(text) <= 280 and not text.startswith(("See also", "Retrieved from",
+                    "همچنین ببینید", "منابع")) and text.count("http") == 0:
                 items.append(Item(actual, text, source_url, f"Wikiquote ({lang.upper()})",
-                                  credit=f"From the {actual} Wikiquote page"))
+                                  credit=actual))
         if not items:
             raise ContentError("No suitable sourced quote excerpts were found")
         return items[:80], source_url
@@ -302,6 +317,18 @@ class ContentProviders:
             if isinstance(data, dict) else []
 
     async def quote_random(self, lang: str = "en") -> list[Item]:
+        if lang == "fa":
+            # These are author pages, not anonymous topic pages. Text is still
+            # fetched from Wikiquote and never fabricated locally.
+            authors = ["سعدی", "حافظ", "مولوی", "فردوسی", "پروین اعتصامی",
+                       "عمر خیام", "ابوسعید ابوالخیر"]
+            random.shuffle(authors)
+            for author in authors[:4]:
+                try:
+                    return (await self.quote_page(author, "fa"))[0]
+                except ContentError:
+                    continue
+            raise ContentError("Reviewed Persian author quotes are unavailable right now")
         data = await self.json(f"https://{lang}.wikiquote.org/w/api.php", {
             "action": "query", "generator": "random", "grnnamespace": 0,
             "grnlimit": 1, "format": "json", "formatversion": 2})
@@ -366,16 +393,44 @@ class ContentProviders:
                     "iNaturalist", photo_url, str(photo.get("attribution") or ""),
                     str(photo.get("license_code") or ""), date, str(observation["id"]))
 
-    async def nature(self, query: str = "") -> Item:
+    async def nature(self, query: str = "", exclude_id: str = "") -> Item:
         # Wikipedia provides a factual lead. The photograph, when present, is
         # its actual page image and is explicitly credited to Wikimedia.
-        term = query.strip() or random.choice(("Aurora", "Volcano", "Glacier", "Waterfall"))
-        matches, _ = await self.wiki_search(term)
+        topics = {
+            "waterfall": ("Niagara Falls", "Iguazu Falls", "Victoria Falls",
+                          "Angel Falls", "Gullfoss", "Yosemite Falls"),
+            "volcano": ("Mount Etna", "Mount Fuji", "Kīlauea", "Krakatoa",
+                        "Mount Vesuvius", "Mount St. Helens"),
+            "glacier": ("Perito Moreno Glacier", "Vatnajökull", "Aletsch Glacier",
+                        "Hubbard Glacier", "Mendenhall Glacier"),
+            "aurora": ("Aurora", "Northern Lights", "Southern Lights"),
+            "canyon": ("Grand Canyon", "Antelope Canyon", "Fish River Canyon"),
+            "rainforest": ("Amazon rainforest", "Daintree Rainforest", "Congo rainforest"),
+            "coral reef": ("Great Barrier Reef", "Belize Barrier Reef", "New Caledonia Barrier Reef"),
+            "geyser": ("Old Faithful", "Strokkur", "Great Geysir"),
+        }
+        term = query.strip() or random.choice(tuple(topics))
+        matches = list(topics.get(term.casefold(), ()))
+        if not matches:
+            matches, _ = await self.wiki_search(term)
         if not matches:
             raise ContentError("No source-backed nature topic was found")
-        item = await self.wiki_article(matches[0])
-        return Item(item.title, item.description, item.source_url,
-                    "Wikipedia / Wikimedia", item.image_url, "Wikimedia page image")
+        choices = [title for title in matches if title != exclude_id]
+        if not choices:
+            choices = matches
+        random.shuffle(choices)
+        # A search hit is not necessarily a nature photograph. Try several
+        # distinct sourced articles instead of repeatedly showing the first.
+        for title in choices[:6]:
+            try:
+                item = await self.wiki_article(title)
+            except ContentError:
+                continue
+            if item.image_url:
+                return Item(item.title, item.description, item.source_url,
+                            "Wikipedia / Wikimedia", item.image_url,
+                            "Wikimedia page image", identifier=item.title)
+        raise ContentError("No sourced nature photograph was available for this topic")
 
     async def daily(self, topic: str, day: dt.date) -> list[Item]:
         date = day.isoformat()

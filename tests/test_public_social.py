@@ -186,4 +186,7 @@ def test_gallery_media_headers_preserve_only_safe_extractor_fields():
 def test_pornhub_uses_site_extractor_and_disabled_item_is_reported_truthfully():
     url = "https://www.pornhub.com/view_video.php?viewkey=ph623b5acbe541d"
     assert source(url) == "pornhub"
-    assert "unavailable" in extractor_error(url, b"This video has been disabled")
+    # The extractor's generic disabled text can also appear when a playable
+    # CDN URL is blocked; do not assert that the public post was removed.
+    assert "extractor could not access" in extractor_error(url, b"This video has been disabled")
+    assert "unavailable" in extractor_error(url, b"Removed by the uploader")

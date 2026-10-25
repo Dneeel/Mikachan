@@ -118,6 +118,12 @@ def test_source_url_rejects_internal_or_unsafe_targets(value):
         source_url(value)
 
 
+def test_subscription_source_accepts_public_8854_endpoint_without_token_leak():
+    url = "http://node10.botkeep.cloud:8854/knight/base64?token=private"
+    assert source_url(url) == url
+    assert source_url("https://node10.botkeep.cloud/knight/base64?token=private")
+
+
 @pytest.mark.asyncio
 async def test_resolver_rejects_rebound_private_dns(monkeypatch):
     class Loop:

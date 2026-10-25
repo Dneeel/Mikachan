@@ -7,7 +7,7 @@ dependencies = [
   "aiogram==3.22.0",
   "httpx==0.28.1",
   "beautifulsoup4==4.15.0",
-  "yt-dlp==2026.8.19",
+  "yt-dlp==2026.10.21",
   "curl_cffi>=0.16,<0.17",
   "yt-dlp-community-plugin @ git+https://github.com/biggestsonicfan/yt-dlp-community-plugin@7966b80209c1c1355b51469f1a338c90bd8b91f9",
   "gallery-dl==1.32.16",

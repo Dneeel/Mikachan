@@ -367,6 +367,62 @@ async def test_next_posts_menu_survives_media_button_in_same_batch():
 
 
 @pytest.mark.asyncio
+async def test_final_batch_retries_media_that_failed_during_stream():
+    media = SimpleNamespace(id=62, photo=object(), document=None, video=None,
+                            raw_text="Real caption", buttons=[])
+    relay = InstagramRelay(None, None, None, None)
+    relay._send_media = AsyncMock(return_value=True)
+    count, menu, skipped = await relay._send_results(70, 7, "cnn", [media],
+                                                     skip_ids=set(), expected_media=True)
+    assert (count, menu, skipped) == (1, None, 0)
+    relay._send_media.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_five_posts_are_all_delivered_even_when_some_stream_attempts_fail():
+    posts = [SimpleNamespace(id=n, photo=object(), document=None, video=None,
+        raw_text=f"Post {n}", buttons=[]) for n in range(1, 6)]
+    marker = SimpleNamespace(id=6, photo=None, document=None, video=None,
+                             raw_text="✅ Sent 5 posts.", buttons=[])
+    async def click(*_args, **kwargs):
+        for post in posts:
+            await kwargs["on_media"](post)
+        return [*posts, marker]
+    attempts = {}
+    async def send_media(_chat, _user, message, _fallback, **_kwargs):
+        attempts[message.id] = attempts.get(message.id, 0) + 1
+        return message.id not in {2, 4} or attempts[message.id] > 1
+    bridge = SimpleNamespace(instagram_click=AsyncMock(side_effect=click))
+    bot = SimpleNamespace(send_message=AsyncMock(
+        return_value=SimpleNamespace(message_id=101)))
+    relay = InstagramRelay(bridge, bot, None, None)
+    relay._send_media = AsyncMock(side_effect=send_media)
+    _, actions = relay._menu_markup("profile", card(), profile_handle="cnn")
+    relay._remember_menu("profile", 7, 70, 100, "cnn", card(), actions)
+    query = SimpleNamespace(data="ir:profile:posts", from_user=SimpleNamespace(id=7),
+                            message=SimpleNamespace(chat=SimpleNamespace(id=70),
+                                                    message_id=100, delete=AsyncMock()),
+                            answer=AsyncMock())
+    assert await asyncio.wait_for(relay.callback(query), 2)
+    assert attempts == {1: 1, 2: 2, 3: 1, 4: 2, 5: 1}
+    assert bot.send_message.await_args.args[1] == "✅ Sent 5 posts."
+
+
+@pytest.mark.asyncio
+async def test_done_profile_button_reopens_upstream_profile():
+    relay = InstagramRelay(None, None, None, None)
+    relay.show_profile = AsyncMock()
+    relay._remember_menu("done", 7, 70, 101, "cnn", 55,
+                         {"profile": (-1, -1, "")})
+    query = SimpleNamespace(data="ir:done:profile", from_user=SimpleNamespace(id=7),
+        message=SimpleNamespace(chat=SimpleNamespace(id=70), message_id=101,
+                                delete=AsyncMock()), answer=AsyncMock())
+    assert await relay.callback(query)
+    relay.show_profile.assert_awaited_once_with(70, 7, "cnn")
+    query.message.delete.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_story_callback_sends_first_item_while_provider_is_still_uploading():
     story = SimpleNamespace(id=30, photo=object(), document=None, video=None,
                             raw_text="🤖 Downloaded with @instaRoxinoBot", buttons=[])
@@ -379,17 +435,22 @@ async def test_story_callback_sends_first_item_while_provider_is_still_uploading
         await asyncio.wait_for(delivered.wait(), 1)
         return [story]
     bridge = SimpleNamespace(instagram_click=AsyncMock(side_effect=click))
-    bot = SimpleNamespace(send_message=AsyncMock())
+    bot = SimpleNamespace(send_message=AsyncMock(
+        return_value=SimpleNamespace(message_id=101)))
     relay = InstagramRelay(bridge, bot, None, None)
     relay._send_media = AsyncMock(side_effect=send_media)
     _, actions = relay._menu_markup("profile", card(), profile_handle="cnn")
     relay._remember_menu("profile", 7, 70, 100, "cnn", card(), actions)
     query = SimpleNamespace(data="ir:profile:stories", from_user=SimpleNamespace(id=7),
                             message=SimpleNamespace(chat=SimpleNamespace(id=70),
-                                                    message_id=100), answer=AsyncMock())
+                                                    message_id=100, delete=AsyncMock()),
+                            answer=AsyncMock())
     assert await asyncio.wait_for(relay.callback(query), 2)
     relay._send_media.assert_awaited_once()
     assert bot.send_message.await_args.args[1] == "✅ Done"
+    query.message.delete.assert_awaited_once()
+    done = next(menu for menu in relay.menus.values() if menu.message == 101)
+    assert "profile" in done.buttons
 
 
 @pytest.mark.asyncio

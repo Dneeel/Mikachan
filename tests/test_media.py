@@ -52,6 +52,28 @@ class CachedDeliveryTests(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg required")
 class Mp3Tests(unittest.IsolatedAsyncioTestCase):
+    async def test_h264_in_mkv_is_remuxed_without_video_reencoding(self):
+        from mikachan.jobs import Worker
+
+        with tempfile.TemporaryDirectory() as d:
+            original = Path(d) / "long-form.mkv"
+            subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i",
+                "testsrc2=size=320x240:rate=10:duration=2", "-c:v", "libx264",
+                "-y", str(original)], check=True)
+            source_frames = subprocess.run(["ffprobe", "-v", "error", "-select_streams",
+                "v:0", "-show_entries", "stream=nb_read_packets", "-count_packets",
+                "-of", "default=nw=1:nk=1", str(original)], capture_output=True,
+                text=True, check=True).stdout.strip()
+            prepared = (await Worker._prepare_media(
+                object.__new__(Worker), [original], 2_000_000))[0]
+            assert prepared.suffix == ".mp4"
+            assert not original.exists()
+            result = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0",
+                "-show_entries", "stream=codec_name,nb_read_packets", "-count_packets",
+                "-of", "default=nw=1:nk=1", str(prepared)], capture_output=True,
+                text=True, check=True).stdout.splitlines()
+            assert "h264" in result and source_frames in result
+
     async def test_telegram_compatible_video_keeps_original_file(self):
         from mikachan.jobs import Worker
 

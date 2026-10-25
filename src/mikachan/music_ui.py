@@ -1,5 +1,6 @@
 """Listening links and verified public lyric lookup for music search results."""
 
+import asyncio
 import re
 from urllib.parse import quote
 
@@ -8,6 +9,7 @@ from bs4 import BeautifulSoup
 
 from .catalog import CatalogTrack, recording_search_alias
 from .matching import match_score
+from .matching import DISPLAY_WORDS, VERSION_WORDS, tokens
 
 
 def listening_links(title: str, creator: str, source: str, url: str) -> list[tuple[str, str]]:
@@ -97,6 +99,70 @@ async def verified_lyrics(title: str, creator: str, duration: int | None = None)
             found = await _genius_lyrics(client, wanted_title, wanted_artist)
             if found:
                 return found
+    return None
+
+
+_QUERY_FILLER = {"song", "music", "track", "by", "from", "the", "a", "official",
+                 "vag", "rant", "full", "version", "songtext"}
+
+
+async def lyrics_from_query(query: str) -> tuple[str, str, str] | None:
+    """Resolve noisy user text to a catalog recording before fetching lyrics.
+
+    Never infer an artist from a generic single word. Search bounded adjacent
+    phrases, require both the title and artist in the user's query, then use
+    the existing attributed lyric providers for the selected recording.
+    """
+    clean = query.strip()[:160]
+    if not clean:
+        return None
+    direct = re.split(r"\s+[-–—]\s+", clean, maxsplit=1)
+    if len(direct) == 2 and all(direct):
+        found = await verified_lyrics(direct[1], direct[0])
+        if found:
+            return direct[1], direct[0], found
+    words = [word for word in re.findall(r"[\w]+", clean, flags=re.UNICODE)
+             if word.casefold() not in VERSION_WORDS | DISPLAY_WORDS | _QUERY_FILLER]
+    if len(words) < 2:
+        return None
+    terms = [" ".join(words[:5])]
+    terms += [" ".join(words[index:index + 2]) for index in range(min(len(words) - 1, 5))]
+    terms = list(dict.fromkeys(terms))[:6]
+    wanted = tokens(" ".join(words))
+
+    async with httpx.AsyncClient(timeout=8) as client:
+        async def catalog(term: str) -> list[dict]:
+            try:
+                response = await client.get("https://itunes.apple.com/search",
+                    params={"term": term, "entity": "song", "limit": 15})
+                response.raise_for_status()
+                payload = response.json()
+                return payload.get("results", []) if isinstance(payload, dict) else []
+            except (httpx.HTTPError, ValueError):
+                return []
+
+        results = await asyncio.gather(*(catalog(term) for term in terms))
+    ranked: dict[tuple[str, str], float] = {}
+    for group in results:
+        for row in group:
+            if not isinstance(row, dict):
+                continue
+            title = str(row.get("trackName") or "").strip()
+            artist = str(row.get("artistName") or "").strip()
+            title_words = tokens(title) - VERSION_WORDS - DISPLAY_WORDS
+            artist_words = tokens(artist) - {"the", "a", "of", "and"}
+            if not title_words or not artist_words or not title_words <= wanted or \
+                    not artist_words <= wanted:
+                continue
+            score = (len(title_words | artist_words) / len(wanted) +
+                     0.1 * len(title_words) -
+                     (0.2 if (VERSION_WORDS & tokens(title)) and
+                      not VERSION_WORDS & tokens(clean) else 0))
+            ranked[(title, artist)] = max(score, ranked.get((title, artist), 0))
+    for (title, artist), _score in sorted(ranked.items(), key=lambda item: -item[1])[:3]:
+        found = await verified_lyrics(title, artist)
+        if found:
+            return title, artist, found
     return None
 
 
