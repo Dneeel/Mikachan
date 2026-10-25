@@ -133,7 +133,8 @@ def test_reconcile_repairs_credentials_and_activates_existing_draft(tmp_path, mo
             raise AssertionError((method, path))
 
     monkeypatch.setattr("deploy.n8n.reconcile_ai.Client", Client)
-    result = reconcile("https://n8n.example.org", key, artifact, tmp_path / "state")
+    result = reconcile("https://n8n.example.org", key, artifact, tmp_path / "state",
+                       memory_root=tmp_path / "memory")
     assert result == {"status": "ACTIVE", "workflow_id": "draft"}
     assert original["active"] is False and draft["active"] is True
     assert draft["nodes"][0]["credentials"]["httpHeaderAuth"]["id"] == "header-id"
@@ -239,7 +240,8 @@ def test_reconcile_repairs_known_search_query_gap_without_draft(tmp_path, monkey
             raise AssertionError((method, path))
 
     monkeypatch.setattr("deploy.n8n.reconcile_ai.Client", Client)
-    result = reconcile("https://n8n.example.org", key, artifact, tmp_path / "state")
+    result = reconcile("https://n8n.example.org", key, artifact, tmp_path / "state",
+                       memory_root=tmp_path / "memory")
     assert result["status"] == "ACTIVE"
     assert result["workflow_id"] == "existing"
 
@@ -254,7 +256,7 @@ def test_style_seed_sql_is_idempotent_and_preserves_review_state():
 
 def test_reconcile_never_contacts_n8n_without_private_api_key(tmp_path):
     result = reconcile("https://n8n.example.org", tmp_path / "absent",
-                       ARTIFACT, tmp_path / "state")
+                       ARTIFACT, tmp_path / "state", memory_root=tmp_path / "memory")
     assert result["status"] == "NOT_CONFIGURED"
     assert not (tmp_path / "state").exists()
     graph = json.loads(ARTIFACT.read_text(encoding="utf-8"))
@@ -290,7 +292,8 @@ def test_reconcile_maps_credentials_before_comparing_existing_graph(tmp_path, mo
             raise AssertionError(path)
 
     monkeypatch.setattr("deploy.n8n.reconcile_ai.Client", FakeClient)
-    result = reconcile("https://n8n.example.org", key_file, artifact, tmp_path / "state")
+    result = reconcile("https://n8n.example.org", key_file, artifact,
+                       tmp_path / "state", memory_root=tmp_path / "memory")
     assert result == {"status": "ACTIVE", "workflow_id": "existing"}
 
 
@@ -344,7 +347,8 @@ def test_missing_provider_imports_inactive_draft_without_foreign_credential(tmp_
             raise AssertionError((method, path))  # Activation must not be attempted.
 
     monkeypatch.setattr("deploy.n8n.reconcile_ai.Client", FakeClient)
-    result = reconcile("https://n8n.example.org", key_file, artifact, tmp_path / "state")
+    result = reconcile("https://n8n.example.org", key_file, artifact,
+                       tmp_path / "state", memory_root=tmp_path / "memory")
     assert result["status"] == "IMPORTED_SETUP_REQUIRED"
     assert result["workflow_id"] == "new"
     assert "Groq account" in result["reason"]
@@ -382,7 +386,8 @@ def test_disabled_optional_model_does_not_block_active_workflow(tmp_path, monkey
             raise AssertionError((method, path))
 
     monkeypatch.setattr("deploy.n8n.reconcile_ai.Client", FakeClient)
-    result = reconcile("https://n8n.example.org", key_file, artifact, tmp_path / "state")
+    result = reconcile("https://n8n.example.org", key_file, artifact,
+                       tmp_path / "state", memory_root=tmp_path / "memory")
     assert result["status"] == "ACTIVE"
 
 
@@ -455,7 +460,8 @@ def test_verified_base_graph_gets_additive_memory_without_replacing_owner_edits(
 
     monkeypatch.setattr("deploy.n8n.reconcile_ai.Client", Client)
     monkeypatch.setattr("deploy.n8n.reconcile_ai._attach_postgres_memory", add_memory)
-    result = reconcile("https://n8n.example.org", key, artifact, tmp_path / "state")
+    result = reconcile("https://n8n.example.org", key, artifact, tmp_path / "state",
+                       memory_root=tmp_path / "memory")
     assert result["status"] == "ACTIVE" and Client.updated
     assert [node["name"] for node in Client.saved["nodes"]] == ["Managed Memory"]
 
@@ -496,9 +502,11 @@ def test_changed_existing_workflow_is_preserved_and_separate_draft_imported(tmp_
             raise AssertionError((method, path))
 
     monkeypatch.setattr("deploy.n8n.reconcile_ai.Client", FakeClient)
-    first = reconcile("https://n8n.example.org", key_file, artifact, tmp_path / "state")
+    first = reconcile("https://n8n.example.org", key_file, artifact,
+                      tmp_path / "state", memory_root=tmp_path / "memory")
     assert first["status"] == "IMPORTED_SETUP_REQUIRED"
     assert first["workflow_id"] == "draft"
     assert existing["versionId"] == "owner-v2"
-    second = reconcile("https://n8n.example.org", key_file, artifact, tmp_path / "state")
+    second = reconcile("https://n8n.example.org", key_file, artifact,
+                       tmp_path / "state", memory_root=tmp_path / "memory")
     assert second["workflow_id"] == "draft"
