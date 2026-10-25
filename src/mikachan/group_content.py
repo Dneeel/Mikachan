@@ -53,8 +53,9 @@ def snapshot(message: Message) -> dict[str, Any] | None:
     caption = getattr(message, "caption", None) or ""
     media = ""
     media_id = ""
-    if getattr(message, "photo", None):
-        media, media_id = "photo", message.photo[-1].file_id
+    photos = message.photo
+    if photos:
+        media, media_id = "photo", photos[-1].file_id
     else:
         for kind in ("animation", "video", "document", "audio", "voice", "sticker",
                      "video_note"):
@@ -245,7 +246,7 @@ class GroupContent:
             if name:
                 if m.reply_to_message:
                     await self.save_source(m, name, m.reply_to_message)
-                elif match.group(2) and len(match.group(2)) <= MAX_NOTE_TEXT:
+                elif match and match.group(2) and len(match.group(2)) <= MAX_NOTE_TEXT:
                     await self.save_text(m, name, match.group(2))
                 else:
                     await m.reply("Use /setnote @word TEXT or reply to a message with /setnote @word.")
@@ -275,11 +276,15 @@ class GroupContent:
         return True
 
     async def save_text(self, m: Message, name: str, text: str) -> None:
+        if m.from_user is None:
+            return
         self.store.save(m.chat.id, name, {"kind": "text", "body": text})
         self.community.store.audit(m.chat.id, m.from_user.id, "note_save", None, name)
         await m.reply(f"✅ Note @{html.escape(name)} saved.")
 
     async def save_source(self, m: Message, name: str, source: Message) -> None:
+        if m.from_user is None:
+            return
         item = snapshot(source)
         if item is None:
             await m.reply("This message cannot be saved (unsupported or protected media).")
@@ -359,6 +364,8 @@ class GroupContent:
         return f"🗂 <b>Group Notes</b> · {count} saved", self._buttons(rows)
 
     async def menu(self, m: Message) -> None:
+        if m.from_user is None:
+            return
         token = secrets.token_urlsafe(9)
         body, markup = self.view(token, m.chat.id)
         prompt = await m.reply(body, reply_markup=markup)
@@ -442,7 +449,8 @@ class GroupContent:
             instruction = ("Reply to this prompt with @word TEXT. For original media, "
                            "reply to the media with /setnote @word."
                            if action == "add" else
-                           f"Reply to this prompt with the new TEXT, PHOTO, VIDEO or GIF for @{item['name']}.")
+                           f"Reply to this prompt with the new TEXT, PHOTO, VIDEO or GIF for @"
+                           f"{item['name'] if item else ''}.")
             prompt = await q.message.answer(instruction)
             self.store.set_pending(chat, user, "add" if action == "add" else "edit",
                                    str(item["name"]) if item else "", prompt_message=prompt.message_id)
@@ -488,7 +496,7 @@ class GroupContent:
         if mode == "add":
             match = re.fullmatch(r"\s*@([^\s]+)\s+([\s\S]+)", m.text or "")
             name = note_name(match.group(1)) if match else None
-            if not name or len(match.group(2)) > MAX_NOTE_TEXT:
+            if not match or not name or len(match.group(2)) > MAX_NOTE_TEXT:
                 await m.reply("Reply with @word TEXT or use /setnote @word on original media.")
                 return True
             await self.save_text(m, name, match.group(2))

@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import zipfile
 from pathlib import Path
 
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".webp"}
@@ -45,7 +46,14 @@ async def verify(path: Path, max_bytes: int) -> dict[str, bool]:
         if not valid:
             raise ValueError("image content does not match its format")
         return {"video": False, "audio": False}
-    if path.suffix.lower() in {".pdf", ".zip"}:
+    if path.suffix.lower() == ".pdf":
+        with path.open("rb") as stream:
+            if stream.read(5) != b"%PDF-":
+                raise ValueError("PDF content does not match its format")
+        return {"video": False, "audio": False}
+    if path.suffix.lower() == ".zip":
+        if not zipfile.is_zipfile(path):
+            raise ValueError("ZIP content does not match its format")
         return {"video": False, "audio": False}
     proc = await asyncio.create_subprocess_exec(
         "ffprobe",

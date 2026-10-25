@@ -38,6 +38,7 @@ from .matching import match_score
 from .search import Searcher
 from .podcasts import apple_podcast_feed, episodes, is_feed_url, resolve_episode_link
 from .public_social import public_tiktok_sound, public_x_post
+from .userbot import UserbotBridge
 
 MIME_EXT = {
     "image/jpeg": ".jpg",
@@ -86,6 +87,19 @@ def invalid_cached_file_id(exc: TelegramBadRequest) -> bool:
     ))
 
 
+def sent_file_id(message: Message) -> str | None:
+    """Return a reusable ID only when Telegram provided a known media field."""
+    if message.audio:
+        return message.audio.file_id
+    if message.video:
+        return message.video.file_id
+    if message.photo:
+        return message.photo[-1].file_id
+    if message.document:
+        return message.document.file_id
+    return None
+
+
 def extractor_error(url: str, stderr: bytes) -> str:
     """Summarize extractor failures without forwarding untrusted output or URLs."""
     detail = stderr.decode(errors="replace").lower()
@@ -123,7 +137,7 @@ def extractor_error(url: str, stderr: bytes) -> str:
 class Worker:
     def __init__(self, settings: Settings, store: Store, bot: Bot):
         self.settings, self.store, self.bot = settings, store, bot
-        self.userbot = None
+        self.userbot: UserbotBridge | None = None
         self.instagram_relay: Any = None
         self.tasks: dict[str, asyncio.Task[None]] = {}
         self.running_users: dict[int, int] = {}
@@ -268,8 +282,6 @@ class Worker:
     def _extract_meta(directory: Path) -> dict[str, object]:
         meta: dict[str, object] = {}
         sidecar = directory / ".mikachan-meta.json"
-        if not sidecar.exists():
-            sidecar = directory / (".nex" + "us-meta.json")
         files = [sidecar] if sidecar.exists() else sorted(directory.glob("*.info.json"))
         if files:
             try:
@@ -318,7 +330,6 @@ class Worker:
 
     @staticmethod
     def _buttons(jid: str, url: str, audio: bool, details: bool, lyrics: bool,
-                 transcript: bool = False,
                  context: dict[str, object] | None = None) -> InlineKeyboardMarkup:
         row = [InlineKeyboardButton(text="🔗 Link", url=url)]
         if audio:
@@ -329,8 +340,6 @@ class Worker:
             extras.append(InlineKeyboardButton(text="📝 Lyrics", callback_data=f"j:{jid}:lyrics"))
         if details:
             extras.append(InlineKeyboardButton(text="ℹ️ Details", callback_data=f"j:{jid}:info"))
-        if transcript:
-            extras.append(InlineKeyboardButton(text="📄 Transcript", callback_data=f"j:{jid}:transcribe"))
         if extras:
             rows.append(extras)
         from .follow import SOCIAL_PLATFORMS
@@ -366,6 +375,9 @@ class Worker:
         except Exception as exc:
             self.store.transition(jid, "DELIVERING", "DELIVERY_UNCERTAIN",
                                   error=type(exc).__name__)
+            return
+        if first is None:
+            self.store.transition(jid, "DELIVERING", "FAILED", error="empty text post")
             return
         self.store.receipt(jid, first.message_id, None)
         self.store.transition(jid, "DELIVERING", "COMPLETED", receipt_id=first.message_id)
@@ -450,7 +462,6 @@ class Worker:
                         bool(mode != "audio" and stored_audio and stored_audio[0]),
                         bool(context.get("description")),
                         stored_kind == "audio" and context.get("kind") == "track",
-                        context.get("kind") == "episode",
                         context,
                     )
                     value = stored_caption[0] if stored_caption else None
@@ -498,14 +509,7 @@ class Worker:
                     )
                     return
                 else:
-                    self.store.receipt(
-                        jid,
-                        sent.message_id,
-                        sent.audio.file_id if sent.audio else
-                        sent.video.file_id if sent.video else
-                        sent.photo[-1].file_id if sent.photo else
-                        sent.document.file_id if sent.document else None,
-                    )
+                    self.store.receipt(jid, sent.message_id, sent_file_id(sent))
                     self.store.transition(jid, "DELIVERING", "COMPLETED", receipt_id=sent.message_id)
                     await self._clear_progress(jid, chat)
                     return
@@ -566,9 +570,10 @@ class Worker:
                 try:
                     paths = [await self._danbooru_post(url, job_dir, max_bytes)]
                 except (ValueError, TimeoutError, httpx.HTTPError):
-                    paths = await self._gallery_public(url, job_dir, max_bytes)
-                    if not paths:
+                    gallery_paths = await self._gallery_public(url, job_dir, max_bytes)
+                    if not gallery_paths:
                         raise ValueError("This Danbooru post has no accessible public media") from None
+                    paths = gallery_paths
             elif source(url) == "instagram":
                 if self.instagram_relay is None:
                     raise ValueError("Instagram downloads need a Telegram user account session")
@@ -819,7 +824,6 @@ class Worker:
                     markup = self._buttons(
                         jid, source_link, False, bool(context.get("description")),
                         kind == "audio" and context.get("kind") == "track",
-                        context.get("kind") == "episode",
                         context,
                     )
                     if self.userbot and path.stat().st_size > 48 * 1024 * 1024:
@@ -856,12 +860,7 @@ class Worker:
                         ),
                     )
                 for sent in sent_messages:
-                    file_id = (
-                        sent.audio.file_id if getattr(sent, "audio", None) else
-                        sent.video.file_id if getattr(sent, "video", None) else
-                        sent.photo[-1].file_id if getattr(sent, "photo", None) else
-                        sent.document.file_id if getattr(sent, "document", None) else None
-                    )
+                    file_id = sent_file_id(sent)
                     self.store.receipt(jid, sent.message_id, file_id)
             except Exception as exc:
                 self.store.transition(
@@ -879,12 +878,7 @@ class Worker:
             await self._clear_progress(jid, chat)
             if len(paths) == 1:
                 sent = sent_messages[0]
-                file_id = (
-                    sent.audio.file_id if getattr(sent, "audio", None) else
-                    sent.video.file_id if getattr(sent, "video", None) else
-                    sent.photo[-1].file_id if getattr(sent, "photo", None) else
-                    sent.document.file_id if getattr(sent, "document", None) else None
-                )
+                file_id = sent_file_id(sent)
                 if file_id is not None:
                     self.store.db.execute(
                         "INSERT OR REPLACE INTO cache VALUES (?,?,?,?,strftime('%s','now'))",
@@ -1984,7 +1978,7 @@ class Worker:
         files = [
             p for p in directory.iterdir()
             if p.is_file() and not p.name.endswith((".part", ".info.json"))
-            and not p.name.startswith((".mikachan-", ".nex" + "us-"))
+            and not p.name.startswith(".mikachan-")
         ]
         if not 1 <= len(files) <= 10:
             raise ValueError("source returned no bounded deliverable media")

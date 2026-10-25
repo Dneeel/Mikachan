@@ -50,7 +50,7 @@ def _managed_api_credentials(root: Path = Path("/opt/Mikachan")) -> tuple[int, s
 
 async def _login_with_qr(client: object, output: TextIO) -> None:
     """Authorize a real Telegram account with a short-lived terminal QR code."""
-    import qrcode
+    import qrcode  # type: ignore[import-untyped]
     from telethon.errors import SessionPasswordNeededError  # type: ignore[import-untyped]
 
     await client.connect()  # type: ignore[attr-defined]

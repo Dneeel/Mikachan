@@ -22,7 +22,7 @@ class FakeMessage:
 
 
 @pytest.mark.asyncio
-async def test_owner_people_group_navigation_and_identity_notice(tmp_path, monkeypatch):
+async def test_owner_people_group_navigation_and_identity_page(tmp_path, monkeypatch):
     # Keep the core SettingsUI behavior real; only Telegram message methods are mocked.
     monkeypatch.setattr("mikachan.settings_ui.Message", FakeMessage)
     store = Store(tmp_path / "mikachan.sqlite")
@@ -58,10 +58,9 @@ async def test_owner_people_group_navigation_and_identity_notice(tmp_path, monke
     await ui.callback(query, f"z:{token}:home")
     msg.edit_text.reset_mock()
     await ui.callback(query, f"z:{token}:identity")
-    query.answer.assert_awaited_with("Coming soon")
-    msg.edit_text.assert_not_awaited()
+    assert "Nicknames stay within the group" in msg.edit_text.await_args.args[0]
     assert store.db.execute("SELECT page FROM settings_sessions WHERE token=?",
-                            (token,)).fetchone()[0] == "home"
+                            (token,)).fetchone()[0] == "identity"
 
 
 @pytest.mark.asyncio

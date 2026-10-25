@@ -625,6 +625,8 @@ class UserbotBridge:
                         if not source or not source.media:
                             raise ValueError("Reply to a file, photo, video, or audio message")
                         return await self._request_file_link(peer, source=source)
+                    if message is None:
+                        raise ValueError("Original Telegram message is unavailable")
                     media = (message.document or message.video or message.audio or
                              message.animation or message.voice or message.video_note or
                              (message.photo[-1] if message.photo else None) or message.sticker)

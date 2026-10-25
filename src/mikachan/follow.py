@@ -729,7 +729,7 @@ async def public_profile(target: Target, *, display_avatar: bool = False) -> dic
             thumbnails = data.get("thumbnails")
             avatar = str(data.get("channel_thumbnail") or "")
             if not avatar and isinstance(thumbnails, list):
-                pictures = [t.get("url") for t in thumbnails if isinstance(t, dict)
+                pictures = [str(t["url"]) for t in thumbnails if isinstance(t, dict)
                             and isinstance(t.get("url"), str)]
                 avatar = pictures[-1] if pictures else ""
             result = {"name": name} if name else {}

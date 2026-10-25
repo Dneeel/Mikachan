@@ -109,23 +109,32 @@ class SettingsUI:
                     [button("📍 My Location", "location")],
                     [button("◀ Back", "home" if chat == user else "close"),
                      button("✖ Close", "close")]]))
+        if page == "identity":
+            return ("🎭 <b>Personality & Identity</b>\n"
+                    "Normal mode is the default. Owner-selected numeric IDs for Mommy mode "
+                    "are configured in the VPS terminal panel.\n\n"
+                    "Reply to a group member with /id to view their observed identity card. "
+                    "The Owner can edit stored identity fields from that card. "
+                    "Nicknames stay within the group where they are set.",
+                    markup([[button("👥 Access Control", "people")],
+                            [button("◀ Back", "home")]]))
         if page == "sourceapis" and self.content_ui is not None:
             labels = {"thecatapi": "TheCatAPI", "nasa": "NASA", "navasan": "Navasan"}
             statuses = [f"{label} · {'Owner key stored' if self.content_ui.source_api_key(provider) else 'No owner key'}"
                         for provider, label in labels.items()]
-            controls = []
+            api_controls: list[list[tuple[str, str]]] = []
             for provider, label in labels.items():
-                controls.append([button(f"✏️ Set {label} key", f"sourcekey_set:{provider}")])
+                api_controls.append([button(f"✏️ Set {label} key", f"sourcekey_set:{provider}")])
                 if self.content_ui.source_api_key(provider):
-                    controls.append([button(f"🗑 Remove {label} key",
+                    api_controls.append([button(f"🗑 Remove {label} key",
                                             f"sourcekey_remove:{provider}")])
-            controls.append([button("◀ Back", "home")])
+            api_controls.append([button("◀ Back", "home")])
             return ("🔑 <b>Content APIs</b>\n"
                     + "\n".join(statuses) + "\n"
                     "CATAAS · No key required\n\n"
                     "/pishi requests a fresh photo. TheCatAPI is tried when its key "
                     "is configured; CATAAS is the keyless fallback. Keys are never shown here.",
-                    markup(controls))
+                    markup(api_controls))
         if page == "ai_audio" and self.n8n_gateway is not None:
             ai_status = "Configured" if self.n8n_gateway.enabled else "Missing"
             tts = "Enabled" if self.audio_ui and self.audio_ui.tts_enabled else "Off"
@@ -294,21 +303,20 @@ class SettingsUI:
             body = (f"🏘 <b>{html.escape(str(row['internal_name']))}</b>\n"
                     f"ID · <code>{gid}</code>\nStatus · {row['status']}\n"
                     f"Assigned Admin IDs · {', '.join(assigned) or 'None'}")
-            controls = [[button("✏️ Rename", "rename")],
+            group_controls = [[button("✏️ Rename", "rename")],
                         [button("👮 Assign / Remove Admin", "assign")]]
             if row["status"] != "REVOKED":
-                controls.append([button("⏸ Suspend", "suspend")] if row["status"] == "ACTIVE"
+                group_controls.append([button("⏸ Suspend", "suspend")] if row["status"] == "ACTIVE"
                                 else [button("▶️ Resume", "resume")])
-                controls.append([button("⛔ Revoke", "revoke")])
-            controls.append([button("◀ Back", "groups")])
-            return body, markup(controls)
-        status = {
-            "identity": "Coming soon.",
+                group_controls.append([button("⛔ Revoke", "revoke")])
+            group_controls.append([button("◀ Back", "groups")])
+            return body, markup(group_controls)
+        status_text = {
             "system": (f"Registered people · {len(self.access.allowlist())}\n"
                        f"Active groups · {len(self.access.groups())}\n"
                        "Detailed service and backup controls are available in the VPS mikachan panel."),
         }
-        return ("⚙️ <b>" + page.title() + "</b>\n" + status.get(page, "Unavailable"),
+        return ("⚙️ <b>" + page.title() + "</b>\n" + status_text.get(page, "Unavailable"),
                 markup([[button("◀ Back", "home")]]))
 
     def _recipients(self, audience: str) -> list[int]:
@@ -420,10 +428,6 @@ class SettingsUI:
                     "Availability does not by itself prove free entitlement.")
             except ValueError as exc:
                 await q.message.answer("⚠️ " + html.escape(str(exc)))
-            return True
-        # Keep Identity as a transient notice; the owner must remain on Home.
-        if action == "identity":
-            await q.answer("Coming soon")
             return True
         # All other actions are encoded as z:TOKEN:ACTION. A Person or Group
         # action contains one additional colon, preserved by split(":", 2).

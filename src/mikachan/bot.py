@@ -262,7 +262,7 @@ class App:
             settings.bot_token, session=session, default=DefaultBotProperties(parse_mode="HTML")
         )
         user_session = settings.userbot_session or settings.coinpj_session
-        self.userbot = (UserbotBridge(settings.telegram_api_id, settings.telegram_api_hash,
+        self.userbot: UserbotBridge | None = (UserbotBridge(settings.telegram_api_id, settings.telegram_api_hash,
                                       user_session, int(settings.userbot_staging_chat_id or 0))
                         if user_session and settings.telegram_api_id and
                         settings.telegram_api_hash else None)
@@ -741,12 +741,12 @@ class App:
             except (httpx.HTTPError, TimeoutError, ValueError):
                 result = None
             if result:
-                title, artist, lyric = result
+                title, artist, lyrics_text = result
                 header = f"📝 <b>{html.escape(title)}</b> · {html.escape(artist)}\n\n"
-                for offset in range(0, min(len(lyric), 12000), 3500):
+                for offset in range(0, min(len(lyrics_text), 12000), 3500):
                     await self.bot.send_message(m.chat.id,
                         (header if offset == 0 else "📝 Continued\n\n") +
-                        html.escape(lyric[offset:offset + 3500]))
+                        html.escape(lyrics_text[offset:offset + 3500]))
             else:
                 await m.reply("No confidently matched, complete lyrics were found. "
                               "Try /lyric ARTIST - TITLE.")
@@ -1987,31 +1987,33 @@ class App:
                     return
                 context = self.store.job_context(parts[1])
                 if parts[2] == "transcribe":
-                    await self.bot.send_message(q.message.chat.id, "📄 Episode transcription: coming soon")
+                    await self.bot.send_message(q.message.chat.id,
+                        "Reply to the delivered audio with /asr to request a transcript. "
+                        "This requires a configured Telegram user account session.")
                 elif parts[2] == "info":
-                    details = str(context.get("description") or "").strip()
-                    if details:
-                        for offset in range(0, min(len(details), 12000), 3500):
+                    post_details = str(context.get("description") or "").strip()
+                    if post_details:
+                        for offset in range(0, min(len(post_details), 12000), 3500):
                             await self.bot.send_message(
                                 q.message.chat.id,
                                 ("ℹ️ <b>Details</b>\n" if offset == 0 else "")
-                                + html.escape(details[offset : offset + 3500]),
+                                + html.escape(post_details[offset : offset + 3500]),
                             )
                 else:
                     try:
-                        lyric = await verified_lyrics(
+                        lyric_text = await verified_lyrics(
                             str(context.get("title") or ""),
                             str(context.get("artist") or ""),
                             int(context.get("duration") or 0) or None,
                         )
                     except Exception:
-                        lyric = None
-                    if lyric:
-                        for offset in range(0, min(len(lyric), 12000), 3500):
+                        lyric_text = None
+                    if lyric_text:
+                        for offset in range(0, min(len(lyric_text), 12000), 3500):
                             await self.bot.send_message(
                                 q.message.chat.id,
                                 ("📝 <b>Lyrics</b>\n" if offset == 0 else "")
-                                + html.escape(lyric[offset : offset + 3500]),
+                                + html.escape(lyric_text[offset : offset + 3500]),
                             )
                     else:
                         await self.bot.send_message(
@@ -2183,7 +2185,7 @@ class App:
                 q.message.chat.id, "Finding public audio matches…"
             )
             self.store.set_search_message(alt_sid, pending.message_id)
-            hits, failures = await self.searcher.search(query, {"track"}, {"soundcloud", "ytmusic"})
+            hits, alt_failures = await self.searcher.search(query, {"track"}, {"soundcloud", "ytmusic"})
             ranked = sorted(
                 (
                     (
@@ -2203,7 +2205,7 @@ class App:
                 reverse=True,
             )
             self.store.save_results(alt_sid, 0, [h.data() for score, h in ranked if score >= 0.48])
-            await self.render_search(alt_sid, q.from_user.id, q.message.chat.id, failures)
+            await self.render_search(alt_sid, q.from_user.id, q.message.chat.id, alt_failures)
         elif (
             action == "r"
             and len(parts) == 5

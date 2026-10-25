@@ -2,6 +2,7 @@ import unittest
 import shutil
 import subprocess
 import tempfile
+import zipfile
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 from mikachan.media import gallery_budget, groups, media_kind, verify
@@ -35,6 +36,21 @@ class ImageValidationTests(unittest.IsolatedAsyncioTestCase):
             photo = Path(d) / "photo.png"
             photo.write_bytes(b"\x89PNG\r\n\x1a\n" + b"padding")
             self.assertEqual(media_kind(photo, await verify(photo, 1000)), "photo")
+
+    async def test_rejects_disguised_documents_and_accepts_real_zip(self):
+        with tempfile.TemporaryDirectory() as d:
+            fake_pdf = Path(d) / "report.pdf"
+            fake_pdf.write_bytes(b"<html>Access denied</html>")
+            with self.assertRaisesRegex(ValueError, "PDF content"):
+                await verify(fake_pdf, 1000)
+            fake_zip = Path(d) / "archive.zip"
+            fake_zip.write_bytes(b"PK\x03\x04incomplete archive")
+            with self.assertRaisesRegex(ValueError, "ZIP content"):
+                await verify(fake_zip, 1000)
+            with zipfile.ZipFile(fake_zip, "w") as archive:
+                archive.writestr("note.txt", "hello")
+            self.assertEqual(await verify(fake_zip, 1000),
+                             {"video": False, "audio": False})
 
 
 class CachedDeliveryTests(unittest.TestCase):
