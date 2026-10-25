@@ -880,7 +880,10 @@ class N8NManager:
         graph = self._reconcile_ai()
         if graph.get("status") != "ACTIVE":
             return {"status": "SETUP_REQUIRED", "reason": "Webhook credential prepared; "
-                    "workflow still needs provider setup", "workflow_id": graph.get("workflow_id", ""),
+                    "workflow still needs provider setup. " + str(graph.get("reason") or
+                    "Open the workflow in n8n and inspect its missing credentials"),
+                    "workflow_status": str(graph.get("status", "SETUP_REQUIRED")),
+                    "workflow_id": graph.get("workflow_id", ""),
                     "memory_status": str(memory.get("status", "RECOVERABLE"))}
         state = self.state()
         if state.get("access") != "domain" or not state.get("hostname"):
