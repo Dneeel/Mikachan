@@ -355,6 +355,18 @@ class App:
             return self.community.store.enabled(chat_id, domain)
         return True
 
+    def is_owner(self, user_id: int) -> bool:
+        registry = getattr(self.store, "access_registry", None)
+        return (registry.role(user_id) == "OWNER" if registry is not None else
+                user_id == self.settings.owner_telegram_id)
+
+    def personality_mode(self, user_id: int, chat_type: str) -> Mode:
+        if chat_type != "private":
+            return Mode.NORMAL
+        authorized = {user_id} if self.authorized(user_id, user_id, "private") else set()
+        return mode_for(user_id, authorized, self.settings.mommy_ids,
+                        {user_id} if self.is_owner(user_id) else set())
+
     async def relay_n8n_command(self, m: Message, text: str) -> None:
         """Send only an approved command and its needed reply data to n8n."""
         if not m.from_user or not self.authorized(m.from_user.id, m.chat.id, m.chat.type):
@@ -376,15 +388,16 @@ class App:
                 if media:
                     source[kind] = {"file_id": media.file_id,
                                     "file_size": media.file_size or 0}
+        personality_mode = self.personality_mode(m.from_user.id, m.chat.type)
         message: dict[str, object] = {
             "message_id": m.message_id, "text": text[:3000],
             "chat": {"id": m.chat.id, "type": m.chat.type},
             "from": {"id": m.from_user.id},
             "verified_daniel": bool(m.from_user.id == self.settings.owner_telegram_id),
+            "verified_owner": self.is_owner(m.from_user.id),
             "adult_verified": False,
-            "mommy_enabled": False,
-            "mika_mode": "mommy" if m.from_user.id in getattr(
-                getattr(self, "settings", None), "mommy_ids", set()) else "normal",
+            "mommy_enabled": personality_mode is Mode.MOMMY,
+            "mika_mode": personality_mode.value,
         }
         if source:
             message["reply_to_message"] = source
@@ -758,8 +771,7 @@ class App:
         if await self.utilities.command(m, cmd, arg):
             return
         if cmd == "/help":
-            personality_mode = (mode_for(m.from_user.id, self.store.allowlist(), self.settings.mommy_ids)
-                    if m.chat.type == "private" else Mode.NORMAL)
+            personality_mode = self.personality_mode(m.from_user.id, m.chat.type)
             await m.reply(help_text(
                 relay_enabled=self.settings.mika_n8n_telegram_relay,
                 group=m.chat.type in {"group", "supergroup"},

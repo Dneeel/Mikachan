@@ -102,6 +102,7 @@ def _system_expression(agent: str) -> str:
     return ("={{ " + json.dumps(core, ensure_ascii=False) +
             " + '\\n\\nTrusted runtime context: ' + JSON.stringify({"
             "verifiedDaniel: $json.message.verified_daniel === true, "
+            "verifiedOwner: $json.message.verified_owner === true, "
             "adultVerified: $json.message.adult_verified === true, "
             "mommyEnabled: $json.message.mommy_enabled === true, "
             "chatType: $json.message.chat.type, "

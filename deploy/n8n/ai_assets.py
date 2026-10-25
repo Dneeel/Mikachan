@@ -9,9 +9,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).with_name("ai_assets")
 FILES = {
-    "chat": ("01_MIKA_CHAT_SYSTEM.md", "58116aef57c03b26bdbf512116a269f049a8530099750bbd766c88cc4fe7b8fa"),
+    "chat": ("01_MIKA_CHAT_SYSTEM.md", "e585b827eed6c9028e7612eb1ec5e32d09dbfc28948dbfdc585f3d75c0a43e18"),
     "serious": ("02_MIKA_SERIOUS_SYSTEM.md", "f628fbb818db4d3aa12d0f856ddf7cbf78caa0fbad73181e7ada1b1f9a407e7e"),
-    "chat_dna": ("03_MIKA_CHAT_STYLE_DNA.md", "c91786325f27b3a02292450086acaf7f36a96f9a714244470b812215be3da261"),
+    "chat_dna": ("03_MIKA_CHAT_STYLE_DNA.md", "d32453c025b678743e8004e1cb13db6cd410c7de8aa2b0e774e0ab8a4e0b1b7d"),
     "serious_dna": ("04_MIKA_SERIOUS_WRITING_DNA.md", "0854c3c5875a1aa01d7bcac9f293654334b12bd1bb07f684bbb97cab23d30907"),
     "seeds": ("05_STYLE_SEEDS.json", "4ddb68854250bad7f1922eaafa29daf2f25734e90ef83a3029a2ec3f1fdfb85e"),
 }

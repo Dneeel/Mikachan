@@ -120,7 +120,8 @@ class MikaSubUI:
             return session.converted
         return await self.core.all_items(session.version, session.total)
 
-    async def _batch(self, session: Session, offset: int) -> None:
+    async def _batch(self, session: Session, offset: int, *,
+                     message: Message | None = None, published_at: str = "") -> None:
         entries = await self._items(session, offset, min(5, session.total - offset))
         if not entries:
             await self._send(session, "End of collection.", [[("🙏 Thanks", "thanks")]])
@@ -129,15 +130,29 @@ class MikaSubUI:
         rows = [[("▣ QR", f"select:{offset}"),
                  ("5 More", f"more:{end}")] if end < session.total else
                 [("▣ QR", f"select:{offset}")]]
+        if message is not None:
+            rows.append([("🎲 Just One", "one"), ("📦 The Whole Stash", "stash")])
+            rows.append([("◀ Back", "home")])
         rows.append([("🙏 Thanks", "thanks")])
-        intro = f"📋 <b>{offset + 1}–{end} of {session.total}</b> · untested\n\n"
+        intro = (f"🏴‍☠️ <b>MikaSub</b> · {offset + 1}–{end} of {session.total} · untested\n"
+                 + (f"Published: {html.escape(published_at[:40])}\n" if published_at else "")
+                 + "\n")
         body = intro + "\n\n".join(f"<code>{html.escape(str(item['uri']))}</code>" for item in entries)
         if end >= session.total:
             body += "\n\nEnd of collection."
         if len(body) <= 3900:
-            await self._send(session, body, rows)
+            if message is not None:
+                await self._edit(message, session, body, rows)
+            else:
+                await self._send(session, body, rows)
         else:
             # Complete five-entry TXT is lossless when Telegram's text limit is too small.
+            if message is not None:
+                await self._edit(message, session,
+                    f"🏴‍☠️ <b>MikaSub</b> · {session.total:,} published configs. "
+                    "The first five complete URIs are in the TXT below.",
+                    [[("🎲 Just One", "one"), ("📦 The Whole Stash", "stash")],
+                     [("◀ Back", "home"), ("🙏 Thanks", "thanks")]])
             content = ("\n".join(str(item["uri"]) for item in entries) + "\n").encode()
             sent = await self.bot.send_document(session.chat,
                 BufferedInputFile(content, f"MikaSub-{offset + 1}-{end}.txt"),
@@ -217,18 +232,28 @@ class MikaSubUI:
             return
         if action == "collection":
             session.messages = {q.message.message_id}
-            info = await self.core.metadata()
+            try:
+                info = await self.core.metadata()
+            except MikaSubError as exc:
+                if "snapshot unavailable" not in str(exc):
+                    raise
+                await self._edit(q.message, session,
+                    "🏴‍☠️ <b>MikaSub</b>\nNo configurations are published yet. "
+                    "The Owner can add a source in private /settings → MikaSub → "
+                    "Sources, then choose Update Now.",
+                    [[("◀ Back", "home"), ("🙏 Thanks", "thanks")]])
+                return
             session.version = str(info["version"])
             session.total = int(info["total"])
             session.converted = None
             session.next_offset = 0
-            body = ("🏴‍☠️ <b>MikaSub · The Unknown Collection</b>\n"
-                    f"Available: <b>{session.total:,} configurations</b>\n"
-                    f"Published: {html.escape(str(info.get('created_at') or 'unknown'))}\n\n"
-                    "These configs are untested. They may or may not work; access from Iran is not guaranteed.")
-            await self._edit(q.message, session, body,
-                [[("🎲 Just One", "one")], [("📦 The Whole Stash", "stash")],
-                 [("◀ Back", "home"), ("🙏 Thanks", "thanks")]])
+            if session.total:
+                await self._batch(session, 0, message=q.message,
+                                  published_at=str(info.get("created_at") or "unknown"))
+            else:
+                await self._edit(q.message, session,
+                    "🏴‍☠️ <b>MikaSub</b>\nNo configurations are published yet.",
+                    [[("◀ Back", "home"), ("🙏 Thanks", "thanks")]])
             return
         if action == "home":
             session.prompt_id = 0

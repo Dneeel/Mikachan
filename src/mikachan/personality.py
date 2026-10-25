@@ -8,8 +8,11 @@ class Mode(StrEnum):
     MOMMY = "mommy"
 
 
-def mode_for(user_id: int, authorized: set[int], mommy_ids: set[int]) -> Mode:
-    return Mode.MOMMY if user_id in authorized and user_id in mommy_ids else Mode.NORMAL
+def mode_for(user_id: int, authorized: set[int], mommy_ids: set[int],
+             owner_ids: set[int] | None = None) -> Mode:
+    """Use authenticated numeric IDs; active Owners receive Mommy by default."""
+    return (Mode.MOMMY if user_id in authorized and
+            user_id in (mommy_ids | (owner_ids or set())) else Mode.NORMAL)
 
 
 def response(event: str, mode: Mode) -> str:

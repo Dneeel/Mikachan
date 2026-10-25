@@ -99,8 +99,31 @@ async def test_relay_does_not_send_unauthorized_update_or_extra_user_fields():
     payload = app.n8n_gateway.relay_telegram.await_args.args[0]
     assert payload == {"message_id": 11, "text": "/mika hello",
                        "chat": {"id": 8, "type": "private"}, "from": {"id": 7},
-                       "verified_daniel": True, "adult_verified": False,
-                       "mommy_enabled": False, "mika_mode": "normal"}
+                       "verified_daniel": True, "verified_owner": True,
+                       "adult_verified": False,
+                       "mommy_enabled": True, "mika_mode": "mommy"}
+
+
+@pytest.mark.asyncio
+async def test_secondary_owner_has_private_mommy_context_without_daniel_identity():
+    app = App.__new__(App)
+    app.store = SimpleNamespace(rate=lambda *_args: True,
+                                access_registry=SimpleNamespace(role=lambda uid: "OWNER" if uid == 8 else None))
+    app.n8n_gateway = SimpleNamespace(relay_telegram=AsyncMock())
+    app.settings = SimpleNamespace(owner_telegram_id=7, mommy_ids=set())
+    app.authorized = lambda uid, _chat, _type: uid == 8
+    message = SimpleNamespace(from_user=SimpleNamespace(id=8),
+        chat=SimpleNamespace(id=8, type="private"), message_id=14,
+        reply_to_message=None, reply=AsyncMock())
+    await app.relay_n8n_command(message, "/mika hello")
+    payload = app.n8n_gateway.relay_telegram.await_args.args[0]
+    assert payload["verified_owner"] is True
+    assert payload["verified_daniel"] is False
+    assert payload["adult_verified"] is False
+    assert payload["mommy_enabled"] is True
+    message.chat = SimpleNamespace(id=-100, type="supergroup")
+    await app.relay_n8n_command(message, "/mika hello")
+    assert app.n8n_gateway.relay_telegram.await_args.args[0]["mommy_enabled"] is False
 
 
 @pytest.mark.asyncio

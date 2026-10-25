@@ -60,7 +60,12 @@ There is no new polling process or systemd unit.
 
 - `/vpn` has **MikaSub**, **Sub Converter**, and **Thanks**. Approved groups get
   results in that group. Default-deny numeric user and group rules still apply.
-- MikaSub shows the actual snapshot count and publication time. **Just One**
+- Tapping **MikaSub** shows the actual snapshot count and publication time and
+  immediately sends the first five configurations from that published snapshot.
+  If no snapshot exists, it explains how the Owner adds a source and publishes
+  it in private `/settings` → MikaSub → Sources → Update Now. Source changes do
+  not silently replace a published snapshot before a successful build.
+  **Just One**
   selects a uniform index from the pinned snapshot, returns one complete
   renamed URI, and supplies single-config QR. **The Whole Stash** offers Here,
   TXT, YAML, MikaSub link, Back and Thanks. Here sends five complete URIs per

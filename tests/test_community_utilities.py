@@ -31,6 +31,23 @@ def test_numeric_access_and_mode():
     assert mode_for(2, users, {2}) is Mode.MOMMY
     assert mode_for(3, users, {3}) is Mode.NORMAL
     assert mode_for(1, users, {2}) is Mode.NORMAL
+    assert mode_for(1, users, set(), {1}) is Mode.MOMMY
+    assert mode_for(3, users, set(), {3}) is Mode.NORMAL
+
+
+def test_active_owners_get_private_mommy_mode_without_granting_access():
+    app = App.__new__(App)
+    roles = {1: "OWNER", 2: "OWNER", 3: "USER", 4: None}
+    app.store = SimpleNamespace(access_registry=SimpleNamespace(role=roles.get))
+    app.settings = SimpleNamespace(owner_telegram_id=1, mommy_ids=set())
+    app.authorized = lambda user, _chat, _type: roles.get(user) is not None
+    assert app.personality_mode(1, "private") is Mode.MOMMY
+    assert app.personality_mode(2, "private") is Mode.MOMMY
+    assert app.personality_mode(2, "supergroup") is Mode.NORMAL
+    assert app.personality_mode(3, "private") is Mode.NORMAL
+    assert app.personality_mode(4, "private") is Mode.NORMAL
+    roles[2] = None
+    assert app.personality_mode(2, "private") is Mode.NORMAL
 
 
 def test_group_isolation_audit_and_content_import(tmp_path):

@@ -7,6 +7,7 @@ import pytest
 
 from mikachan.bot import App
 from mikachan.mikasub_ui import MikaSubUI
+from mikachan.mikasub_core import MikaSubError
 from mikachan.store import Store
 
 
@@ -89,6 +90,10 @@ async def test_launcher_has_two_choices_and_13_items_page_five_at_a_time(tmp_pat
         "🏴‍☠️ MikaSub", "🔄 Sub Converter", "🙏 Thanks"]
     session = next(iter(ui.sessions.values()))
     await ui.callback(query(home, session.token, "collection"), f"ms:{session.token}:collection")
+    first_preview = home.edit_text.await_args.args[0]
+    assert "1–5 of 13" in first_preview
+    assert source[0]["uri"] in first_preview
+    assert session.next_offset == 5
     await ui.callback(query(home, session.token, "stash"), f"ms:{session.token}:stash")
     await ui.callback(query(home, session.token, "here"), f"ms:{session.token}:here")
     first = bot.messages[-1]
@@ -104,6 +109,19 @@ async def test_launcher_has_two_choices_and_13_items_page_five_at_a_time(tmp_pat
     assert "11–13 of 13" in third.text and "End of collection" in third.text
     assert "5 More" not in [button.text for row in bot.send_message.await_args.kwargs[
         "reply_markup"].inline_keyboard for button in row]
+
+
+@pytest.mark.asyncio
+async def test_collection_without_published_sources_explains_owner_setup(tmp_path, monkeypatch):
+    ui, bot, command, _ = fixture(tmp_path, monkeypatch)
+    ui.core.metadata = AsyncMock(side_effect=MikaSubError("Worker HTTP 404: snapshot unavailable"))
+    await ui.open_user(command)
+    home = bot.messages[-1]
+    session = next(iter(ui.sessions.values()))
+    await ui.callback(query(home, session.token, "collection"), f"ms:{session.token}:collection")
+    text = home.edit_text.await_args.args[0]
+    assert "No configurations are published yet" in text
+    assert "Update Now" in text
 
 
 @pytest.mark.asyncio

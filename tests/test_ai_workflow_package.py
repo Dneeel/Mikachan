@@ -17,6 +17,7 @@ ARTIFACT = Path(__file__).resolve().parents[1] / "deploy/n8n/mikachan_ai_workflo
 def test_canonical_assets_and_seed_provenance():
     assert "دن" in core_prompt("chat") and "هورنی" in core_prompt("chat")
     assert "## IDENTITY, RELATIONSHIP, AND ROLE" in core_prompt("serious")
+    assert "verifiedOwner=true" in core_prompt("chat")
     seeds = style_seeds()
     assert len(seeds["chat"]["examples"]) == 40
     assert len(seeds["serious"]["examples"]) == 22
@@ -29,6 +30,8 @@ def test_artifact_has_two_isolated_agents_and_preserves_media_edges():
     rebuilt = build(graph)
     assert len(rebuilt["nodes"]) == len(graph["nodes"])
     nodes = {node["name"]: node for node in graph["nodes"]}
+    assert "verifiedOwner: $json.message.verified_owner === true" in \
+        nodes["AI Agent"]["parameters"]["options"]["systemMessage"]
     assert len([node for node in graph["nodes"] if node["type"] ==
                 "n8n-nodes-base.telegramTrigger"]) == 0
     assert nodes["AI Agent"]["parameters"]["options"]["systemMessage"] != \

@@ -75,6 +75,12 @@ After startup, the protected Owner opens `/settings` in their private bot conver
 
 A protected primary Owner may request promotion or removal of an additional Owner in the private `/settings` registry. The request cannot approve itself inside Telegram. On the VPS, inspect **Configuration → Review pending co-owner requests**, select the desired request and confirm it, or run `sudo mikachan owner-approval list` followed by `sudo mikachan owner-approval approve TOKEN USER_ID`. The latter asks for a typed confirmation. Approval stops the service, saves a consistent database snapshot, checks the request and target again, applies the change and restarts the service. Never paste a bot token or user-session secret into these commands.
 
+Active numeric Owner IDs receive the Mommy presentation in private chats automatically;
+approved groups retain the normal presentation. Access rules still apply. To
+select another authorized numeric ID, use **Configuration → Edit settings →
+Identity & Access → MOMMY_TELEGRAM_IDS** in the VPS manager. The adult AI style
+requires a separately verified adult flag; Owner status does not assert age.
+
 ## Everyday controls
 
 For MikaSub, use **Configuration → MikaSub** to set the optional
