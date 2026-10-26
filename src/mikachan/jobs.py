@@ -12,7 +12,7 @@ import time
 from functools import partial
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urljoin, urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 from aiogram import Bot
@@ -61,9 +61,6 @@ def quality_selector(provider: str, mode: str) -> str | None:
                 f"bv[height<={mode}][ext=mp4]+ba[ext=m4a]/"
                 f"b[height<={mode}][ext=mp4]/"
                 f"bv[height<={mode}]+ba/best[height<={mode}]")
-    if provider == "pornhub" and mode in {"480", "720", "1080"}:
-        return (f"b[height<={mode}][ext=mp4][protocol=https]/"
-                f"b[height<={mode}][ext=mp4]/b[height<={mode}]")
     return None
 
 
@@ -388,6 +385,12 @@ class Worker:
         if row is None:
             return
         url, chat = row["url"], row["chat_id"]
+        if source(url) == "pornhub":
+            # New requests are confirmed through PHDownlBot. Reject any
+            # legacy queued local-extractor job left by an older release.
+            self.store.transition(jid, "RESOLVING", "FAILED",
+                error="Pornhub now uses the Telegram video relay; resend the link")
+            return
         job_dir = self.settings.data_dir / "jobs" / jid
         shutil.rmtree(job_dir, ignore_errors=True)
         job_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
@@ -671,8 +674,7 @@ class Worker:
                                 "youtube", "pornhub", "xnxx", "instagram", "twitter", "tiktok"
                             } else max_bytes
                         )
-                        paths = await self._ytdlp_with_fresh_url(url, job_dir,
-                                                                 download_limit, mode)
+                        paths = await self._ytdlp(url, job_dir, download_limit, mode)
                 except ValueError as extraction_error:
                     for artifact in job_dir.iterdir():
                         if artifact.is_file():
@@ -1747,156 +1749,6 @@ class Worker:
             remaining -= path.stat().st_size
         return paths
 
-    async def _ytdlp_with_fresh_url(self, url: str, directory: Path,
-                                    max_bytes: int, mode: str) -> list[Path]:
-        """One new PH extraction after a CDN 410; preserve the original error otherwise."""
-        try:
-            return await self._ytdlp(url, directory, max_bytes, mode)
-        except ValueError as exc:
-            if source(url) != "pornhub":
-                raise
-            if "HTTP 474" in str(exc) and mode in {"480", "720", "1080"}:
-                for item in directory.iterdir():
-                    if item.is_file():
-                        item.unlink()
-                return [await self._pornhub_direct_format(url, directory, max_bytes, mode)]
-            if "HTTP 410" not in str(exc):
-                raise
-            for item in directory.iterdir():
-                if item.is_file():
-                    item.unlink()
-            await asyncio.sleep(1)
-            return await self._ytdlp(url, directory, max_bytes, mode)
-
-    async def _pornhub_direct_format(self, url: str, directory: Path,
-                                     max_bytes: int, mode: str, refreshes: int = 0) -> Path:
-        """Transfer a verified PH format when yt-dlp's CDN client gets HTTP 474.
-
-        The site extractor still chooses the quality and produces a short-lived
-        signed URL. The downloader uses the same bounded HTTP streaming path as
-        other direct media rather than a different site or an opaque mirror.
-        """
-        validate_dns(url)
-        proc = await asyncio.create_subprocess_exec(
-            sys.executable, "-m", "yt_dlp", "--ignore-config",
-            "--compat-options", "no-certifi", *site_cookie_args(url),
-            "--no-playlist", "--dump-single-json", "--skip-download", "--no-warnings", url,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-            start_new_session=True, env=extractor_env())
-        try:
-            output, _ = await asyncio.wait_for(proc.communicate(), 30)
-        except (TimeoutError, asyncio.CancelledError) as exc:
-            import signal
-            os.killpg(proc.pid, signal.SIGTERM)
-            await proc.wait()
-            if isinstance(exc, asyncio.CancelledError):
-                raise
-            raise ValueError("Pornhub format inspection timed out") from None
-        if proc.returncode or len(output) > 3_000_000:
-            raise ValueError("Pornhub public formats are unavailable from this server")
-        try:
-            from yt_dlp import YoutubeDL  # type: ignore[import-untyped]
-            info = json.loads(output)
-            if str(info.get("id") or "") != parse_qs(urlsplit(url).query).get("viewkey", [""])[0]:
-                raise ValueError("Pornhub format identity changed")
-            formats = info.get("formats")
-            if not isinstance(formats, list):
-                raise ValueError("Pornhub returned no formats")
-            selector = quality_selector("pornhub", mode)
-            if selector is None:
-                raise ValueError("Pornhub quality is unsupported")
-            with YoutubeDL({"quiet": True, "no_warnings": True}) as extractor:
-                chosen = list(extractor.build_format_selector(selector)({"formats": formats}))
-            if len(chosen) != 1:
-                raise ValueError("Pornhub selected format is unavailable")
-            media = chosen[0]
-            direct = clean_url(str(media.get("url") or ""))
-            host = urlsplit(direct).hostname or ""
-            if (not direct.startswith("https://") or
-                    not any(host == suffix or host.endswith("." + suffix)
-                            for suffix in ("phncdn.com", "phprcdn.com"))):
-                raise ValueError("Pornhub media domain was not recognized")
-            reported = media.get("filesize")
-            if isinstance(reported, int) and reported > max_bytes:
-                raise ValueError("Pornhub video exceeds the Telegram upload limit")
-            supplied = media.get("http_headers") or {}
-            headers = {key: value for key, value in supplied.items()
-                if key in {"User-Agent", "Referer", "Origin", "Accept",
-                           "Accept-Language", "Sec-Fetch-Mode"} and isinstance(value, str)
-                and len(value) <= 512 and "\n" not in value and "\r" not in value} \
-                if isinstance(supplied, dict) else {}
-        except (KeyError, TypeError, json.JSONDecodeError) as exc:
-            raise ValueError("Pornhub format metadata is incomplete") from exc
-        try:
-            path = await self._pornhub_ranges(direct, directory, max_bytes, headers,
-                                              resume=refreshes > 0)
-        except (httpx.HTTPError, ValueError):
-            partial = directory / "pornhub-video.mp4"
-            if refreshes < 8 and partial.is_file() and 0 < partial.stat().st_size < max_bytes:
-                # A signed CDN URL can be rejected partway through a large
-                # download. Re-extract one fresh URL and resume only from
-                # verified, contiguous bytes already written.
-                await asyncio.sleep(0.5)
-                return await self._pornhub_direct_format(
-                    url, directory, max_bytes, mode, refreshes + 1)
-            raise ValueError("Pornhub media CDN denied this server's ranged transfer") from None
-        if not (await verify(path, max_bytes))["video"]:
-            path.unlink(missing_ok=True)
-            raise ValueError("Pornhub source did not provide a playable video")
-        return path
-
-    async def _pornhub_ranges(self, url: str, directory: Path, max_bytes: int,
-                              headers: dict[str, str], *, resume: bool = False) -> Path:
-        """Fetch a signed CDN file in finite ranges with verified offsets and size."""
-        validate_dns(url)
-        target = directory / "pornhub-video.mp4"
-        chunk_size = 8 * 1024 * 1024
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30, connect=8),
-                                     follow_redirects=False,
-                                     limits=httpx.Limits(max_connections=1)) as client:
-            async def part(start: int, end: int, known_total: int | None) -> tuple[bytes, int]:
-                for attempt in range(3):
-                    try:
-                        async with client.stream("GET", url, headers={**headers,
-                                "Range": f"bytes={start}-{end}"}) as response:
-                            if response.status_code != 206:
-                                raise ValueError("CDN did not honor a finite media range")
-                            match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)",
-                                                 response.headers.get("content-range", ""))
-                            if not match or int(match[1]) != start or int(match[2]) != end:
-                                raise ValueError("CDN media range does not match the request")
-                            total = int(match[3])
-                            if (total <= 0 or total > max_bytes or
-                                    known_total is not None and total != known_total):
-                                raise ValueError("CDN media size changed or exceeds the upload limit")
-                            content = bytearray()
-                            async for piece in response.aiter_bytes(65536):
-                                content.extend(piece)
-                                if len(content) > end - start + 1:
-                                    raise ValueError("CDN media range exceeded its bound")
-                            if len(content) != end - start + 1:
-                                raise ValueError("CDN media range ended early")
-                            return bytes(content), total
-                    except (httpx.HTTPError, ValueError):
-                        if attempt == 2:
-                            raise
-                        await asyncio.sleep(0.5 * (attempt + 1))
-                raise ValueError("CDN media range could not be fetched")
-            _probe, total = await part(0, 0, None)
-            offset = target.stat().st_size if resume and target.is_file() else 0
-            if offset > total or offset > max_bytes:
-                raise ValueError("Partial media exceeds the verified source size")
-            with target.open("ab" if offset else "wb") as output:
-                while offset < total:
-                    end = min(offset + chunk_size, total) - 1
-                    data, checked_total = await part(offset, end, total)
-                    if checked_total != total:
-                        raise ValueError("CDN media size changed")
-                    output.write(data)
-                    offset += len(data)
-                    await self._bytes_progress(directory, offset, total)
-        return target
-
     async def _ytdlp(
         self, url: str, directory: Path, max_bytes: int, mode: str = "auto"
     ) -> list[Path]:
@@ -1915,9 +1767,6 @@ class Worker:
             "--ignore-config",
             "--compat-options", "no-certifi",
             *site_cookie_args(url),
-            # Pornhub's page may accept Chrome impersonation while its media
-            # CDN rejects the same fingerprint (observed HTTP 474). Use the
-            # normal client for the actual video transfer.
             "--playlist-end",
             "10",
             *(["--concurrent-fragments", "4"] if source(url) == "youtube" else []),

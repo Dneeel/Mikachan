@@ -36,7 +36,7 @@ class ExploreSession:
 def topic_from_arg(arg: str) -> str:
     topic = arg.strip().lstrip("#").strip()
     if not topic or len(topic) > 60 or not re.fullmatch(r"[\w\- ]+", topic, re.UNICODE):
-        raise ValueError("Use /explore #topic, for example /explore #attackontitan.")
+        raise ValueError("Use /explore TOPIC, for example /explore Mikasa Ackerman edit.")
     return topic
 
 
@@ -71,8 +71,14 @@ def _post(item: object) -> dict[str, object] | None:
     duration = item.get("duration")
     if video and isinstance(duration, (int, float)) and duration > 0:
         images = []
+    def count(key: str) -> int:
+        value = str(item.get(key) or "0").replace(",", "")
+        return min(int(value), 1_000_000_000_000) if value.isdigit() else 0
+
     return {"id": ident, "handle": handle, "images": images, "video": video,
-            "title": str(item.get("title") or item.get("content_desc") or "")[:500]}
+            "title": str(item.get("title") or item.get("content_desc") or "")[:500],
+            "score": count("play_count") + 20 * count("digg_count") +
+                     30 * count("share_count") + 10 * count("comment_count")}
 
 
 def _markup(token: str, profile: str | None = None) -> InlineKeyboardMarkup:
@@ -105,7 +111,7 @@ class Explore:
         if not arg.strip():
             token, session = self._new(message.from_user.id, message.chat.id, "")
             sent = await message.reply("🔎 <b>TikTok Explore</b>\n\nAdd a topic with "
-                "<code>/explore #attackontitan</code>, or pick a random post?",
+                "<code>/explore Mikasa Ackerman edit</code>, or pick a random post?",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
                     InlineKeyboardButton(text="Yes, random", callback_data=f"ex:{token}:yes"),
                     InlineKeyboardButton(text="No thanks", callback_data=f"ex:{token}:close")]]))
@@ -123,7 +129,7 @@ class Explore:
     async def _find(self, session: ExploreSession) -> dict[str, object]:
         available = [post for post in session.pool if post["id"] not in session.seen]
         if available:
-            return random.choice(available)
+            return max(available, key=lambda post: int(str(post.get("score") or 0)))
         if session.challenge_id and not session.challenge_more:
             raise ValueError("No more accessible TikTok posts were found for this topic")
         async with httpx.AsyncClient(timeout=12, follow_redirects=False,
@@ -157,7 +163,7 @@ class Explore:
 
             items: list = []
             verified_topic = False
-            if session.topic:
+            if session.topic and " " not in session.topic:
                 try:
                     if not session.challenge_id:
                         searched = await get("challenge/search", {"keywords": session.topic,
@@ -195,20 +201,23 @@ class Explore:
                     if isinstance(batch, list):
                         items.extend(batch)
                 if session.topic:
-                    phrase = session.topic.casefold()
+                    terms = session.topic.casefold().split()
                     items = [item for item in items if isinstance(item, dict) and
-                             phrase in str(item.get("title") or item.get("content_desc") or "").casefold()]
+                             all(term in str(item.get("title") or item.get(
+                                 "content_desc") or "").casefold() for term in terms)]
             if session.topic and items and not verified_topic:
-                phrase = session.topic.casefold()
+                terms = session.topic.casefold().split()
                 items = [item for item in items if isinstance(item, dict) and
-                    phrase in str(item.get("title") or item.get("content_desc") or "").casefold()]
+                    all(term in str(item.get("title") or item.get(
+                        "content_desc") or "").casefold() for term in terms)]
         posts = [post for item in items[:40] if (post := _post(item)) is not None]
-        if verified_topic:
+        if session.topic:
             session.pool.extend(posts)
         unseen = [post for post in posts if post["id"] not in session.seen]
         if not unseen:
             raise ValueError("No more accessible TikTok posts were found for this topic")
-        return random.choice(unseen)
+        return max(unseen, key=lambda post: int(str(post.get("score") or 0))) \
+            if session.topic else random.choice(unseen)
 
     async def send_next(self, token: str, session: ExploreSession) -> None:
         if session.lock.locked():

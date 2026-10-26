@@ -479,14 +479,18 @@ class MikaSubUI:
         if page == "publication":
             data = await self.core.publication()
             link = self.core.link()
+            local = not self.core.configured
             body = ("🔗 <b>Publication</b>\n"
                     f"Status: {'Published' if data.get('ready') else 'No published snapshot'}\n"
                     f"Available: {data.get('total', 0)} · Last build: "
                     f"{html.escape(str(data.get('published_at') or 'Never'))}\n\n"
-                    + (f"<code>{html.escape(link)}</code>\n\n" if link else "No public link saved in this bot. Rotate to create one.\n\n")
-                    + "Anyone holding the URL can read configs until you rotate it.")
+                    + ("Available only through Telegram. No Worker or public URL is required."
+                       if local else f"<code>{html.escape(link)}</code>\n\n"
+                       if link else "No public link saved in this bot. Rotate to create one.\n\n")
+                    + ("" if local else "Anyone holding the URL can read configs until you rotate it."))
             await self._edit(message, session, body,
-                [[("🔐 Rotate Link", "rotate")], back])
+                ([[("🔐 Rotate Link", "rotate")],
+                  [("📥 Use Telegram sources", "local_mode")]] if not local else []) + [back])
             return
         if page == "statistics":
             data = await self.core.publication()
@@ -505,7 +509,8 @@ class MikaSubUI:
             return
         if page == "naming":
             await self._edit(message, session,
-                "🏷 <b>Naming</b>\nStable node IDs are kept in D1. Only display names change.\n\n"
+                "🏷 <b>Naming</b>\nStable node IDs are kept in the configured store. "
+                "Only display names change.\n\n"
                 "<code>🏴‍☠️ Maybe It Works 0001</code>\n"
                 "<code>🏴‍☠️ Maybe It Works 0002</code>\n\n"
                 "IDs above 9999 keep their full number.", [back])
@@ -570,10 +575,13 @@ class MikaSubUI:
             self.owner_tasks.add(task)
             task.add_done_callback(self.owner_tasks.discard)
             return
-        if action.startswith("remove:") or action == "rotate":
+        if action.startswith("remove:") or action in {"rotate", "local_mode"}:
             session.pending = action
-            label = "Remove this source?" if action.startswith("remove:") else \
-                    "Rotate the public subscription URL? The old URL will be revoked."
+            label = ("Remove this source?" if action.startswith("remove:") else
+                     "Switch MikaSub to Telegram-only sources? Accessible Worker sources "
+                     "will be copied; the existing public URL will no longer update."
+                     if action == "local_mode" else
+                     "Rotate the public subscription URL? The old URL will be revoked.")
             await self._edit(q.message, session, label,
                 [[("✅ Confirm", "confirm"), ("◀ Cancel", session.page)]])
             return
@@ -583,6 +591,13 @@ class MikaSubUI:
             if pending == "rotate":
                 await self.core.rotate_link()
                 await self._owner_render(q.message, session, "publication")
+                return
+            if pending == "local_mode":
+                count = await self.core.use_local()
+                await self._owner_render(q.message, session, "publication")
+                await self.bot.send_message(session.chat,
+                    f"✅ Telegram-only MikaSub enabled. Copied {count} accessible sources. "
+                    "Use Update Now to publish the local list.")
                 return
             if pending.startswith("remove:"):
                 await self.core.api("DELETE", f"/api/v1/sources/{int(pending[7:])}")

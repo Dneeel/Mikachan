@@ -251,8 +251,18 @@ class ContentUI:
                         if state["item"].get("identifier") != prior:
                             break
             elif cmd == "/quote":
-                items = await self.providers.quote_random(state["lang"])
-                state.update(view="item", item=asdict(random.choice(items)))
+                current = state.get("item") or {}
+                author = str(current.get("title") or "").strip()
+                if author:
+                    items, _ = await self.providers.quote_page(author, state["lang"])
+                    alternatives = [item for item in items if item.description !=
+                                    current.get("description")]
+                    if not alternatives:
+                        raise ContentError("No other sourced quote by this author was found")
+                    state.update(view="item", item=asdict(random.choice(alternatives)))
+                else:
+                    items = await self.providers.quote_random(state["lang"])
+                    state.update(view="item", item=asdict(random.choice(items)))
             elif cmd == "/wiki":
                 previous_id = (state.get("item") or {}).get("identifier")
                 for _ in range(3):

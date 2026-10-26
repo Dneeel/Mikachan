@@ -29,15 +29,15 @@ def test_youtube_prompt_asks_quality_and_collections_can_close():
     assert "✖ Close" in button_data(menu)
 
 
-def test_pornhub_prompt_asks_for_bounded_video_quality():
+def test_pornhub_prompt_requests_a_direct_relay_confirmation():
     url = "https://www.pornhub.com/view_video.php?viewkey=6ac5dd5aca7cb"
     buttons = button_data(download_prompt_markup("request", url))
-    assert buttons["✅ Yes"] == "c:request:q"
+    assert buttons["✅ Yes"] == "c:request:y"
     assert buttons["❌ No"] == "c:request:n"
 
 
 @pytest.mark.asyncio
-async def test_pornhub_quality_choice_is_owned_and_bound_to_job(tmp_path):
+async def test_pornhub_confirmation_starts_relay_without_local_job(tmp_path):
     store = Store(tmp_path / "bot.sqlite")
     cid = store.confirm_create(
         42, 42, 100, 0,
@@ -56,16 +56,18 @@ async def test_pornhub_quality_choice_is_owned_and_bound_to_job(tmp_path):
     app = App.__new__(App)
     app.store = store
     app.authorized = lambda *_args: True
+    app.userbot = SimpleNamespace(pornhub_video=AsyncMock(return_value=object()),
+        deliver_pornhub=AsyncMock())
+    app.bot = SimpleNamespace(send_message=AsyncMock())
+    app._ph_tasks = set()
+    q.data = f"c:{cid}:y"
     await app.callback(q)
-    assert "Pornhub quality" in edits[0][0]
-    assert "✖ Cancel" in button_data(edits[0][1]["reply_markup"])
-    buttons = button_data(edits[-1][1]["reply_markup"])
-    assert {"🎬 480p", "🎬 720p", "🎬 Up to 1080p", "✖ Cancel"} == set(buttons)
-    q.data = f"c:{cid}:720"
-    await app.callback(q)
-    jobs = store.jobs(42)
-    assert len(jobs) == 1
-    assert store.job_mode(jobs[0]["id"]) == "720"
+    await asyncio.gather(*app._ph_tasks)
+    assert "several minutes" in edits[0][0]
+    assert store.jobs(42) == []
+    app.userbot.pornhub_video.assert_awaited_once()
+    app.userbot.deliver_pornhub.assert_awaited_once_with(app.bot,
+        app.userbot.pornhub_video.return_value, 42, 100)
 
 
 @pytest.mark.asyncio

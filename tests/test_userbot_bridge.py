@@ -8,7 +8,10 @@ from unittest.mock import AsyncMock
 import pytest
 
 from mikachan.access import AccessRegistry
-from mikachan.userbot import UserbotBridge, extract_download_url, is_currency_query
+from mikachan.bot import App
+from mikachan.store import Store
+from mikachan.userbot import (UserbotBridge, extract_download_url,
+                               extract_service_urls, is_currency_query)
 
 
 def test_file_link_parser_accepts_public_https_only():
@@ -21,6 +24,41 @@ def test_file_link_parser_accepts_public_https_only():
                 "No link yet", "Download: javascript:alert(1)"):
         with pytest.raises(ValueError):
             extract_download_url(bad)
+
+
+def test_internal_link_parser_collects_public_https_from_text_and_buttons():
+    message = SimpleNamespace(raw_text="Link: https://files.example/one\n"
+        "Private: http://127.0.0.1/secret", buttons=[[
+            SimpleNamespace(url="https://files.example/two"),
+            SimpleNamespace(url="https://t.me/provider")]])
+    assert extract_service_urls(message) == [
+        "https://files.example/one", "https://files.example/two"]
+
+
+@pytest.mark.asyncio
+async def test_url_choice_is_bound_to_requester_and_uses_internal_provider(tmp_path):
+    store = Store(tmp_path / "state.sqlite")
+    store.db.execute("CREATE TABLE url_links(token TEXT PRIMARY KEY,user_id INTEGER,"
+                     "chat_id INTEGER,message_id INTEGER,url TEXT,expires REAL)")
+    original = SimpleNamespace(message_id=7)
+    prompt = SimpleNamespace(chat=SimpleNamespace(id=1, type="private"), message_id=9,
+        edit_text=AsyncMock(), delete=AsyncMock())
+    q = SimpleNamespace(from_user=SimpleNamespace(id=2), message=prompt,
+        data="urlchoice:secret:internal", answer=AsyncMock())
+    app = App.__new__(App)
+    app.store = store
+    app.authorized = lambda *_args: True
+    app._url_choices = {"secret": (1, 1, 9, original, __import__("time").time()+60)}
+    app.userbot = SimpleNamespace(file_to_links=AsyncMock(return_value=[
+        "https://files.example/one", "https://files.example/two"]))
+    app.bot = SimpleNamespace(send_document=AsyncMock())
+    await app.callback(q)
+    app.userbot.file_to_links.assert_not_awaited()
+    q.from_user.id = 1
+    await app.callback(q)
+    app.userbot.file_to_links.assert_awaited_once_with(app.bot, 1, 7, original,
+                                                        internal=True)
+    assert "files.example/two" in prompt.edit_text.await_args.args[0]
 
 
 @pytest.mark.parametrize("query", ["usd", "101 usd", "2300 jpy to usd", "19 eur to usdt",
@@ -102,3 +140,23 @@ async def test_url_rejects_large_bot_file_without_staging_chat():
     message = SimpleNamespace(**empty, video=SimpleNamespace(file_size=21_000_000))
     with pytest.raises(ValueError, match="USERBOT_STAGING_CHAT_ID"):
         await bridge.file_to_link(SimpleNamespace(download=AsyncMock()), 123, 456, message)
+
+
+@pytest.mark.asyncio
+async def test_pornhub_relay_accepts_only_video_from_verified_provider():
+    peer = SimpleNamespace(id=77, bot=True, username="PHDownlBot")
+    sent = SimpleNamespace(id=101)
+    unrelated = SimpleNamespace(id=102, sender_id=78, video=object(), media=object())
+    result = SimpleNamespace(id=103, sender_id=77, video=object(), media=object())
+    bridge = UserbotBridge.__new__(UserbotBridge)
+    bridge.pornhub_lock = asyncio.Lock()
+    bridge.pornhub_peer = None
+    bridge._ready = AsyncMock()
+    bridge.client = SimpleNamespace(get_entity=AsyncMock(return_value=peer),
+        send_message=AsyncMock(return_value=sent),
+        get_messages=AsyncMock(return_value=[unrelated, result]))
+    url = "https://www.pornhub.com/view_video.php?viewkey=6ac5dd5aca7cb"
+    assert await bridge.pornhub_video(url) is result
+    bridge.client.send_message.assert_awaited_once_with(peer, url)
+    with pytest.raises(ValueError, match="Pornhub"):
+        await bridge.pornhub_video("https://example.com/video")

@@ -287,10 +287,10 @@ class SettingsUI:
                 if row["status"] == "ACTIVE":
                     controls.append([button("⏱ Timed suspension", "suspendfor")])
                 if user == self.access.primary_owner and row["status"] == "ACTIVE":
-                    controls.append([button("👑 Add Co-owner · VPS approval", "request_promote")])
+                    controls.append([button("👑 Add Co-owner", "request_promote")])
             elif uid != self.access.primary_owner and row["role"] == "OWNER" and \
                     user == self.access.primary_owner:
-                controls.append([button("👑 Remove Co-owner · VPS approval", "request_revoke")])
+                controls.append([button("👑 Remove Co-owner", "request_revoke")])
             controls.append([button("◀ Back", "people")])
             return body, markup(controls)
         if page.startswith("group:"):
@@ -550,9 +550,8 @@ class SettingsUI:
             pending = {"kind": action, "page": page}
             self.db.execute("UPDATE settings_sessions SET pending=? WHERE token=?",
                             (json.dumps(pending), token))
-            await q.message.edit_text("Confirm this Co-owner change request? It requires "
-                "independent approval in the VPS panel before taking effect.",
-                reply_markup=markup([[("✅ Request", f"z:{token}:confirm"),
+            await q.message.edit_text("Confirm this Co-owner change? It takes effect immediately.",
+                reply_markup=markup([[("✅ Confirm", f"z:{token}:confirm"),
                                       ("❌ Cancel", f"z:{token}:cancel")]]))
             return True
         notice = ""
@@ -622,11 +621,9 @@ class SettingsUI:
                         self.access.update_person(q.from_user.id, uid,
                                                   role="ADMIN" if previous["role"] == "USER" else "USER")
                     elif kind in {"request_promote", "request_revoke"}:
-                        approval = self.access.request_owner_change(q.from_user.id, uid,
-                            "PROMOTE" if kind == "request_promote" else "REVOKE")
-                        notice = ("🔒 Request pending. On the VPS, an authenticated operator "
-                                  "must run:\n<code>sudo mikachan owner-approval approve " +
-                                  html.escape(approval) + f" {uid}</code>\n\n")
+                        self.access.set_coowner(q.from_user.id, uid,
+                            enabled=kind == "request_promote")
+                        notice = "✅ Co-owner access updated.\n\n"
                     elif kind in {"suspend", "resume", "revoke"}:
                         self.access.update_person(q.from_user.id, uid,
                             status={"suspend": "SUSPENDED", "resume": "ACTIVE",

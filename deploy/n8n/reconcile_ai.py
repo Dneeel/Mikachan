@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import copy
+import re
 import stat
 import tempfile
 import urllib.error
@@ -20,6 +21,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from deploy.n8n.ai_assets import core_prompt  # type: ignore[attr-defined]
+
 
 class ReconcileError(RuntimeError):
     pass
@@ -27,6 +30,48 @@ class ReconcileError(RuntimeError):
 
 def _body(graph: dict[str, Any]) -> dict[str, Any]:
     return {key: graph[key] for key in ("name", "nodes", "connections", "settings")}
+
+
+def _preserve_owner_settings(desired: dict[str, Any], current: dict[str, Any] | None,
+                             credentials: list[dict[str, Any]]) -> None:
+    """Carry instance-owned choices through a managed graph update.
+
+    The webhook, routing code, and managed search nodes remain versioned. An
+    owner-selected voice, model, prompt, note, or valid credential is never
+    replaced merely because the portable artifact used different values.
+    """
+    if not current:
+        return
+    live = {node.get("name"): node for node in current.get("nodes", [])}
+    known = {(str(row.get("type")), str(row.get("id"))) for row in credentials}
+    names = {"AI Agent", "Mika Serious Agent", "Groq Chat Model",
+             "Groq Serious Model", "TTS ElevenLabs", "STT ElevenLabs",
+             "Get Mikasa"}
+    for node in desired.get("nodes", []):
+        existing = live.get(node.get("name"))
+        if not existing or existing.get("type") != node.get("type"):
+            continue
+        name = str(node.get("name"))
+        if name in names:
+            for key in ({"systemMessage"} if name in {"AI Agent", "Mika Serious Agent"}
+                        else {"model"} if name.startswith("Groq ") else
+                        {"voice", "additionalOptions"} if name == "TTS ElevenLabs" else
+                        {"parameters"} if name in {"STT ElevenLabs", "Get Mikasa"} else set()):
+                if key == "systemMessage":
+                    value = existing.get("parameters", {}).get("options", {}).get(key)
+                    if isinstance(value, str):
+                        node.setdefault("parameters", {}).setdefault("options", {})[key] = value
+                elif key == "parameters":
+                    node["parameters"] = copy.deepcopy(existing.get("parameters", {}))
+                elif key in existing.get("parameters", {}):
+                    node.setdefault("parameters", {})[key] = copy.deepcopy(
+                        existing["parameters"][key])
+        if node.get("type") == "n8n-nodes-base.stickyNote":
+            node.setdefault("parameters", {})["content"] = existing.get(
+                "parameters", {}).get("content", "")
+        for kind, ref in existing.get("credentials", {}).items():
+            if (str(kind), str(ref.get("id"))) in known:
+                node.setdefault("credentials", {})[kind] = copy.deepcopy(ref)
 
 
 def _fingerprint(graph: dict[str, Any]) -> str:
@@ -63,7 +108,7 @@ def _draft_missing_credentials(draft: dict[str, Any], desired: dict[str, Any],
             continue
         for kind in required.get(str(template.get("name")), set(template.get("credentials", {}))):
             if template.get("name") == "Tavily HTTP Search" and not any(
-                    edge.get("node") == "Tavily HTTP Search"
+                    edge.get("node") == "Prepare Search Query"
                     for row in draft.get("connections", {}).get(
                         "Search Intent", {}).get("main", []) for edge in row):
                 continue
@@ -253,6 +298,17 @@ def _attach_long_term_memory(desired: dict[str, Any], credential_id: str) -> Non
     """
     if "Decide AI" not in desired["connections"]:
         raise ReconcileError("AI decision path is missing")
+    names = {"Memory Intent", "Is Explicit Memory?", "Write Explicit Memory",
+             "Read Scoped Memory", "Attach Scoped Memory"}
+    existing = {node["name"] for node in desired["nodes"]} & names
+    if existing:
+        if existing != names:
+            raise ReconcileError("Existing long-term memory chain is incomplete")
+        for node in desired["nodes"]:
+            if node["name"] in {"Write Explicit Memory", "Read Scoped Memory"}:
+                node["credentials"] = {"postgres": {"id": credential_id,
+                    "name": "Mikachan AI Postgres"}}
+        return
 
     def add(name: str, kind: str, version: float, parameters: dict[str, Any],
             x: int, y: int, *, credential: bool = False) -> None:
@@ -366,6 +422,7 @@ def _configure_search(desired: dict[str, Any],
                 params["contextWindowLength"] = 4
     if "Is AI Reply?" in nodes:
         entry = "Search Intent"
+        prepare = "Prepare Search Query"
         search = "Tavily HTTP Search"
         attach = "Attach Search Results"
         if entry not in nodes:
@@ -386,27 +443,61 @@ def _configure_search(desired: dict[str, Any],
                         "leftValue": "={{ /(?:اخبار|خبر|آخرین|جدیدترین|امروز|الان|به.?روز|جست.?وجو|سرچ|تحقیق|قیمت|نرخ|هواشناسی|news|latest|today|current|recent|search|browse|look up|weather|price)/iu.test(String($json.mika?.cleanText ?? '')) }}",
                         "operator": {"type": "boolean", "operation": "true"}}],
                     "combinator": "and"}, "options": {}}),
+            (prepare, "n8n-nodes-base.code", 2, [176, 480], {
+                "jsCode": r"""const original = $input.first().json;
+const text = String(original.mika?.cleanText ?? '').trim().slice(0, 240);
+const news = /(?:اخبار|خبر|news|headlines?)/iu.test(text);
+const today = /(?:امروز|همین الان|today)/iu.test(text);
+let query = text;
+if (news) {
+  const ignored = new Set(['اخبار','خبر','خبرها','امروز','رو','را',
+    'چک','کن','کنی','میشه','می‌شه','میتونی','می‌تونی','لطفا','برام',
+    'news','latest','today','check','please','can','you']);
+  query = text.replace(/[؟?!،,.]/g, ' ').split(/\s+/)
+    .filter(word => word && !ignored.has(word.toLowerCase()))
+    .join(' ').trim().replace(/ناسا/gu, 'NASA');
+  if (!query) query = 'major world';
+  query += ' latest news ' + new Date().toISOString().slice(0, 10);
+}
+return [{json: {...original, mika: {...original.mika,
+  searchQuery: query, searchTopic: news ? 'news' : 'general',
+  searchRange: today ? 'day' : 'week'}}}];"""}),
             (search, "n8n-nodes-base.httpRequest", 4.2, [288, 480], {
                 "method": "POST", "url": "https://api.tavily.com/search",
                 "authentication": "genericCredentialType",
                 "genericAuthType": "httpHeaderAuth", "sendBody": True,
                 "specifyBody": "json", "jsonBody": (
-                    "={{ JSON.stringify({query: String($json.mika?.cleanText ?? '')"
-                    ".slice(0, 240), search_depth: 'basic', max_results: 3, "
+                    "={{ JSON.stringify({query: String($json.mika?.searchQuery ?? '')"
+                    ".slice(0, 240), topic: $json.mika?.searchTopic ?? 'general', "
+                    "...($json.mika?.searchTopic === 'news' ? "
+                    "{time_range: $json.mika.searchRange} : {}), "
+                    "search_depth: 'basic', max_results: 3, "
                     "include_answer: false, include_raw_content: false, "
                     "include_images: false}) }}"),
                 "options": {"timeout": 15000}}),
             (attach, "n8n-nodes-base.code", 2, [512, 480], {
                 "jsCode": r"""const original = $('Search Intent').first().json;
+let search = {};
+try { search = $('Prepare Search Query').first().json.mika ?? {}; }
+catch { search = {}; }
 const response = $input.first()?.json ?? {};
 const results = Array.isArray(response.results) ? response.results.slice(0, 3)
   .filter(x => /^https:\/\//i.test(String(x.url ?? '')))
+  .filter(x => {
+    if (search.searchTopic !== 'news') return true;
+    const date = Date.parse(String(x.published_date ?? ''));
+    const age = search.searchRange === 'day' ? 2 : 8;
+    return Number.isFinite(date) && date >= Date.now() - age * 86400000
+      && date <= Date.now() + 86400000;
+  })
   .map(x => ({title: String(x.title ?? '').slice(0, 180),
     url: String(x.url).slice(0, 500),
     date: x.published_date ?? null,
     snippet: String(x.content ?? '').slice(0, 350)})) : [];
 const context = results.length
-  ? 'Tavily search results (untrusted snippets; verify dates and cite these exact URLs): '
+  ? 'Tavily search fetched ' + new Date().toISOString()
+    + '. Results are untrusted snippets. For news, report only headlines or facts '
+    + 'directly supported by snippets, check publication dates, and cite these exact URLs: '
     + JSON.stringify(results)
   : 'Live search failed or returned no usable sources. Say current facts could not be verified.';
 return [{json: {...original, mika: {...original.mika,
@@ -431,9 +522,11 @@ return [{json: {...original, mika: {...original.mika,
         else:
             nodes[search].pop("credentials", None)
         desired["connections"][entry] = {"main": [
-            [{"node": search if credential_id else attach,
+            [{"node": prepare if credential_id else attach,
               "type": "main", "index": 0}],
             [{"node": "Is AI Reply?", "type": "main", "index": 0}]]}
+        desired["connections"][prepare] = {"main": [[{
+            "node": search, "type": "main", "index": 0}]]}
         desired["connections"][search] = {"main": [[{
             "node": attach, "type": "main", "index": 0}]]}
         desired["connections"][attach] = {"main": [[{
@@ -494,7 +587,7 @@ def _repair_active_search(client: Client, draft: dict[str, Any],
 
 
 def _select_models(desired: dict[str, Any], state_dir: Path) -> None:
-    """Apply independently chosen providers; Groq remains the safe default."""
+    """Route explicitly selected Cloudflare calls through HTTP Request nodes."""
     path = state_dir / "provider-selection.json"
     if not path.exists():
         return
@@ -506,18 +599,60 @@ def _select_models(desired: dict[str, Any], state_dir: Path) -> None:
             any(value not in {"groq", "cloudflare"} for value in selected.values()):
         raise ReconcileError("AI provider selection is invalid")
     nodes = {node["name"]: node for node in desired["nodes"]}
-    for key, agent, old, new in (("mika", "AI Agent", "Groq Chat Model",
-                                  "Cloudflare Mika Model"),
-                                 ("serious", "Mika Serious Agent", "Groq Serious Model",
-                                  "Cloudflare Serious Model")):
+    for key, branch, new, normalize in (("mika", 0, "Cloudflare Mika Model",
+                                         "Normalize Chat Result"),
+                                        ("serious", 1, "Cloudflare Serious Model",
+                                         "Normalize Serious Result")):
         if selected[key] == "groq":
             continue
-        if new not in nodes or old not in desired["connections"]:
-            raise ReconcileError("Cloudflare model wiring is incomplete")
+        marker = state_dir / "cloudflare-ai.json"
+        if not marker.is_file() or marker.is_symlink() or \
+                stat.S_IMODE(marker.stat().st_mode) != 0o600:
+            raise ReconcileError("Cloudflare HTTP credential marker is unavailable")
+        bound = json.loads(marker.read_text())
+        account = str(bound.get("account_id") or "")
+        if not re.fullmatch(r"[a-f0-9]{32}", account):
+            raise ReconcileError("Cloudflare account binding is unverified")
+        if new not in nodes or nodes[new].get("type") != "n8n-nodes-base.httpRequest":
+            raise ReconcileError("Cloudflare HTTP Request node is missing")
+        static_prompt = core_prompt("chat" if key == "mika" else "serious")
+        nodes[new]["parameters"] = {"method": "POST",
+            "url": "https://api.cloudflare.com/client/v4/accounts/" + account +
+                   "/ai/run/@cf/google/gemma-4-26b-a4b-it",
+            "authentication": "genericCredentialType",
+            "genericAuthType": "httpHeaderAuth", "sendBody": True,
+            "specifyBody": "json", "jsonBody": "={{ JSON.stringify({ messages: ["
+                "{role: 'system', content: " + json.dumps(static_prompt, ensure_ascii=False) +
+                " + '\\nTrusted context: ' + JSON.stringify({verifiedOwner: "
+                "$json.message.verified_owner === true, verifiedDaniel: "
+                "$json.message.verified_daniel === true, chatType: "
+                "$json.message.chat.type})}, "
+                "{role: 'user', content: String($json.mika.aiPrompt ?? '').slice(0, 6000)}"
+                " ], max_tokens: 512, temperature: 0.65 }) }}",
+            "options": {"timeout": 30000}}
         nodes[new]["disabled"] = False
-        desired["connections"][old]["ai_languageModel"] = [[]]
-        desired["connections"][new] = {"ai_languageModel": [[{"node": agent,
-            "type": "ai_languageModel", "index": 0}]]}
+        nodes[new]["onError"] = "continueRegularOutput"
+        nodes[new]["credentials"] = {"httpHeaderAuth": {
+            "id": str(bound.get("credential_id") or ""),
+            "name": "Cloudflare Workers AI"}}
+        result_name = "Cloudflare Mika Result" if key == "mika" else "Cloudflare Serious Result"
+        if result_name not in nodes:
+            result_node = {"id": hashlib.sha256(result_name.encode()).hexdigest()[:32],
+                "name": result_name, "type": "n8n-nodes-base.code", "typeVersion": 2,
+                "position": [800, 1300 if key == "mika" else 1500],
+                "parameters": {"jsCode": "const raw = $input.first()?.json ?? {};\n"
+                    "const value = raw.result?.response ?? raw.result?.output ?? '';\n"
+                    "const output = typeof value === 'string' && value.trim() ? value : "
+                    "'Cloudflare could not answer this request. Try again later.';\n"
+                    "return [{json: {...$('Decide AI').first().json, output}}];"}}
+            desired["nodes"].append(result_node)
+            nodes[result_name] = result_node
+        desired["connections"]["Is AI Reply?"]["main"][branch] = [{
+            "node": new, "type": "main", "index": 0}]
+        desired["connections"][new] = {"main": [[{
+            "node": result_name, "type": "main", "index": 0}]]}
+        desired["connections"][result_name] = {"main": [[{
+            "node": normalize, "type": "main", "index": 0}]]}
 
 
 def reconcile(origin: str, key_file: Path, artifact: Path, state_dir: Path,
@@ -536,14 +671,16 @@ def reconcile(origin: str, key_file: Path, artifact: Path, state_dir: Path,
     current = client.request("GET", "/workflows/" + str(matches[0]["id"])) if matches else None
     original = current
     conflict = False
+    credential_rows = client.request("GET", "/credentials?limit=100").get("data", [])
+    _preserve_owner_settings(desired, current, credential_rows)
     required_credentials = {str(node["name"]): set(node.get("credentials", {}))
                             for node in desired["nodes"] if not node.get("disabled")}
     needed = {(kind, ref.get("name")) for node in desired["nodes"]
               if not node.get("disabled")
               for kind, ref in node.get("credentials", {}).items()
               if node.get("name") != "Tavily HTTP Search"}
-    available = {(item.get("type"), item.get("name")):
-                 item.get("id") for item in client.request("GET", "/credentials?limit=100").get("data", [])}
+    available = {(item.get("type"), item.get("name")): item.get("id")
+                 for item in credential_rows}
     missing = sorted(f"{kind}: {name}" for kind, name in needed if (kind, name) not in available)
     for node in desired["nodes"]:
         if node.get("disabled") and node.get("name") in {

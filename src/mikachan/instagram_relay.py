@@ -225,7 +225,8 @@ class InstagramRelay:
         return "\n".join(lines)[:1000]
 
     def _menu_markup(self, token: str, upstream, *, highlight_list: bool = False,
-                     profile_handle: str = "") -> tuple[InlineKeyboardMarkup,
+                     profile_handle: str = "", completed_posts: bool = False
+                     ) -> tuple[InlineKeyboardMarkup,
                                                             dict[str, tuple[int, int, str]]]:
         rows = []
         actions: dict[str, tuple[int, int, str]] = {}
@@ -253,6 +254,12 @@ class InstagramRelay:
             rows.append([InlineKeyboardButton(text="🔗 Open profile",
                 url=f"https://www.instagram.com/{profile_handle}/")])
             actions["follow"] = (-1, -1, "")
+        elif completed_posts:
+            rows.append([InlineKeyboardButton(text="👤 Profile",
+                callback_data=f"ir:{token}:profile")])
+            rows.append([InlineKeyboardButton(text="🙏 Thanks",
+                callback_data=f"ir:{token}:close")])
+            actions["profile"] = (-1, -1, "")
         else:
             rows.append([InlineKeyboardButton(text="✖ Close", callback_data=f"ir:{token}:close")])
         return InlineKeyboardMarkup(inline_keyboard=rows), actions
@@ -561,7 +568,8 @@ class InstagramRelay:
                 replacement = secrets.token_urlsafe(8)
                 markup, actions = self._menu_markup(replacement, next_menu,
                                                     highlight_list=action in {"highlights", "next_page",
-                                                                              "previous_page"})
+                                                                              "previous_page"},
+                                                    completed_posts=action in {"posts", "next_posts"})
                 heading = ("🗂 <b>Highlights</b> · choose one" if action == "highlights"
                            else f"✅ Sent {count} posts. Choose an option below." if count
                            else "Choose an option below.")

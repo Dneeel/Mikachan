@@ -12,7 +12,7 @@ import json
 import uuid
 from pathlib import Path
 
-from deploy.n8n.ai_assets import core_prompt, style_seeds
+from deploy.n8n.ai_assets import core_prompt, style_seeds  # type: ignore[attr-defined]
 
 
 NAMESPACE = uuid.UUID("17e8a27f-1681-4655-a933-922d290573cc")
@@ -45,8 +45,13 @@ return $input.all().map(item => {
   const cleanText = route === 'serious' ?
     raw.replace(/^\/mika(?:@\w+)?(?:\s|$)/i, '').trim() :
     route === 'chat' ? raw.replace(/^(?:میکا|mika)(?:\s|$)/iu, '').trim() : raw.trim();
-  const quoted = String(m.reply_to_message?.text ?? m.reply_to_message?.caption ?? '').slice(0, 1800);
-  const prompt = quoted ? `${cleanText}\n\nQuoted message (untrusted):\n${quoted}` : cleanText;
+  const quoted = String(m.reply_to_message?.text?.trim() ||
+    m.reply_to_message?.caption?.trim() || '').slice(0, 1800);
+  const fallback = route === 'chat' ?
+    'The user addressed you by name. Reply briefly and naturally.' :
+    'Ask briefly what the user needs.';
+  const prompt = quoted ? `${cleanText}\n\nQuoted message (untrusted):\n${quoted}` :
+    (cleanText || fallback);
   const chatId = String(m.chat.id);
   const userId = String(m.from.id);
   const threadId = String(m.message_thread_id ?? 0);
@@ -66,8 +71,10 @@ const found = $input.all().find(item =>
   original.mika.replyId !== null &&
   String(item.json.chat_id) === original.mika.chatId &&
   String(item.json.user_id ?? '') === original.mika.userId);
-const agentType = original.mika.explicit || (m.ai_reply_only && found ?
-  String(found.json.agent_type ?? '') : '');
+// A freshly sent bot message may not have a Data Table row yet. Reply to it
+// as a new chat turn instead of silently dropping the user's first reply.
+const agentType = original.mika.explicit || (m.ai_reply_only ?
+  (found ? String(found.json.agent_type || 'chat') : 'chat') : '');
 if (!['chat', 'serious'].includes(agentType)) return [];
 const sessionId = !original.mika.explicit && found ? String(found.json.session_id) :
   [agentType, original.mika.chatId, original.mika.threadId,
@@ -116,13 +123,16 @@ def build(source: dict) -> dict:
     by_name = {node["name"]: node for node in graph["nodes"]}
     # A current, owner-edited graph is already the source of truth. Preserve
     # its notes, tools and credentials instead of regenerating old node names.
-    if {"Mika Serious Agent", "Mika Simple Memory", "Normalize Chat Result"} <= by_name.keys():
+    if ({"Mika Serious Agent", "Normalize Chat Result"} <= by_name.keys() and
+            ("Mika Simple Memory" in by_name or "Mika Postgres Memory" in by_name)):
         if any(node["type"] == "n8n-nodes-base.telegramTrigger" for node in graph["nodes"]):
             raise ValueError("A competing Telegram Trigger cannot be imported")
         for key in ("id", "active", "activeVersionId", "versionId", "createdAt",
                     "updatedAt", "shared", "tags", "meta", "pinData", "triggerCount",
                     "isArchived"):
             graph.pop(key, None)
+        by_name["Analyze Message"]["parameters"]["jsCode"] = ANALYZE
+        by_name["Decide AI"]["parameters"]["jsCode"] = DECIDE
         return {key: graph[key] for key in ("name", "nodes", "connections", "settings")}
     required = {"Private Webhook", "Telegram Trigger", "Switch", "Analyze Message",
                 "Find AI Reply", "Decide AI", "Is AI Reply?", "AI Agent", "Simple Memory",

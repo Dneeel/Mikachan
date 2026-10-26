@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import stat
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -58,16 +60,19 @@ def prepare(origin: str, key_file: Path, token: str, account_id: str,
         raise ReconcileError("Requested Cloudflare Workers AI model is unavailable")
     client = Client(origin, _private_file(key_file))
     rows = client.request("GET", "/credentials?limit=100").get("data", [])
-    matches = [row for row in rows if row.get("type") == "openAiApi" and
+    matches = [row for row in rows if row.get("type") == "httpHeaderAuth" and
                row.get("name") == "Cloudflare Workers AI"]
     if len(matches) > 1:
         return {"status": "BLOCKED_CONFLICT", "reason": "Duplicate Cloudflare AI credentials"}
     if matches:
+        state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        _save(state_dir / "cloudflare-ai.json", {"credential_id": str(matches[0]["id"]),
+            "account_id": account_id, "model": MODEL, "binding_unverified": True})
         return {"status": "CREDENTIAL_EXISTS", "reason": "Existing n8n credential was preserved; "
                 "its encrypted token and account binding cannot be verified through the Public API"}
-    url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1"
     created = client.request("POST", "/credentials", {"name": "Cloudflare Workers AI",
-        "type": "openAiApi", "data": {"apiKey": token, "url": url}})
+        "type": "httpHeaderAuth", "data": {"name": "Authorization",
+                                           "value": "Bearer " + token}})
     if not created.get("id"):
         raise ReconcileError("n8n did not confirm Cloudflare credential creation")
     state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -87,19 +92,19 @@ def select(origin: str, key_file: Path, state_dir: Path,
         record = state_dir / "cloudflare-ai.json"
         if record.is_symlink():
             raise ReconcileError("Cloudflare credential marker is unsafe")
-        expected = json.loads(record.read_text()).get("credential_id") if record.is_file() else None
+        if not record.is_file():
+            raise ReconcileError("Verify the Cloudflare account with prepare first")
+        if stat.S_IMODE(record.stat().st_mode) != 0o600 or record.stat().st_uid != os.geteuid():
+            raise ReconcileError("Cloudflare credential marker is unsafe")
+        binding = json.loads(record.read_text())
+        expected = binding.get("credential_id")
+        if not ACCOUNT.fullmatch(str(binding.get("account_id") or "")):
+            raise ReconcileError("Cloudflare account binding is missing")
         rows = client.request("GET", "/credentials?limit=100").get("data", [])
-        matches = [row for row in rows if row.get("type") == "openAiApi" and
+        matches = [row for row in rows if row.get("type") == "httpHeaderAuth" and
                    row.get("name") == "Cloudflare Workers AI"]
         if len(matches) != 1 or expected and matches[0].get("id") != expected:
             raise ReconcileError("A unique Cloudflare Workers AI credential is required")
-        # A previously created n8n credential may predate the local manager
-        # marker. Selecting it is an explicit owner action; encrypted contents
-        # cannot be read or certified through the Public API.
-        if expected is None:
-            _save(record, {"credential_id": str(matches[0]["id"]),
-                           "account_id": "unknown", "model": MODEL,
-                           "binding_unverified": True})
     path = state_dir / "provider-selection.json"
     if path.is_symlink():
         raise ReconcileError("Provider selection path is unsafe")

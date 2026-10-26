@@ -223,12 +223,20 @@ class Intelligence:
             return False
         if not m.text or m.text.startswith("/"):
             return False
-        self.pending.pop(m.from_user.id, None)
         try:
             if kind == "category":
-                self.add_category(m.text)
-            elif kind.startswith("word"):
-                self.add_term(int(kind[4:]), m.text)
+                category = self.add_category(m.text)
+                self.pending[m.from_user.id] = (f"word:{category}", token, time.time()+600)
+                await m.reply("✅ Category saved. Send its first word or phrase. "
+                    "Send more words one at a time; tap Done when finished.",
+                    reply_markup=self._batch_keyboard(token))
+                return True
+            elif kind.startswith("word:"):
+                self.add_term(int(kind[5:]), m.text)
+                self.pending[m.from_user.id] = (kind, token, time.time()+600)
+                await m.reply("✅ Word saved. Send another word or tap Done.",
+                              reply_markup=self._batch_keyboard(token))
+                return True
             elif kind.startswith("renamecat"):
                 value = " ".join(m.text.strip().split())
                 if not 1 <= len(value) <= 50:
@@ -247,8 +255,14 @@ class Intelligence:
         except (ValueError, sqlite3.IntegrityError) as exc:
             await m.reply("⚠️ " + html.escape(str(exc)))
             return True
+        self.pending.pop(m.from_user.id, None)
         await m.reply("✅ Saved. Reopen Intelligence Desk to view it.")
         return True
+
+    @staticmethod
+    def _batch_keyboard(token: str) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="✅ Done", callback_data=f"fi_done:{token}")]])
 
     def export(self, term: int | None, fmt: str, *, category: int | None = None,
                user: int | None = None) -> tuple[bytes, str]:
@@ -271,14 +285,59 @@ class Intelligence:
         if fmt == "j":
             return json.dumps(data, ensure_ascii=False, indent=2).encode(), "json"
         if fmt == "h":
-            body = "<!doctype html><meta charset='utf-8'><title>Observed words</title>" + \
-                "<main>" + "".join("<article><time>" + html.escape(x["time"]) +
-                "</time><p>" + html.escape(x["text"]) + "</p></article>" for x in data) + "</main>"
+            cards = "".join(
+                "<article class='record'><div class='record-head'><span class='stamp'>"
+                + html.escape(x["time"]) + "</span><span class='badge'>GROUP "
+                + html.escape(str(x["chat_id"])) + "</span></div>"
+                + "<h2>SUBJECT " + html.escape(str(x["user_id"])) + "</h2>"
+                + "<p class='excerpt' dir='auto'>" + html.escape(x["text"]) + "</p>"
+                + "<footer>MESSAGE ID <b>" + html.escape(str(x["message_id"]))
+                + "</b></footer></article>" for x in data)
+            body = ("<!doctype html><html lang='en'><meta charset='utf-8'>"
+                "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+                "<title>Mikachan Intelligence · Case file</title><style>"
+                ":root{color-scheme:dark;font-family:Inter,Arial,sans-serif}*{box-sizing:border-box}"
+                "body{margin:0;min-height:100vh;color:#e6edf5;background:radial-gradient(ellipse at 15% 0%,#213c4b 0%,transparent 45%),radial-gradient(ellipse at 95% 85%,#172f34 0%,transparent 40%),#071014}"
+                "main{max-width:1100px;margin:auto;padding:clamp(24px,5vw,68px)}"
+                ".eyebrow{color:#83dfc3;letter-spacing:.28em;font-size:.72rem;font-weight:700}"
+                "h1{font-size:clamp(2rem,5vw,4rem);letter-spacing:-.05em;margin:.55rem 0}"
+                ".intro{color:#9eb5be;line-height:1.7;max-width:680px}.grid{display:grid;"
+                "grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:18px;margin-top:36px}"
+                ".record,.metric{background:linear-gradient(145deg,#ffffff12,#ffffff05);"
+                "border:1px solid #b7f6e127;box-shadow:0 18px 48px #0005;backdrop-filter:blur(18px);"
+                "border-radius:18px}.record{padding:22px;min-width:0}.record-head{display:flex;"
+                "justify-content:space-between;gap:10px;flex-wrap:wrap}.stamp,.badge,footer{"
+                "font-family:ui-monospace,SFMono-Regular,monospace;font-size:.69rem;color:#8faab0}"
+                ".badge{border:1px solid #83dfc355;color:#83dfc3;padding:5px 8px;border-radius:5px}"
+                "h2{font-size:.82rem;letter-spacing:.12em;margin:22px 0 12px;color:#c5e6df}"
+                ".excerpt{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.65;"
+                "min-height:3em;margin:0;color:#edf6f4}footer{border-top:1px solid #ffffff19;"
+                "margin-top:24px;padding-top:14px}.metric{display:inline-block;padding:14px 20px;"
+                "margin-top:18px;color:#83dfc3}small{display:block;margin-top:35px;color:#78959b}"
+                "</style><main><div class='eyebrow'>MIKACHAN / INTELLIGENCE DESK</div>"
+                "<h1>Case file</h1><p class='intro'>A record of observed messages in approved "
+                "groups. Counts begin when tracking is enabled. This export is private.</p>"
+                f"<div class='metric'>{len(data):,} RECORDED USES</div>"
+                "<section class='grid'>" + cards + "</section>"
+                "<small>END OF FILE · Local export · Asia/Tehran</small></main></html>")
             return body.encode(), "html"
         return "\n\n".join(f"{x['time']} · {x['user_id']} · {x['chat_id']}\n{x['text']}"
                           for x in data).encode(), "txt"
 
     async def callback(self, q: CallbackQuery, data: str) -> bool:
+        if data.startswith("fi_done:"):
+            pending = self.pending.get(q.from_user.id) if q.from_user else None
+            if not q.from_user or not isinstance(q.message, Message) or \
+                    q.message.chat.type != "private" or \
+                    self.access.role(q.from_user.id) != "OWNER" or not pending or \
+                    not pending[0].startswith("word:") or pending[1] != data[8:] or \
+                    pending[2] < time.time():
+                await q.answer("Unavailable")
+                return True
+            self.pending.pop(q.from_user.id, None)
+            await q.message.edit_text("✅ Category words saved.")
+            await q.answer()
+            return True
         if not data.startswith("fi:"):
             return False
         if not q.from_user or not isinstance(q.message, Message):
@@ -300,10 +359,12 @@ class Intelligence:
             return True
         if action == "addcat" or action.startswith(("addword", "renamecat", "renameterm")):
             kind = "category" if action == "addcat" else \
-                "word" + action[7:] if action.startswith("addword") else action
-            self.pending[q.from_user.id] = (kind, token, time.time()+180)
+                "word:" + action[7:] if action.startswith("addword") else action
+            self.pending[q.from_user.id] = (kind, token, time.time()+600)
             await q.message.answer("Send the new category name." if kind in {"category"} or
-                kind.startswith("renamecat") else "Send the new word or phrase.")
+                kind.startswith("renamecat") else "Send the first word or phrase. "
+                "Continue sending words one at a time; tap Done when finished.",
+                reply_markup=self._batch_keyboard(token) if kind.startswith("word:") else None)
             await q.answer()
             return True
         if action.startswith("visible") or action.startswith("toggle"):

@@ -26,6 +26,7 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     InaccessibleMessage,
     Message,
+    ReplyParameters,
 )
 
 from .config import Settings
@@ -110,7 +111,7 @@ async def profile_photo(url: str) -> BufferedInputFile:
 
 
 def download_prompt_markup(cid: str, url: str) -> InlineKeyboardMarkup:
-    quality_choice = youtube_video_url(url) or source(url) == "pornhub"
+    quality_choice = youtube_video_url(url)
     rows = [[("✅ Yes", f"c:{cid}:{'q' if quality_choice else 'y'}"),
              ("❌ No", f"c:{cid}:n")]]
     if source(url) in SOCIAL_PLATFORMS and profile_target(url) is None:
@@ -277,9 +278,11 @@ class App:
                               "token TEXT PRIMARY KEY,user_id INTEGER NOT NULL,"
                               "chat_id INTEGER NOT NULL,message_id INTEGER,"
                               "url TEXT NOT NULL,expires REAL NOT NULL)")
+        self._url_choices: dict[str, tuple[int, int, int, Message, float]] = {}
         self.follow = FollowService(self.store, self.bot, settings.private_chats_only)
         self._check_all_tasks: dict[int, asyncio.Task[None]] = {}
         self._quality_tasks: set[asyncio.Task[None]] = set()
+        self._ph_tasks: set[asyncio.Task[None]] = set()
         community_store = CommunityStore(self.store.db)
         community_store.seed_hafez(Path(__file__).parent / "content/hafez.json")
         self.community = Community(self.bot, community_store, settings.owner_telegram_id,
@@ -705,22 +708,20 @@ class App:
             elif not m.reply_to_message:
                 await m.reply("Reply to a file, photo, video, or audio message with /url.")
             elif self.store.rate(m.from_user.id, "file_to_link", 5):
-                try:
-                    link = await self.userbot.file_to_link(self.bot, m.chat.id,
-                                                           m.reply_to_message.message_id,
-                                                           m.reply_to_message)
-                    token = secrets.token_urlsafe(9)
-                    buttons = InlineKeyboardMarkup(inline_keyboard=[[
-                        InlineKeyboardButton(text="▣ QR", callback_data=f"url:{token}"),
-                        InlineKeyboardButton(text="⬇ Download", url=link)]])
-                    sent = await m.reply("✅ <b>Your link is ready</b>\n\n🔗 " +
-                                         html.escape(link) + "\n\n⏳ Expires within 24 hours.",
-                                         reply_markup=buttons)
-                    self.store.db.execute("INSERT INTO url_links VALUES (?,?,?,?,?,?)",
-                                          (token, m.from_user.id, m.chat.id,
-                                           sent.message_id, link, time.time() + 86400))
-                except ValueError as exc:
-                    await m.reply(html.escape(str(exc)))
+                token = secrets.token_urlsafe(9)
+                sent = await m.reply("🔗 <b>Choose a link type</b>\n\n"
+                    "Internal: @FreeDownloadYarbot · External: public file link.",
+                    reply_markup=kb([[("🏠 Internal", f"urlchoice:{token}:internal"),
+                                      ("🌐 External", f"urlchoice:{token}:external")],
+                                     [("✖ Cancel", f"urlchoice:{token}:cancel")]]))
+                choices = getattr(self, "_url_choices", {})
+                choices = {key: value for key, value in choices.items()
+                           if value[4] > time.time()}
+                if len(choices) >= 100:
+                    choices.pop(next(iter(choices)))
+                choices[token] = (m.from_user.id, m.chat.id, sent.message_id,
+                                  m.reply_to_message, time.time() + 300)
+                self._url_choices = choices
             return
         if cmd == "/proxy":
             if self.proxy_relay is None:
@@ -852,6 +853,8 @@ class App:
                 narrowed = kinds & saved_kinds
                 if narrowed:
                     kinds = narrowed
+        if self.searcher.health["spotify"] == "credentials required":
+            sources.discard("spotify")
         sid = self.store.create_search(m.from_user.id, m.chat.id, query, kinds, sources)
         msg = await m.reply("🔎 Searching…")
         self.store.set_search_message(sid, msg.message_id)
@@ -896,7 +899,9 @@ class App:
         head = f"🔎 <b>{html.escape(row['query'])}</b> · Page {page + 1}"
         buttons: list[list[tuple[str, str]]] = []
         if menu in ("types", "sources"):
-            choices = KINDS if menu == "types" else SOURCES
+            choices = KINDS if menu == "types" else tuple(source for source in SOURCES
+                if source != "spotify" or self.searcher.health["spotify"] !=
+                "credentials required")
             active = kinds if menu == "types" else sources
             for choice in choices:
                 status = self.searcher.health.get(choice, "") if menu == "sources" else ""
@@ -1352,6 +1357,24 @@ class App:
             if "message is not modified" not in str(exc).lower():
                 raise
 
+    async def _deliver_pornhub_relay(self, url: str, user: int, chat: int,
+                                     chat_type: str, original_message: int) -> None:
+        bridge = self.userbot
+        if bridge is None:
+            return
+        try:
+            video = await bridge.pornhub_video(url)
+            if not self.authorized(user, chat, chat_type):
+                return
+            await bridge.deliver_pornhub(self.bot, video, chat, original_message)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            if self.authorized(user, chat, chat_type):
+                await self.bot.send_message(chat,
+                    "⚠️ The video provider did not deliver a usable video. Try again later.",
+                    reply_parameters=ReplyParameters(message_id=original_message))
+
     async def callback(self, q: CallbackQuery) -> None:
         if (
             not q.from_user
@@ -1384,6 +1407,44 @@ class App:
                     caption="▣ Scan to open your link.")
             else:
                 await acknowledge(q, "Link expired or unavailable")
+            return
+        if data.startswith("urlchoice:"):
+            parts = data.split(":")
+            choice = getattr(self, "_url_choices", {}).get(parts[1]) if len(parts) == 3 else None
+            if (not choice or parts[2] not in {"internal", "external", "cancel"} or
+                    choice[:3] != (q.from_user.id, q.message.chat.id,
+                                   q.message.message_id) or choice[4] < time.time()):
+                await acknowledge(q, "Link choice expired or belongs to another user")
+                return
+            self._url_choices.pop(parts[1], None)
+            await acknowledge(q)
+            if parts[2] == "cancel":
+                await q.message.delete()
+                return
+            await q.message.edit_text("🔄 Generating " + parts[2] + " links…")
+            try:
+                original = choice[3]
+                assert self.userbot is not None
+                links = await self.userbot.file_to_links(self.bot, q.message.chat.id,
+                    original.message_id, original, internal=parts[2] == "internal")
+                link_token = secrets.token_urlsafe(9)
+                body = ("✅ <b>" + parts[2].title() + " links</b>\n\n" +
+                        "\n".join(f"{index}. {html.escape(link)}" for index, link in
+                                  enumerate(links, 1)))
+                if len(body) > 3800:
+                    await self.bot.send_document(q.message.chat.id,
+                        BufferedInputFile(("\n".join(links) + "\n").encode(),
+                                          "Mikachan-links.txt"),
+                        caption=f"✅ {len(links)} links ready")
+                    body = ("✅ <b>" + parts[2].title() + " links</b>\n\n"
+                            f"{len(links)} links were sent as a TXT file.")
+                markup = kb([[("▣ First link QR", f"url:{link_token}")]])
+                await q.message.edit_text(body, reply_markup=markup)
+                self.store.db.execute("INSERT INTO url_links VALUES (?,?,?,?,?,?)",
+                    (link_token, q.from_user.id, q.message.chat.id,
+                     q.message.message_id, links[0], time.time() + 86400))
+            except ValueError as exc:
+                await q.message.edit_text("⚠️ " + html.escape(str(exc)))
             return
         if hasattr(self, "group_status") and await self.group_status.callback(q, data):
             return
@@ -1704,6 +1765,34 @@ class App:
                     "y", "n", "p", "q", "360", "480", "720", "1080", "audio"}:
                 await acknowledge(q)
                 return
+            ph_row = self.store.db.execute(
+                "SELECT url,message_id FROM confirmations WHERE id=? AND user_id=? "
+                "AND chat_id=? AND prompt_id=? AND state='PENDING' AND expires>?",
+                (parts[1], q.from_user.id, q.message.chat.id,
+                 q.message.message_id, time.time())).fetchone()
+            if ph_row and source(str(ph_row["url"])) == "pornhub":
+                if parts[2] not in {"y", "q", "n"}:
+                    await acknowledge(q, "Resend this link to use the video relay")
+                    return
+                if parts[2] != "n" and not self.userbot:
+                    await acknowledge(q, "A Telegram user session is required")
+                    return
+                state, relay_url = self.store.decision_relay(parts[1], q.from_user.id,
+                    q.message.chat.id, q.message.message_id, parts[2] != "n")
+                await acknowledge(q, "Request expired" if state == "EXPIRED" else None)
+                if state == "REJECTED":
+                    await q.message.delete()
+                elif state == "ACCEPTED" and relay_url:
+                    await q.message.edit_text("⏳ Waiting for the video provider. "
+                        "The video will be sent here when it arrives; this may take several minutes.")
+                    ph_task = asyncio.create_task(self._deliver_pornhub_relay(relay_url,
+                        q.from_user.id, q.message.chat.id, q.message.chat.type,
+                        int(ph_row["message_id"])))
+                    ph_tasks = getattr(self, "_ph_tasks", None)
+                    if ph_tasks is not None:
+                        ph_tasks.add(ph_task)
+                        ph_task.add_done_callback(ph_tasks.discard)
+                return
             if parts[2] == "q":
                 row = self.store.db.execute(
                     "SELECT url FROM confirmations WHERE id=? AND user_id=? AND chat_id=? "
@@ -1711,10 +1800,9 @@ class App:
                     (parts[1], q.from_user.id, q.message.chat.id,
                      q.message.message_id, time.time())).fetchone()
                 await acknowledge(q, "Request expired" if not row else None)
-                if row and (youtube_video_url(row["url"]) or source(row["url"]) == "pornhub"):
+                if row and youtube_video_url(row["url"]):
                     message = q.message
                     assert message is not None and not isinstance(message, InaccessibleMessage)
-                    provider = source(row["url"])
                     url = str(row["url"])
 
                     async def render_quality(sizes: dict[str, int]) -> None:
@@ -1725,16 +1813,7 @@ class App:
 
                         size_note = ("Source-reported download bytes; final MP4 may differ after merging."
                                      if sizes else "Exact size appears when the source reports it.")
-                        if provider == "pornhub":
-                            await message.edit_text(
-                                "🎛 <b>Pornhub quality</b>\nChoose the maximum video resolution.\n"
-                                + size_note,
-                                reply_markup=kb([[(quality_label("480"), f"c:{parts[1]}:480"),
-                                                  (quality_label("720"), f"c:{parts[1]}:720")],
-                                                 [(quality_label("1080", up_to=True), f"c:{parts[1]}:1080")],
-                                                 [("✖ Cancel", f"c:{parts[1]}:n")]]))
-                        else:
-                            await message.edit_text(
+                        await message.edit_text(
                                 "🎛 <b>YouTube quality</b>\nChoose video quality or MP3.\n"
                                 + size_note,
                                 reply_markup=kb([[(quality_label("360"), f"c:{parts[1]}:360"),
@@ -2091,6 +2170,9 @@ class App:
         kinds, sources = set(json.loads(row["kinds"])), set(json.loads(row["sources"]))
         if action in ("k", "p") and len(parts) == 4:
             choices, active = (KINDS, kinds) if action == "k" else (SOURCES, sources)
+            if action == "p" and parts[3] == "spotify" and \
+                    self.searcher.health["spotify"] == "credentials required":
+                return
             if parts[3] not in choices:
                 return
             if parts[3] in active:
@@ -2342,6 +2424,9 @@ class App:
             for quality_task in self._quality_tasks:
                 quality_task.cancel()
             await asyncio.gather(*self._quality_tasks, return_exceptions=True)
+            for ph_task in self._ph_tasks:
+                ph_task.cancel()
+            await asyncio.gather(*self._ph_tasks, return_exceptions=True)
             follow_task.cancel()
             await asyncio.gather(follow_task, return_exceptions=True)
             await self.worker.stop()

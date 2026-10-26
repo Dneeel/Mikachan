@@ -12,9 +12,9 @@ from pathlib import Path
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, Message
+from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, Message, ReplyParameters
 
-from .security import clean_url
+from .security import clean_url, source
 
 LINK = re.compile(r"https://[^\s<>\]\[()]+", re.I)
 ASSET_NAMES = ("دینار کویت", "دینار عراق", "ربع سکه", "بیتکوین", "نقره", "سکه",
@@ -42,6 +42,26 @@ def extract_download_url(text: str) -> str:
         if url.startswith("https://"):
             return url
     raise ValueError("File service did not return a valid HTTPS download link")
+
+
+def extract_service_urls(message) -> list[str]:
+    """Collect bounded public HTTPS links from the verified internal-link bot."""
+    candidates = [match.group().rstrip(".,;") for match in LINK.finditer(
+        str(getattr(message, "raw_text", "") or ""))]
+    candidates += [str(getattr(button, "url", "") or "")
+                   for row in getattr(message, "buttons", None) or [] for button in row]
+    result = []
+    for candidate in candidates:
+        try:
+            url = clean_url(candidate)
+        except ValueError:
+            continue
+        if url.startswith("https://") and url not in result and not url.startswith(
+                ("https://t.me/", "https://telegram.me/")):
+            result.append(url)
+        if len(result) >= 8:
+            break
+    return result
 
 
 @dataclass(frozen=True)
@@ -141,6 +161,9 @@ class UserbotBridge:
         self.last_request = 0.0
         self.cooldown_until = 0.0
         self.file_peer = None
+        self.internal_file_peer = None
+        self.pornhub_peer = None
+        self.pornhub_lock = asyncio.Lock()
         self.proxy_peer = None
         self.instagram_peer = None
         self.instagram_last_sent = 0.0
@@ -163,6 +186,73 @@ class UserbotBridge:
                 raise ValueError("File service username did not resolve to a bot")
             self.file_peer = peer
         return self.file_peer
+
+    async def _internal_peer(self):
+        peer = getattr(self, "internal_file_peer", None)
+        if peer is None:
+            peer = await self.client.get_entity("FreeDownloadYarbot")
+            if (not getattr(peer, "bot", False) or
+                    str(getattr(peer, "username", "")).casefold() != "freedownloadyarbot"):
+                raise ValueError("Internal link provider identity could not be verified")
+            self.internal_file_peer = peer
+        return peer
+
+    async def pornhub_video(self, url: str):
+        """Wait for verified PHDownlBot video; no site extraction or local cache."""
+        if source(url) != "pornhub":
+            raise ValueError("This relay accepts Pornhub video links only")
+        try:
+            async with asyncio.timeout(720):
+                async with self.pornhub_lock:
+                    await self._ready()
+                    peer = self.pornhub_peer
+                    if peer is None:
+                        peer = await self.client.get_entity("PHDownlBot")
+                        if (not getattr(peer, "bot", False) or
+                                str(getattr(peer, "username", "")).casefold() != "phdownlbot"):
+                            raise ValueError("Video provider identity could not be verified")
+                        self.pornhub_peer = peer
+                    sent = await self.client.send_message(peer, url)
+                    while True:
+                        for answer in await self.client.get_messages(peer, limit=12):
+                            if (getattr(answer, "sender_id", None) != peer.id or
+                                    getattr(answer, "id", 0) <= sent.id):
+                                continue
+                            document = getattr(answer, "document", None)
+                            if (getattr(answer, "video", None) or document and
+                                    str(getattr(document, "mime_type", "") or "").startswith(
+                                        "video/")) and getattr(answer, "media", None):
+                                return answer
+                        await asyncio.sleep(2)
+        except asyncio.TimeoutError as exc:
+            raise ValueError("Video provider did not deliver within 12 minutes") from exc
+
+    async def deliver_pornhub(self, bot: Bot, answer, chat: int,
+                              original_message: int) -> None:
+        caption = "کم بگون همیشه بگون"
+        reply = ReplyParameters(message_id=original_message)
+        size = int(getattr(getattr(answer, "file", None), "size", 0) or 0)
+        if size > 1_900_000_000:
+            raise ValueError("Provider video exceeds Telegram's supported upload size")
+        if self.staging_chat_id < 0:
+            staged = await self.client.forward_messages(self.staging_chat_id, answer)
+            try:
+                await bot.copy_message(chat, self.staging_chat_id, staged.id,
+                    caption=caption, reply_parameters=reply)
+            finally:
+                try:
+                    await self.client.delete_messages(self.staging_chat_id, staged.id)
+                except Exception:
+                    pass  # A successful delivery must not become a false failure.
+        else:
+            if size > 48_000_000:
+                raise ValueError("Large video relay needs USERBOT_STAGING_CHAT_ID")
+            content = await self.client.download_media(answer, file=bytes)
+            if not isinstance(content, bytes) or not 0 < len(content) <= 48_000_000:
+                raise ValueError("Provider video is unavailable or exceeds the upload limit")
+            await bot.send_video(chat, BufferedInputFile(content, "video.mp4"),
+                                 caption=caption, reply_parameters=reply,
+                                 supports_streaming=True)
 
     async def _proxy_peer(self):
         if self.proxy_peer is None:
@@ -192,6 +282,7 @@ class UserbotBridge:
         deadline = started + (90 if goal == "profile" else 180)
         quiet_until = time.monotonic() + 32
         profile_ready_at = None
+        posts_completed_at = None
         while time.monotonic() < deadline and len(found) < limit:
             rows = await self.client.get_messages(peer, limit=min(120, limit + 10))
             fresh = []
@@ -238,16 +329,18 @@ class UserbotBridge:
                         self._instagram_has_button(item, "next 5 post") and
                         "sent 5 post" in str(getattr(item, "raw_text", "") or "").casefold()
                         for item in found.values()):
-                    # The upstream completion marker is stronger evidence than
-                    # a media count: a carousel can contain several messages.
-                    quiet_until = min(quiet_until, time.monotonic() + 2)
+                    # This marker is the batch boundary. Before it arrives,
+                    # a quiet gap cannot finish an incomplete five-post page.
+                    posts_completed_at = time.monotonic()
+                    quiet_until = min(quiet_until, posts_completed_at + 2)
                 if goal == "menu" and any(getattr(item, "buttons", None) for item in fresh):
                     break
             pending = goal == "profile" and any(
                 any(word in str(getattr(item, "raw_text", "") or "").casefold()
                     for word in ("please wait", "processing", "در حال", "لطفا صبر"))
                 for item in found.values())
-            if found and time.monotonic() >= quiet_until and not pending and goal != "profile":
+            if found and time.monotonic() >= quiet_until and not pending and goal != "profile" \
+                    and (goal != "posts" or posts_completed_at is not None):
                 break
             if profile_ready_at is not None and time.monotonic() >= profile_ready_at:
                 break
@@ -342,12 +435,13 @@ class UserbotBridge:
                         await asyncio.sleep(delay)
                     await current.click(row_index, column)
                     self.instagram_last_click = time.monotonic()
-                    for _ in range(30):
+                    for _ in range(5):
                         await asyncio.sleep(0.4)
                         edited = await self.client.get_messages(peer, ids=message.id)
                         if edited and edited.raw_text != current.raw_text:
                             return edited
-                    raise ValueError("Instagram caption did not arrive after requesting it")
+                    # Media is useful even if the optional caption edit is late.
+                    return current
             return current
 
     async def instagram_download(self, message, destination: Path,
@@ -599,6 +693,10 @@ class UserbotBridge:
 
     async def file_to_link(self, bot: Bot, source_chat: int, source_message: int,
                            message: Message | None = None) -> str:
+        return (await self.file_to_links(bot, source_chat, source_message, message))[0]
+
+    async def file_to_links(self, bot: Bot, source_chat: int, source_message: int,
+                            message: Message | None = None, *, internal: bool = False) -> list[str]:
         if self.staging_chat_id >= 0 and message is None:
             raise ValueError("Reply to a media message with /url")
         if source_chat == self.staging_chat_id:
@@ -608,7 +706,7 @@ class UserbotBridge:
             async with asyncio.timeout(90):
                 async with self.lock:
                     await self._ready()
-                    peer = await self._peer()
+                    peer = await self._internal_peer() if internal else await self._peer()
                     delay = self.last_request + 2 - time.monotonic()
                     if delay > 0:
                         await asyncio.sleep(delay)
@@ -624,7 +722,8 @@ class UserbotBridge:
                             await asyncio.sleep(0.4)
                         if not source or not source.media:
                             raise ValueError("Reply to a file, photo, video, or audio message")
-                        return await self._request_file_link(peer, source=source)
+                        return await self._request_file_links(peer, source=source,
+                                                              internal=internal)
                     if message is None:
                         raise ValueError("Original Telegram message is unavailable")
                     media = (message.document or message.video or message.audio or
@@ -645,7 +744,8 @@ class UserbotBridge:
                         if path.stat().st_size > 20_000_000:
                             raise ValueError("This file needs a private staging chat: set "
                                              "USERBOT_STAGING_CHAT_ID for files over 20 MB")
-                        return await self._request_file_link(peer, path=path)
+                        return await self._request_file_links(peer, path=path,
+                                                              internal=internal)
         except asyncio.TimeoutError as exc:
             self.cooldown_until = time.monotonic() + 30
             raise ValueError("File service timed out") from exc
@@ -662,6 +762,10 @@ class UserbotBridge:
                     pass
 
     async def _request_file_link(self, peer, *, source=None, path: Path | None = None) -> str:
+        return (await self._request_file_links(peer, source=source, path=path))[0]
+
+    async def _request_file_links(self, peer, *, source=None, path: Path | None = None,
+                                  internal: bool = False) -> list[str]:
         async with self.client.conversation(peer, timeout=55, exclusive=True) as chat:
             sent = (await self.client.forward_messages(peer, source) if source is not None
                     else await chat.send_file(str(path)))
@@ -671,8 +775,13 @@ class UserbotBridge:
                 if (getattr(answer, "sender_id", None) != peer.id or
                         getattr(answer, "id", 0) <= sent.id):
                     continue
+                if internal:
+                    urls = extract_service_urls(answer)
+                    if urls:
+                        return urls
+                    continue
                 try:
-                    return extract_download_url(str(answer.raw_text or ""))
+                    return [extract_download_url(str(answer.raw_text or ""))]
                 except ValueError:
                     continue
         raise ValueError("File service returned no usable link")

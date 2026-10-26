@@ -12,11 +12,88 @@ from deploy.n8n.build_ai_workflow import build
 from deploy.n8n.seed_ai_style import seed_sql
 from deploy.n8n.reconcile_ai import (ReconcileError, _activate_draft,
     _configure_search, _draft_missing_credentials, _fingerprint,
-    _repair_active_search,
+    _preserve_owner_settings, _repair_active_search, _select_models,
     _map_reply_table, reconcile)
 
 
 ARTIFACT = Path(__file__).resolve().parents[1] / "deploy/n8n/mikachan_ai_workflow.json"
+
+
+def test_packaged_ai_handles_first_reply_and_captioned_media():
+    graph = json.loads(ARTIFACT.read_text())
+    nodes = {node["name"]: node for node in graph["nodes"]}
+    decide = nodes["Decide AI"]["parameters"]["jsCode"]
+    analyze = nodes["Analyze Message"]["parameters"]["jsCode"]
+    assert "found ? String(found.json.agent_type || 'chat') : 'chat'" in decide
+    assert "m.reply_to_message?.text?.trim() || m.reply_to_message?.caption?.trim()" in analyze
+
+
+def test_owner_postgres_template_keeps_media_voice_and_memory_when_repaired():
+    """The supplied 50-node export uses Postgres memory and owner TTS settings."""
+    graph = json.loads(ARTIFACT.read_text())
+    nodes = {node["name"]: node for node in graph["nodes"]}
+    for name, agent in (("Mika Postgres Memory", "AI Agent"),
+                        ("Serious Postgres Memory", "Mika Serious Agent")):
+        graph["nodes"].append({"name": name, "type":
+            "@n8n/n8n-nodes-langchain.memoryPostgresChat", "parameters": {
+                "sessionIdType": "customKey", "sessionKey": "={{ $json.mika.sessionId }}"}})
+        graph["connections"][name] = {"ai_memory": [[{"node": agent,
+            "type": "ai_memory", "index": 0}]]}
+    graph["connections"].pop("Mika Simple Memory", None)
+    graph["connections"].pop("Serious Simple Memory", None)
+    graph["nodes"] = [node for node in graph["nodes"] if node["name"] not in
+                      {"Mika Simple Memory", "Serious Simple Memory"}]
+    nodes["TTS ElevenLabs"]["parameters"]["voice"] = {
+        "__rl": True, "value": "owner-voice", "mode": "id"}
+    repaired = build(graph)
+    _configure_search(repaired, "search-credential")
+    kept = {node["name"]: node for node in repaired["nodes"]}
+    assert kept["TTS ElevenLabs"]["parameters"]["voice"]["value"] == "owner-voice"
+    assert all(name in kept for name in ("Mika Postgres Memory", "Serious Postgres Memory",
+        "Get Mikasa", "STT ElevenLabs", "TTS ElevenLabs"))
+    assert repaired["connections"]["Get Voice File"] == graph["connections"]["Get Voice File"]
+
+
+def test_reconcile_preserves_owner_voice_prompt_note_and_known_credentials():
+    desired = json.loads(ARTIFACT.read_text())
+    current = copy.deepcopy(desired)
+    wanted = {node["name"]: node for node in desired["nodes"]}
+    live = {node["name"]: node for node in current["nodes"]}
+    live["TTS ElevenLabs"]["parameters"]["voice"] = {
+        "__rl": True, "value": "private-owner-voice", "mode": "id"}
+    live["AI Agent"]["parameters"]["options"]["systemMessage"] = "owner prompt"
+    live["Sticky Note12"]["parameters"]["content"] = "owner note"
+    live["TTS ElevenLabs"]["credentials"] = {
+        "elevenLabsApi": {"id": "live-id", "name": "Owner ElevenLabs"}}
+    _preserve_owner_settings(desired, current, [{"type": "elevenLabsApi", "id": "live-id",
+                                               "name": "Owner ElevenLabs"}])
+    assert wanted["TTS ElevenLabs"]["parameters"]["voice"]["value"] == \
+        "private-owner-voice"
+    assert wanted["TTS ElevenLabs"]["credentials"]["elevenLabsApi"]["id"] == "live-id"
+    assert wanted["AI Agent"]["parameters"]["options"]["systemMessage"] == "owner prompt"
+    assert wanted["Sticky Note12"]["parameters"]["content"] == "owner note"
+
+
+def test_cloudflare_selection_uses_http_request_without_replacing_groq(tmp_path):
+    graph = json.loads(ARTIFACT.read_text())
+    selected = tmp_path / "provider-selection.json"
+    selected.write_text(json.dumps({"mika": "cloudflare", "serious": "groq"}))
+    selected.chmod(0o600)
+    marker = tmp_path / "cloudflare-ai.json"
+    marker.write_text(json.dumps({"account_id": "a" * 32, "credential_id": "cf-cred"}))
+    marker.chmod(0o600)
+    _select_models(graph, tmp_path)
+    nodes = {node["name"]: node for node in graph["nodes"]}
+    assert nodes["Cloudflare Mika Model"]["type"] == "n8n-nodes-base.httpRequest"
+    assert "/ai/run/@cf/google/gemma-4-26b-a4b-it" in \
+        nodes["Cloudflare Mika Model"]["parameters"]["url"]
+    assert nodes["Cloudflare Mika Model"]["credentials"]["httpHeaderAuth"]["id"] == "cf-cred"
+    assert graph["connections"]["Is AI Reply?"]["main"][0][0]["node"] == \
+        "Cloudflare Mika Model"
+    assert graph["connections"]["Is AI Reply?"]["main"][1][0]["node"] == \
+        "Mika Serious Agent"
+    assert graph["connections"]["Cloudflare Mika Result"]["main"][0][0]["node"] == \
+        "Normalize Chat Result"
 
 
 def test_ready_draft_requires_real_credentials_and_private_webhook():
@@ -181,14 +258,14 @@ def test_artifact_has_two_isolated_agents_and_preserves_media_edges():
     assert links["AI Agent"]["main"][0][0]["node"] == "Normalize Chat Result"
     assert nodes["AI Agent"]["continueOnFail"] is True
     assert "Tavily MCP" not in links and "Tavily MCP1" not in links
-    assert links["Search Intent"]["main"][0][0]["node"] == "Tavily HTTP Search"
+    assert links["Search Intent"]["main"][0][0]["node"] == "Prepare Search Query"
     assert links["Search Intent"]["main"][1][0]["node"] == "Is AI Reply?"
+    assert links["Prepare Search Query"]["main"][0][0]["node"] == "Tavily HTTP Search"
     assert links["Tavily HTTP Search"]["main"][0][0]["node"] == "Attach Search Results"
     assert len([n for n in graph["nodes"] if n["type"] == "n8n-nodes-base.stickyNote"]) == 8
     for name in ("Cloudflare Mika Model", "Cloudflare Serious Model"):
         assert nodes[name]["disabled"] is True
-        assert nodes[name]["parameters"]["model"]["value"] == \
-            "@cf/google/gemma-4-26b-a4b-it"
+        assert nodes[name]["type"] == "n8n-nodes-base.httpRequest"
         assert name not in links or not links[name].get("ai_languageModel")
     assert links["Get Mikasa"]["main"][0][0]["node"] == "Nude"
     assert links["Get Voice File"]["main"][0][0]["node"] == "STT ElevenLabs"

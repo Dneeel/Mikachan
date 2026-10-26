@@ -384,14 +384,16 @@ class GroupStatus:
         if kind == "menu":
             choices = (("Daily Statistics", "day"), ("Weekly Statistics", "week"),
                        ("Monthly Statistics", "month"), ("Rolling Annual Statistics", "annual"),
-                       ("Calendar Year Statistics", "years"), ("All-Time Statistics", "all"))
+                       ("Calendar Year Statistics", "years"), ("All-Time Statistics", "all"),
+                       ("✖ Close", "close"))
         elif kind == "years":
             this_year = datetime.now(TEHRAN).year
             choices = tuple((str(y), f"year{y}") for y in range(this_year, this_year - 5, -1)) + \
-                      (("◀ Back", "menu"),)
+                      (("◀ Back", "menu"), ("✖ Close", "close"))
         elif kind == "annual_choice":
             choices = (("Rolling 365 Days", "annual"),
-                       ("Gregorian Calendar Year", "years"), ("◀ Back", "menu"))
+                       ("Gregorian Calendar Year", "years"), ("◀ Back", "menu"),
+                       ("✖ Close", "close"))
         else:
             choices = (("🔄 Refresh", kind), ("◀ Back", "menu"), ("✖ Close", "close"))
         return InlineKeyboardMarkup(inline_keyboard=[[
@@ -496,7 +498,10 @@ class GroupStatus:
         await q.answer()
         if kind == "close":
             self.db.execute("DELETE FROM group_status_menus WHERE token=?", (token,))
-            await q.message.edit_reply_markup(reply_markup=None)
+            try:
+                await q.message.delete()
+            except TelegramBadRequest:
+                await q.message.edit_reply_markup(reply_markup=None)
             return True
         if kind == "menu":
             body = "📊 <b>Group Message Statistics</b>\nChoose a period."

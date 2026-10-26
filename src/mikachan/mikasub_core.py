@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
+import re
+import secrets
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -42,20 +45,80 @@ class MikaSubCore:
         db.executescript("""
         CREATE TABLE IF NOT EXISTS mikasub_local (
           key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS mikasub_sources (
+          id INTEGER PRIMARY KEY, name TEXT NOT NULL, url TEXT NOT NULL,
+          enabled INTEGER NOT NULL DEFAULT 1, last_error TEXT NOT NULL DEFAULT '',
+          last_ok TEXT NOT NULL DEFAULT '', raw_count INTEGER NOT NULL DEFAULT 0,
+          valid_count INTEGER NOT NULL DEFAULT 0, exported_count INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS mikasub_node_ids (
+          identity TEXT PRIMARY KEY, node_id INTEGER UNIQUE NOT NULL);
+        CREATE TABLE IF NOT EXISTS mikasub_snapshots (
+          version TEXT PRIMARY KEY, created_at TEXT NOT NULL,
+          items_json TEXT NOT NULL, stats_json TEXT NOT NULL);
         """)
+        self.local_override = bool(db.execute("SELECT 1 FROM mikasub_local "
+            "WHERE key='backend' AND value='local'").fetchone())
 
     @property
     def configured(self) -> bool:
-        return bool(self.origin and self.admin_token)
+        return bool(self.origin and self.admin_token and not self.local_override)
+
+    async def use_local(self) -> int:
+        """Keep existing Worker data, copy accessible sources, then switch locally."""
+        if not self.configured:
+            return 0
+        imported = 0
+        try:
+            previous = await self.sources()
+        except (MikaSubError, OSError, asyncio.TimeoutError):
+            previous = []
+        with self.db:
+            for item in previous[:50]:
+                try:
+                    url = source_url(str(item.get("url") or ""))
+                except ValueError:
+                    continue
+                if self.db.execute("SELECT 1 FROM mikasub_sources WHERE url=?",
+                                   (url,)).fetchone():
+                    continue
+                self.db.execute("INSERT INTO mikasub_sources(name,url,enabled) "
+                    "VALUES (?,?,?)", (str(item.get("name") or "Source")[:80], url,
+                                      int(bool(item.get("enabled")))))
+                imported += 1
+            self.db.execute("INSERT OR REPLACE INTO mikasub_local(key,value) "
+                            "VALUES ('backend','local')")
+        self.local_override = True
+        return imported
 
     def link(self) -> str:
+        if not self.configured:
+            return ""
         row = self.db.execute("SELECT value FROM mikasub_local WHERE key='public_link'").fetchone()
         return str(row[0]) if row else self.configured_public_url
 
     async def api(self, method: str, path: str, *, data: object | None = None,
                   text: str | None = None, timeout: float = 25) -> dict:
         if not self.configured:
-            raise MikaSubError("MikaSub Worker is not connected yet")
+            match = re.fullmatch(r"/api/v1/sources/(\d+)", path)
+            if not match or method not in {"PATCH", "DELETE"}:
+                raise MikaSubError("This action is unavailable in local MikaSub mode")
+            ident = int(match[1])
+            if method == "DELETE":
+                self.db.execute("DELETE FROM mikasub_sources WHERE id=?", (ident,))
+            elif isinstance(data, dict):
+                allowed = {"name", "url", "enabled", "last_error", "last_ok",
+                           "raw_count", "valid_count", "exported_count"}
+                updates = {key: value for key, value in data.items() if key in allowed}
+                if not updates:
+                    raise MikaSubError("No source fields to update")
+                if "url" in updates:
+                    source_url(str(updates["url"]))
+                if "name" in updates and not 1 <= len(str(updates["name"])) <= 80:
+                    raise MikaSubError("Source name must be 1–80 characters")
+                self.db.execute("UPDATE mikasub_sources SET " + ",".join(
+                    f"{key}=?" for key in updates) + " WHERE id=?",
+                    (*updates.values(), ident))
+            return {}
         if not path.startswith("/api/v1/") or "?" in path and "\n" in path:
             raise MikaSubError("invalid Worker API path")
         headers = {"Authorization": f"Bearer {self.admin_token}"}
@@ -81,21 +144,45 @@ class MikaSubCore:
             raise MikaSubError("MikaSub Worker is temporarily unreachable") from exc
 
     async def sources(self) -> list[dict]:
+        if not self.configured:
+            return [dict(row) for row in self.db.execute(
+                "SELECT * FROM mikasub_sources ORDER BY id")]
         value = (await self.api("GET", "/api/v1/sources")).get("sources")
         if not isinstance(value, list):
             raise MikaSubError("Worker source list is invalid")
         return value
 
     async def publication(self) -> dict:
+        if not self.configured:
+            row = self.db.execute("SELECT version,created_at,items_json,stats_json "
+                "FROM mikasub_snapshots ORDER BY rowid DESC LIMIT 1").fetchone()
+            return {"ready": bool(row), "version": row[0] if row else "",
+                "total": len(json.loads(row[2])) if row else 0,
+                "published_at": row[1] if row else "",
+                "stats": json.loads(row[3]) if row else {}}
         return await self.api("GET", "/api/v1/publication")
 
     async def metadata(self, version: str = "") -> dict:
+        if not self.configured:
+            row = self.db.execute("SELECT version,created_at,items_json FROM mikasub_snapshots "
+                + ("WHERE version=?" if version else "ORDER BY rowid DESC LIMIT 1"),
+                (version,) if version else ()).fetchone()
+            if not row:
+                raise MikaSubError("snapshot unavailable; Owner can add a source and Update Now")
+            return {"version": row[0], "created_at": row[1],
+                    "total": len(json.loads(row[2]))}
         suffix = "?version=" + version if version else ""
         return await self.api("GET", "/api/v1/snapshot/metadata" + suffix)
 
     async def items(self, version: str, offset: int, limit: int = 5) -> list[dict]:
         if not 0 <= offset <= 5000 or not 1 <= limit <= 100:
             raise MikaSubError("invalid snapshot page")
+        if not self.configured:
+            row = self.db.execute("SELECT items_json FROM mikasub_snapshots "
+                                  "WHERE version=?", (version,)).fetchone()
+            if not row:
+                raise MikaSubError("snapshot version is unavailable")
+            return json.loads(row[0])[offset:offset + limit]
         response = await self.api("GET", f"/api/v1/snapshot/items?version={version}&offset={offset}&limit={limit}")
         if response.get("version") != version or not isinstance(response.get("items"), list):
             raise MikaSubError("snapshot version changed unexpectedly")
@@ -118,6 +205,14 @@ class MikaSubCore:
         parsed = parse_subscription(await fetch_subscription(url))
         if not parsed.nodes:
             raise MikaSubError("source has no losslessly exportable share URIs")
+        if not self.configured:
+            if not 1 <= len(name.strip()) <= 80 or len(await self.sources()) >= 50:
+                raise MikaSubError("Source name or 50-source limit is invalid")
+            cursor = self.db.execute("INSERT INTO mikasub_sources(name,url) VALUES (?,?)",
+                                     (name.strip(), url))
+            ident = int(cursor.lastrowid or 0)
+            await self.source_stats(ident, parsed)
+            return {"id": ident}
         created = await self.api("POST", "/api/v1/sources", data={"name": name, "url": url})
         await self.source_stats(int(created["id"]), parsed)
         return created
@@ -127,6 +222,9 @@ class MikaSubCore:
         parsed = parse_subscription(await fetch_subscription(url))
         if not parsed.nodes:
             raise MikaSubError("replacement has no losslessly exportable share URIs")
+        if not self.configured and not self.db.execute(
+                "SELECT 1 FROM mikasub_sources WHERE id=?", (ident,)).fetchone():
+            raise MikaSubError("source not found")
         await self.api("PATCH", f"/api/v1/sources/{ident}", data={"url": url})
         await self.source_stats(ident, parsed)
 
@@ -154,6 +252,8 @@ class MikaSubCore:
         return parsed
 
     async def rotate_link(self) -> str:
+        if not self.configured:
+            raise MikaSubError("Local MikaSub is delivered inside Telegram; no public link exists")
         value = await self.api("POST", "/api/v1/public-token/rotate", data={})
         link = str(value.get("url") or "")
         if not link.startswith(self.origin + "/sub/") or len(link) < len(self.origin) + 50:
@@ -163,6 +263,13 @@ class MikaSubCore:
         return link
 
     async def _ids(self, nodes: list[Node]) -> dict[str, int]:
+        if not self.configured:
+            for node in nodes:
+                self.db.execute("INSERT OR IGNORE INTO mikasub_node_ids(identity,node_id) "
+                    "VALUES (?,(SELECT COALESCE(MAX(node_id),0)+1 FROM mikasub_node_ids))",
+                    (node.identity,))
+            return {str(row[0]): int(row[1]) for row in self.db.execute(
+                "SELECT identity,node_id FROM mikasub_node_ids")}
         found: dict[str, int] = {}
         for offset in range(0, len(nodes), 100):
             hashes = [node.identity for node in nodes[offset:offset + 100]]
@@ -187,6 +294,8 @@ class MikaSubCore:
                 raise
 
     async def _rebuild(self) -> BuildResult:
+        if not self.configured:
+            return await self._rebuild_local()
         sources = [item for item in await self.sources() if item.get("enabled")]
         if not sources:
             raise MikaSubError("add and enable at least one source first")
@@ -259,11 +368,54 @@ class MikaSubCore:
         return BuildResult(version, len(items), totals["raw"], totals["parsed"],
                            totals["duplicates"], totals["unsupported"], totals["errors"])
 
+    async def _rebuild_local(self) -> BuildResult:
+        sources = [item for item in await self.sources() if item["enabled"]]
+        if not sources:
+            raise MikaSubError("add and enable at least one source first")
+        gate = asyncio.Semaphore(3)
+        async def collect(item: dict) -> Parsed:
+            async with gate:
+                try:
+                    document = await fetch_subscription(str(item["url"]))
+                    parsed = parse_subscription(document)
+                    if not parsed.nodes:
+                        raise MikaSubError("source has no exportable share URIs")
+                    await self.source_stats(int(item["id"]), parsed)
+                    return parsed
+                except (ValueError, OSError, asyncio.TimeoutError) as exc:
+                    await self.source_stats(int(item["id"]), None, str(exc)[:120])
+                    raise MikaSubError("source fetch failed; previous snapshot retained") from exc
+        parsed_sources = await asyncio.gather(*(collect(item) for item in sources))
+        unique: dict[str, Node] = {}
+        totals = {"raw": 0, "parsed": 0, "duplicates": 0, "unsupported": 0, "errors": 0}
+        for parsed in parsed_sources:
+            for key in totals:
+                totals[key] += getattr(parsed, key)
+            for node in parsed.nodes:
+                unique.setdefault(node.identity, node)
+        if not 1 <= len(unique) <= 5000:
+            raise MikaSubError("collection must have 1–5,000 distinct configs")
+        totals["duplicates"] += sum(len(p.nodes) for p in parsed_sources) - len(unique)
+        node_ids = await self._ids(list(unique.values()))
+        items = [{"name": public_name(node_ids[node.identity]),
+                  "protocol": node.protocol,
+                  "uri": rename(node, public_name(node_ids[node.identity]))}
+                 for node in sorted(unique.values(), key=lambda node: node_ids[node.identity])]
+        if len(json.dumps(items).encode()) > 8_000_000:
+            raise MikaSubError("collection exceeds the 8 MB snapshot limit")
+        version = secrets.token_hex(12)
+        created = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        self.db.execute("INSERT INTO mikasub_snapshots VALUES (?,?,?,?)",
+            (version, created, json.dumps(items), json.dumps({**totals,
+                "exported": len(items), "source_count": len(sources)})))
+        return BuildResult(version, len(items), *(totals[key] for key in
+            ("raw", "parsed", "duplicates", "unsupported", "errors")))
+
     async def periodic(self) -> None:
         try:
             while True:
                 await asyncio.sleep(6 * 3600)
-                if not self.configured:
+                if not self.configured and not await self.sources():
                     continue
                 try:
                     await self.rebuild()
@@ -278,6 +430,12 @@ class MikaSubCore:
 
     async def cleanup(self) -> int:
         """Delete only expired, non-current KV versions in bounded Worker calls."""
+        if not self.configured:
+            rows = self.db.execute("SELECT version FROM mikasub_snapshots "
+                "ORDER BY rowid DESC").fetchall()
+            for row in rows[2:]:
+                self.db.execute("DELETE FROM mikasub_snapshots WHERE version=?", (row[0],))
+            return max(0, len(rows) - 2)
         result = await self.api("GET", "/api/v1/maintenance/versions")
         versions = result.get("versions")
         if not isinstance(versions, list):

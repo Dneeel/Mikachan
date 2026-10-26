@@ -88,16 +88,16 @@ routes remain usable. Search snippets are untrusted; the Agent must check dates
 and cite returned URLs. Provider quota and Telegram delivery still require live
 verification on each installation.
 
-Two Cloudflare Workers AI model nodes are packaged for Mika and Serious,
-using `@cf/google/gemma-4-26b-a4b-it`. Groq remains the default. Under
-**AI Models → Cloudflare Workers AI**, the manager can discover a single
-Cloudflare account, verify the token and model listing, and create an n8n
-credential with the account's OpenAI-compatible endpoint. The token stays in
-n8n's encrypted credential store, not Git or an environment file. The owner
-may then explicitly choose Cloudflare or Groq for each agent independently.
-The model does **not** switch on credential creation. Listing a model does not
-prove that inference fits the account's Free allowance or that this model can
-call the current tools; those need a controlled live check before selection.
+Two Cloudflare Workers AI HTTP Request nodes are packaged for Mika and Serious,
+using Cloudflare's REST endpoint for `@cf/google/gemma-4-26b-a4b-it`. Groq
+remains the default. Under **AI Models → Cloudflare Workers AI**, the manager
+can discover the account, verify the token and model listing, and create an
+encrypted Header Auth credential in n8n. The token is not stored in Git or
+an environment file. The owner may explicitly choose Cloudflare or Groq for
+each agent. Cloudflare selection uses a bounded direct HTTP call; it does not
+run the LangChain Agent or its Postgres Chat Memory node. The explicit private
+fact context still reaches that route. Listing a model does not prove Free
+quota or successful inference; test the chosen route before relying on it.
 
 TikTok `/explore` uses a public third-party hashtag lookup followed by that
 hashtag's post feed. The one-request-per-second challenge budget is enforced

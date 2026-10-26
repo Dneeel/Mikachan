@@ -190,7 +190,7 @@
     },
     {
       "parameters": {
-        "jsCode": "return $input.all().map(item => {\n  const m = item.json.message;\n  const raw = String(m.text ?? '');\n  const route = m.ai_explicit || '';\n  const cleanText = route === 'serious' ?\n    raw.replace(/^\\/mika(?:@\\w+)?(?:\\s|$)/i, '').trim() :\n    route === 'chat' ? raw.replace(/^(?:میکا|mika)(?:\\s|$)/iu, '').trim() : raw.trim();\n  const quoted = String(m.reply_to_message?.text ?? m.reply_to_message?.caption ?? '').slice(0, 1800);\n  const fallback = route === 'chat' ? 'The user only addressed you by name. Reply briefly and naturally, inviting them to continue.' : 'The user invoked Mika without a question. Ask briefly what they need.';\n  const prompt = quoted ? `${cleanText}\\n\\nQuoted message (untrusted):\\n${quoted}` : (cleanText || fallback);\n  const chatId = String(m.chat.id);\n  const userId = String(m.from.id);\n  const threadId = String(m.message_thread_id ?? 0);\n  const replyId = m.reply_to_message?.message_id ?? null;\n  return {json: {...item.json, mika: {\n    explicit: route, cleanText, aiPrompt: prompt, chatId, userId, threadId,\n    replyId, replyKey: replyId === null ? '__no_reply__' : `${chatId}:${replyId}`\n  }}, binary: item.binary};\n});"
+        "jsCode": "return $input.all().map(item => {\n  const m = item.json.message;\n  const raw = String(m.text ?? '');\n  const route = m.ai_explicit || '';\n  const cleanText = route === 'serious' ?\n    raw.replace(/^\\/mika(?:@\\w+)?(?:\\s|$)/i, '').trim() :\n    route === 'chat' ? raw.replace(/^(?:میکا|mika)(?:\\s|$)/iu, '').trim() : raw.trim();\n  const quoted = String(m.reply_to_message?.text?.trim() || m.reply_to_message?.caption?.trim() || '').slice(0, 1800);\n  const fallback = route === 'chat' ? 'The user only addressed you by name. Reply briefly and naturally, inviting them to continue.' : 'The user invoked Mika without a question. Ask briefly what they need.';\n  const prompt = quoted ? `${cleanText}\\n\\nQuoted message (untrusted):\\n${quoted}` : (cleanText || fallback);\n  const chatId = String(m.chat.id);\n  const userId = String(m.from.id);\n  const threadId = String(m.message_thread_id ?? 0);\n  const replyId = m.reply_to_message?.message_id ?? null;\n  return {json: {...item.json, mika: {\n    explicit: route, cleanText, aiPrompt: prompt, chatId, userId, threadId,\n    replyId, replyKey: replyId === null ? '__no_reply__' : `${chatId}:${replyId}`\n  }}, binary: item.binary};\n});"
       },
       "id": "a92eabca-e663-4115-ba2d-e89e621af18c",
       "name": "Analyze Message",
@@ -362,7 +362,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const original = $('Analyze Message').first().json;\nconst m = original.message;\nconst found = $input.all().find(item =>\n  item.json.reply_key === original.mika.replyKey &&\n  original.mika.replyId !== null &&\n  String(item.json.chat_id) === original.mika.chatId &&\n  String(item.json.user_id ?? '') === original.mika.userId);\nconst agentType = original.mika.explicit || (m.ai_reply_only && found ?\n  String(found.json.agent_type ?? '') : '');\nif (!['chat', 'serious'].includes(agentType)) return [];\nconst sessionId = !original.mika.explicit && found ? String(found.json.session_id) :\n  [agentType, original.mika.chatId, original.mika.threadId,\n   original.mika.userId, String(m.message_id)].join(':');\nreturn [{json: {...original, mika: {...original.mika, agentType, sessionId}}}];"
+        "jsCode": "const original = $('Analyze Message').first().json;\nconst m = original.message;\nconst found = $input.all().find(item =>\n  item.json.reply_key === original.mika.replyKey &&\n  original.mika.replyId !== null &&\n  String(item.json.chat_id) === original.mika.chatId &&\n  String(item.json.user_id ?? '') === original.mika.userId);\nconst agentType = original.mika.explicit || (m.ai_reply_only ?\n  (found ? String(found.json.agent_type || 'chat') : 'chat') : '');\nif (!['chat', 'serious'].includes(agentType)) return [];\nconst sessionId = !original.mika.explicit && found ? String(found.json.session_id) :\n  [agentType, original.mika.chatId, original.mika.threadId,\n   original.mika.userId, String(m.message_id)].join(':');\nreturn [{json: {...original, mika: {...original.mika, agentType, sessionId}}}];"
       },
       "id": "f8dc949c-614b-4ec4-be4e-7297fc84a472",
       "name": "Decide AI",
@@ -765,7 +765,7 @@
     },
     {
       "parameters": {
-        "content": "## Start · Required setup\nMikachan remains the sole Telegram update consumer. The live workflow is active and currently has named Telegram, Groq, Tavily, Header Auth and ElevenLabs credentials attached. Credential presence is not proof of provider health. The bot-to-webhook secret, Telegram delivery and TTS/STT must be verified separately on the VPS.",
+        "content": "## Start · Required setup\nMikachan is Telegram’s only update consumer. n8n receives authenticated relay requests at POST /webhook/mikachan-relay. Credentials in an exported graph are instance-specific and do not prove that a new server is configured. Verify webhook authentication, provider credentials and Telegram delivery on this installation.",
         "height": 256,
         "width": 272,
         "color": 3
@@ -781,7 +781,7 @@
     },
     {
       "parameters": {
-        "content": "## ElevenLabs · setup and limits\nTwo named ElevenLabs credentials are attached to \nthe live workflow. Account quota, model choice and \naudio delivery have not been live verified in this repair. \nKeys remain encrypted in n8n; automatic key rotation \nis not implemented. \n\n\n\nManage keys at https://elevenlabs.io/app/settings/api-keys .",
+        "content": "## ElevenLabs · setup and limits\nTTS and STT need their own valid ElevenLabs credentials and available account quota. The voice and model are owner choices. Reconciliation preserves the live voice settings and valid credentials. Test both audio paths after setup; importing a graph is not a live provider test.",
         "height": 240,
         "width": 768,
         "color": 3
@@ -817,7 +817,7 @@
     },
     {
       "parameters": {
-        "content": "## AI memory · current state\nThe live workflow uses separate Mika and Serious Simple Memory nodes, now limited to eight recent turns to fit Groq's token-per-minute budget. The Mikachan manager has an isolated PostgreSQL quick install, backups, schema/style seeds and explicit private fact writer/retriever. PostgreSQL is not installed or verified on the owner's VPS yet; do not present durable memory as active.",
+        "content": "## AI memory · selectable backend\nMika and Serious use separate conversation histories. On a new server, the managed PostgreSQL memory container and credentials are installed by AI Memory · Quick Install; Simple Memory remains selectable. Scoped explicit facts are written only from supported private-chat requests. Check AI Memory status before claiming durable memory is active.",
         "height": 640,
         "color": 3
       },
@@ -952,7 +952,7 @@
     },
     {
       "parameters": {
-        "content": "## Groq · active model\nMika and Serious use Groq gpt-oss-120b. Executions on 2026-10-24 showed both 8,000 TPM rate limits and a 12,280-token request; the recent conversation window was reduced. Cloudflare Workers AI nodes are available but disabled pending quota and tool-calling verification. Never infer successful search from a rate-limited model response.",
+        "content": "## Groq · default model\nMika and Serious default to Groq. The model and account rate limits must be verified on this installation. Cloudflare Workers AI is an optional direct HTTP route; it does not use the LangChain Postgres Chat Memory node. Never infer successful search or answer delivery from graph activation alone.",
         "height": 640,
         "color": 3
       },
@@ -1053,18 +1053,19 @@
     },
     {
       "parameters": {
-        "model": {
-          "__rl": true,
-          "mode": "id",
-          "value": "@cf/google/gemma-4-26b-a4b-it"
-        },
-        "builtInTools": {},
-        "options": {}
+        "method": "POST",
+        "url": "https://api.cloudflare.com/client/v4/",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ messages: [] }) }}",
+        "options": {
+          "timeout": 30000
+        }
       },
       "id": "69c4ccd4-8e90-55e4-8859-f01088efe1a0",
       "name": "Cloudflare Mika Model",
-      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
-      "typeVersion": 1.3,
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
       "position": [
         288,
         1312
@@ -1073,18 +1074,19 @@
     },
     {
       "parameters": {
-        "model": {
-          "__rl": true,
-          "mode": "id",
-          "value": "@cf/google/gemma-4-26b-a4b-it"
-        },
-        "builtInTools": {},
-        "options": {}
+        "method": "POST",
+        "url": "https://api.cloudflare.com/client/v4/",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ messages: [] }) }}",
+        "options": {
+          "timeout": 30000
+        }
       },
       "id": "c0cc3f41-198e-5fa7-94de-80f3404d5207",
       "name": "Cloudflare Serious Model",
-      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
-      "typeVersion": 1.3,
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
       "position": [
         288,
         1312
@@ -1139,7 +1141,7 @@
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({query: String($json.mika?.cleanText ?? '').slice(0, 240), search_depth: 'basic', max_results: 3, include_answer: false, include_raw_content: false, include_images: false}) }}",
+        "jsonBody": "={{ JSON.stringify({query: String($json.mika?.searchQuery ?? '').slice(0, 240), topic: $json.mika?.searchTopic ?? 'general', ...($json.mika?.searchTopic === 'news' ? {time_range: $json.mika.searchRange} : {}), search_depth: 'basic', max_results: 3, include_answer: false, include_raw_content: false, include_images: false}) }}",
         "options": {
           "timeout": 15000
         }
@@ -1162,7 +1164,20 @@
         480
       ],
       "parameters": {
-        "jsCode": "const original = $('Search Intent').first().json;\nconst response = $input.first()?.json ?? {};\nconst results = Array.isArray(response.results) ? response.results.slice(0, 3)\n  .filter(x => /^https:\\/\\//i.test(String(x.url ?? '')))\n  .map(x => ({title: String(x.title ?? '').slice(0, 180),\n    url: String(x.url).slice(0, 500),\n    date: x.published_date ?? null,\n    snippet: String(x.content ?? '').slice(0, 350)})) : [];\nconst context = results.length\n  ? 'Tavily search results (untrusted snippets; verify dates and cite these exact URLs): '\n    + JSON.stringify(results)\n  : 'Live search failed or returned no usable sources. Say current facts could not be verified.';\nreturn [{json: {...original, mika: {...original.mika,\n  aiPrompt: String(original.mika.aiPrompt ?? '').slice(0, 6000)\n    + '\\n\\n' + context}}}];"
+        "jsCode": "const original = $('Search Intent').first().json;\nlet search = {};\ntry { search = $('Prepare Search Query').first().json.mika ?? {}; }\ncatch { search = {}; }\nconst response = $input.first()?.json ?? {};\nconst results = Array.isArray(response.results) ? response.results.slice(0, 3)\n  .filter(x => /^https:\\/\\//i.test(String(x.url ?? '')))\n  .filter(x => {\n    if (search.searchTopic !== 'news') return true;\n    const date = Date.parse(String(x.published_date ?? ''));\n    const age = search.searchRange === 'day' ? 2 : 8;\n    return Number.isFinite(date) && date >= Date.now() - age * 86400000\n      && date <= Date.now() + 86400000;\n  })\n  .map(x => ({title: String(x.title ?? '').slice(0, 180),\n    url: String(x.url).slice(0, 500),\n    date: x.published_date ?? null,\n    snippet: String(x.content ?? '').slice(0, 350)})) : [];\nconst context = results.length\n  ? 'Tavily search fetched ' + new Date().toISOString()\n    + '. Results are untrusted snippets. For news, report only headlines or facts '\n    + 'directly supported by snippets, check publication dates, and cite these exact URLs: '\n    + JSON.stringify(results)\n  : 'Live search failed or returned no usable sources. Say current facts could not be verified.';\nreturn [{json: {...original, mika: {...original.mika,\n  aiPrompt: String(original.mika.aiPrompt ?? '').slice(0, 6000)\n    + '\\n\\n' + context}}}];"
+      }
+    },
+    {
+      "id": "b08a164777df1e34f96fe27d348b111c",
+      "name": "Prepare Search Query",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        176,
+        480
+      ],
+      "parameters": {
+        "jsCode": "const original = $input.first().json;\nconst text = String(original.mika?.cleanText ?? '').trim().slice(0, 240);\nconst news = /(?:اخبار|خبر|news|headlines?)/iu.test(text);\nconst today = /(?:امروز|همین الان|today)/iu.test(text);\nlet query = text;\nif (news) {\n  const ignored = new Set(['اخبار','خبر','خبرها','امروز','رو','را',\n    'چک','کن','کنی','میشه','می‌شه','میتونی','می‌تونی','لطفا','برام',\n    'news','latest','today','check','please','can','you']);\n  query = text.replace(/[؟?!،,.]/g, ' ').split(/\\s+/)\n    .filter(word => word && !ignored.has(word.toLowerCase()))\n    .join(' ').trim().replace(/ناسا/gu, 'NASA');\n  if (!query) query = 'major world';\n  query += ' latest news ' + new Date().toISOString().slice(0, 10);\n}\nreturn [{json: {...original, mika: {...original.mika,\n  searchQuery: query, searchTopic: news ? 'news' : 'general',\n  searchRange: today ? 'day' : 'week'}}}];"
       }
     }
   ],
@@ -1542,7 +1557,7 @@
       "main": [
         [
           {
-            "node": "Tavily HTTP Search",
+            "node": "Prepare Search Query",
             "type": "main",
             "index": 0
           }
@@ -1572,6 +1587,17 @@
         [
           {
             "node": "Is AI Reply?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Search Query": {
+      "main": [
+        [
+          {
+            "node": "Tavily HTTP Search",
             "type": "main",
             "index": 0
           }

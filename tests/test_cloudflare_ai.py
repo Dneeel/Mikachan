@@ -32,7 +32,9 @@ def test_prepare_discovers_single_account_and_keeps_models_disabled(tmp_path, mo
             if method == "GET":
                 return {"data": []}
             assert method == "POST" and path == "/credentials"
-            assert body["data"]["url"].endswith("/accounts/" + "a" * 32 + "/ai/v1")
+            assert body["type"] == "httpHeaderAuth"
+            assert body["data"] == {"name": "Authorization",
+                                    "value": "Bearer " + "t" * 40}
             return {"id": "cf-1"}
 
     monkeypatch.setattr(cloudflare_ai, "_cloudflare", cloudflare)
@@ -46,7 +48,7 @@ def test_prepare_discovers_single_account_and_keeps_models_disabled(tmp_path, mo
 
     def request(self, method, path, body=None):
         assert method == "GET"
-        return {"data": [{"id": "cf-1", "type": "openAiApi",
+        return {"data": [{"id": "cf-1", "type": "httpHeaderAuth",
                           "name": "Cloudflare Workers AI"}]}
 
     monkeypatch.setattr(Client, "request", request)
@@ -54,9 +56,10 @@ def test_prepare_discovers_single_account_and_keeps_models_disabled(tmp_path, mo
     graph = json.loads((Path(__file__).resolve().parents[1] /
         "deploy/n8n/mikachan_ai_workflow.json").read_text())
     _select_models(graph, state)
-    assert graph["connections"]["Groq Chat Model"]["ai_languageModel"] == [[]]
-    assert graph["connections"]["Cloudflare Mika Model"]["ai_languageModel"][0][0]["node"] == \
-        "AI Agent"
+    assert graph["connections"]["Is AI Reply?"]["main"][0][0]["node"] == \
+        "Cloudflare Mika Model"
+    assert graph["connections"]["Cloudflare Mika Model"]["main"][0][0]["node"] == \
+        "Cloudflare Mika Result"
     assert graph["connections"]["Groq Serious Model"]["ai_languageModel"][0][0]["node"] == \
         "Mika Serious Agent"
 
@@ -73,10 +76,16 @@ def test_explicit_selection_can_adopt_unique_existing_credential(tmp_path, monke
         def request(self, method, path, body=None):
             assert method == "GET" and path.startswith("/credentials?")
             return {"data": [{"id": "existing", "name": "Cloudflare Workers AI",
-                              "type": "openAiApi"}]}
+                              "type": "httpHeaderAuth"}]}
 
     monkeypatch.setattr(cloudflare_ai, "Client", Client)
     state = tmp_path / "ai"
+    state.mkdir()
+    marker_file = state / "cloudflare-ai.json"
+    marker_file.write_text(json.dumps({"credential_id": "existing",
+                                       "account_id": "a" * 32,
+                                       "binding_unverified": True}))
+    marker_file.chmod(0o600)
     assert cloudflare_ai.select("http://127.0.0.1:5678", key, state, "serious",
                                 "cloudflare")["status"] == "PROVIDER_SELECTED"
     marker = json.loads((state / "cloudflare-ai.json").read_text())

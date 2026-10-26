@@ -285,6 +285,29 @@ class Store:
             self.db.execute("ROLLBACK")
             raise
 
+    def decision_relay(self, cid: str, user: int, chat: int,
+                       prompt: int, yes: bool) -> tuple[str, str | None]:
+        """Consume a confirmation for an external relay without creating a local job."""
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            result: tuple[str, str | None]
+            row = self.db.execute("SELECT * FROM confirmations WHERE id=?", (cid,)).fetchone()
+            if (not row or row["user_id"] != user or row["chat_id"] != chat or
+                    row["prompt_id"] != prompt):
+                result = ("FORBIDDEN", None)
+            elif row["state"] != "PENDING":
+                result = ("ALREADY", None)
+            else:
+                state = "EXPIRED" if row["expires"] <= time.time() else \
+                        "ACCEPTED" if yes else "REJECTED"
+                self.db.execute("UPDATE confirmations SET state=? WHERE id=?", (state, cid))
+                result = (state, str(row["url"]) if state == "ACCEPTED" else None)
+            self.db.execute("COMMIT")
+            return result
+        except BaseException:
+            self.db.execute("ROLLBACK")
+            raise
+
     def create_job(
         self, user: int, chat: int, url: str,
         mode: str = "auto", context: dict[str, Any] | None = None,

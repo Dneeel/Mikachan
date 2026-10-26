@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from aiogram.types import CallbackQuery, Chat, Message, User
 
 from mikachan.groupstatus import GroupStatus, alias, window
 from mikachan.community import Community, CommunityStore
@@ -65,6 +66,22 @@ def test_registered_admin_grant_suspension_expiry_revocation(tmp_path):
         access.update_person(1, 2, status="ACTIVE")
 
 
+def test_primary_owner_can_manage_coowners_without_vps_approval(tmp_path):
+    store, access = registry(tmp_path)
+    access.update_person(1, 2, role="ADMIN")
+    with pytest.raises(ValueError, match="primary Owner"):
+        access.set_coowner(2, 1, True)
+    access.set_coowner(1, 2, True)
+    assert access.role(2) == "OWNER"
+    with pytest.raises(ValueError, match="primary Owner"):
+        access.set_coowner(2, 1, False)
+    access.set_coowner(1, 2, False)
+    assert access.role(2) == "ADMIN"
+    assert [r[0] for r in store.db.execute("SELECT action FROM access_audit "
+             "WHERE action LIKE 'coowner_%' ORDER BY id")] == [
+                 "coowner_promote", "coowner_revoke"]
+
+
 def test_group_status_and_admin_scope(tmp_path):
     _store, access = registry(tmp_path)
     access.register(1, 3, "Assigned admin", "ADMIN")
@@ -82,6 +99,32 @@ def test_group_status_and_admin_scope(tmp_path):
     settings.set_setting(-100, "groupstatus_user_enabled", "0")
     assert not stats.permitted(2, -100, "group")
     assert stats.permitted(3, -100, "group")
+
+
+@pytest.mark.asyncio
+async def test_group_status_close_deletes_the_bound_menu(tmp_path, monkeypatch):
+    store, access = registry(tmp_path)
+    stats = GroupStatus(store.db, access)
+    token = "menu-token"
+    stats.db.execute("INSERT INTO group_status_menus VALUES (?,?,?,?,?)",
+                     (token, 1, -100, 55, time.time() + 60))
+    close = AsyncMock()
+    answer = AsyncMock()
+    monkeypatch.setattr(Message, "delete", close)
+    monkeypatch.setattr(CallbackQuery, "answer", answer)
+    msg = Message(message_id=55, date=datetime.now(timezone.utc),
+                  chat=Chat(id=-100, type="supergroup"))
+    query = CallbackQuery(id="q", from_user=User(id=1, is_bot=False,
+        first_name="Owner"), chat_instance="chat", message=msg,
+        data=f"gs:{token}:close")
+    for page in ("menu", "all", "years"):
+        labels = [button.text for row in stats._buttons(token, page).inline_keyboard
+                  for button in row]
+        assert "✖ Close" in labels
+    assert await stats.callback(query, f"gs:{token}:close")
+    close.assert_awaited_once()
+    assert stats.db.execute("SELECT 1 FROM group_status_menus WHERE token=?",
+                            (token,)).fetchone() is None
 
 
 def test_suspension_cancels_queued_jobs(tmp_path):

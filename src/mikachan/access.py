@@ -35,6 +35,8 @@ CREATE TABLE IF NOT EXISTS owner_requests (
  action TEXT NOT NULL CHECK(action IN ('PROMOTE','REVOKE')),
  created REAL NOT NULL, expires REAL NOT NULL, status TEXT NOT NULL
  CHECK(status IN ('PENDING','APPROVED','EXPIRED')));
+CREATE TABLE IF NOT EXISTS coowner_origins (
+ user_id INTEGER PRIMARY KEY, prior_role TEXT NOT NULL CHECK(prior_role IN ('USER','ADMIN')));
 """
 
 MODULES = frozenset({"downloader", "community", "utilities", "follow", "content"})
@@ -188,6 +190,29 @@ class AccessRegistry:
                             (token, actor, target, action, now, now + 86400))
             self.audit(actor, "owner_request", target, detail=action)
         return token
+
+    def set_coowner(self, actor: int, target: int, enabled: bool) -> None:
+        """The protected primary owner directly manages co-owners in Telegram."""
+        if actor != self.primary_owner or self.role(actor) != "OWNER" or target == actor:
+            raise ValueError("Only the protected primary Owner can change co-owners")
+        person = self.person(target)
+        if not person or person["status"] != "ACTIVE" or \
+                (enabled and person["role"] not in {"USER", "ADMIN"}) or \
+                (not enabled and person["role"] != "OWNER"):
+            raise ValueError("Target must be an active registered person with the expected role")
+        with self._transaction():
+            if enabled:
+                self.db.execute("INSERT INTO coowner_origins VALUES (?,?) "
+                                "ON CONFLICT(user_id) DO NOTHING", (target, person["role"]))
+                role = "OWNER"
+            else:
+                original = self.db.execute("SELECT prior_role FROM coowner_origins "
+                                           "WHERE user_id=?", (target,)).fetchone()
+                role = str(original[0]) if original else "USER"
+                self.db.execute("DELETE FROM coowner_origins WHERE user_id=?", (target,))
+            self.db.execute("UPDATE people SET role=?,updated=? WHERE user_id=?",
+                            (role, time.time(), target))
+            self.audit(actor, "coowner_promote" if enabled else "coowner_revoke", target)
 
     def register(self, actor: int, user: int, name: str, role: str = "USER") -> None:
         if self.role(actor) != "OWNER" or role not in {"USER", "ADMIN"}:

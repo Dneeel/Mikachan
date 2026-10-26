@@ -1,4 +1,20 @@
-# MikaSub on Mikachan `v2`
+# MikaSub on Mikachan `v2.1`
+
+## Direct source mode
+
+When no MikaSub Worker URL is configured, Owner source controls and `/vpn` use
+Mikachan's existing SQLite database. **Update Now** downloads each enabled
+subscription document, parses supported share links, and atomically publishes
+the successful snapshot. The previous snapshot remains available if refresh
+fails. The bot serves the node list and exports in Telegram; no Cloudflare
+Worker or public subscription URL is needed for these actions. Source servers
+are not pinged or probed. A Worker remains an optional publication backend for
+owners who need a stable external subscription URL. If Worker settings already
+exist, the Owner can choose **Publication → Use Telegram sources**. Mikachan
+copies the accessible source definitions into SQLite, leaves the Worker and
+its old public URL intact, then switches the bot to local mode. **Update Now**
+builds the new local snapshot. The historical Worker
+state below describes that optional backend, not a requirement for `/vpn`.
 
 ## Current Cloudflare state (2026-10-24)
 

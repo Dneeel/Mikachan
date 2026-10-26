@@ -85,6 +85,10 @@ def test_highlight_pages_and_next_five_keep_close_button():
     assert [item.text for row in markup.inline_keyboard for item in row] == [
         "📥 Next 5 posts (30543 left)", "✖ Close"]
     assert "next_posts" in actions
+    markup, actions = relay._menu_markup("t", posts, completed_posts=True)
+    assert [item.text for row in markup.inline_keyboard for item in row] == [
+        "📥 Next 5 posts (30543 left)", "👤 Profile", "🙏 Thanks"]
+    assert "profile" in actions
 
 
 @pytest.mark.asyncio
