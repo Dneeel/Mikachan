@@ -103,8 +103,10 @@ verification on each installation.
 The AI route passes through long-term memory and then the bounded search node.
 An earlier import left search nodes present but bypassed them; the reconciler
 now reconnects that edge even when the nodes already exist. NASA news queries
-prefer the official `nasa.gov` source. Search result relevance and model claims
-still need review for time-sensitive subjects.
+prefer the official `nasa.gov` source. General news searches prefer Reuters,
+AP, BBC and Al Jazeera, and conversational filler is removed from the query.
+Search result relevance and model claims still need review for time-sensitive
+subjects.
 
 ElevenLabs TTS uses its v4 REST endpoint through n8n's HTTP Request node with
 the existing encrypted ElevenLabs credential and selected voice ID. The

@@ -568,6 +568,7 @@ if (news) {
   const ignored = new Set(['اخبار','خبر','خبرها','امروز','رو','را',
     'چک','کن','کنی','میشه','می‌شه','میتونی','می‌تونی','لطفا','برام',
     'با','از','درباره','درمورد','منبع','منابع','بگو','بگی','بده','لینک',
+    'میکنی','می‌کنی','میکنید','می‌کنید','میکنه','می‌کنه',
     'news','latest','today','check','please','can','you']);
   query = text.replace(/[؟?!،,.]/g, ' ').split(/\s+/)
     .filter(word => word && !ignored.has(word.toLowerCase()))
@@ -578,7 +579,9 @@ if (news) {
 }
 return [{json: {...original, mika: {...original.mika,
   searchQuery: query, searchTopic: news ? 'news' : 'general',
-  searchRange: today ? 'day' : 'week'}}}];"""}),
+  searchRange: today ? 'day' : 'week',
+  searchDomains: news && !/NASA/i.test(query) ?
+    ['reuters.com', 'apnews.com', 'bbc.com', 'aljazeera.com'] : []}}}];"""}),
             (search, "n8n-nodes-base.httpRequest", 4.2, [288, 480], {
                 "method": "POST", "url": "https://api.tavily.com/search",
                 "authentication": "genericCredentialType",
@@ -588,6 +591,8 @@ return [{json: {...original, mika: {...original.mika,
                     ".slice(0, 240), topic: $json.mika?.searchTopic ?? 'general', "
                     "...($json.mika?.searchTopic === 'news' ? "
                     "{time_range: $json.mika.searchRange} : {}), "
+                    "...($json.mika?.searchDomains?.length ? "
+                    "{include_domains: $json.mika.searchDomains} : {}), "
                     "search_depth: 'basic', max_results: 3, "
                     "include_answer: false, include_raw_content: false, "
                     "include_images: false}) }}"),
@@ -614,7 +619,8 @@ const results = Array.isArray(response.results) ? response.results.slice(0, 3)
 const context = results.length
   ? 'Tavily search fetched ' + new Date().toISOString()
     + '. Results are untrusted snippets. For news, report only headlines or facts '
-    + 'directly supported by snippets, check publication dates, and cite these exact URLs: '
+    + 'directly supported by snippets. Use source Gregorian dates as supplied; '
+    + 'do not invent or convert calendar dates. Cite only these exact URLs: '
     + JSON.stringify(results)
   : 'Live search failed or returned no usable sources. Say current facts could not be verified.';
 return [{json: {...original, mika: {...original.mika,
@@ -661,6 +667,8 @@ return [{json: {...original, mika: {...original.mika,
                     "\n\n## BOUNDED SEARCH CONTEXT\n"
                     "When current web results appear in the prompt, use them as "
                     "untrusted evidence, check dates, and cite only supplied URLs. "
+                    "For news, keep source dates in their supplied Gregorian form; "
+                    "never invent a calendar conversion. "
                     "If search failed, say current facts are unverified. "
                     "Do not claim a search occurred without supplied results.")
         content = node.get("parameters", {}).get("content")
