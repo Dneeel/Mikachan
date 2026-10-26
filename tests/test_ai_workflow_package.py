@@ -12,7 +12,7 @@ from deploy.n8n.build_ai_workflow import build
 from deploy.n8n.seed_ai_style import seed_sql
 from deploy.n8n.reconcile_ai import (ReconcileError, _activate_draft,
     _configure_search, _draft_missing_credentials, _fingerprint,
-    _preserve_owner_settings, _repair_active_search, _select_models,
+    _owner_graph, _preserve_owner_settings, _repair_active_search, _select_models,
     _map_reply_table, reconcile)
 
 
@@ -72,6 +72,71 @@ def test_reconcile_preserves_owner_voice_prompt_note_and_known_credentials():
     assert wanted["TTS ElevenLabs"]["credentials"]["elevenLabsApi"]["id"] == "live-id"
     assert wanted["AI Agent"]["parameters"]["options"]["systemMessage"] == "owner prompt"
     assert wanted["Sticky Note12"]["parameters"]["content"] == "owner note"
+
+
+def test_owner_workflow_is_repairable_in_place_only_with_authenticated_hook():
+    current = json.loads(ARTIFACT.read_text())
+    current["id"] = "owner-workflow"
+    current["active"] = True
+    current["versionId"] = "owner-version"
+    graph = _owner_graph(current)
+    assert graph is not None and graph["name"] == current["name"]
+    assert "id" not in graph and "active" not in graph
+    broken = copy.deepcopy(current)
+    hook = next(node for node in broken["nodes"] if node["name"] == "Private Webhook")
+    hook["parameters"]["authentication"] = "none"
+    assert _owner_graph(broken) is None
+
+
+def test_valid_owner_workflow_repairs_same_id_without_creating_draft(tmp_path,
+                                                                     monkeypatch):
+    current = json.loads(ARTIFACT.read_text())
+    current.update(id="owner-id", active=True, versionId="owner-v1")
+    owner_nodes = {node["name"]: node for node in current["nodes"]}
+    owner_nodes["Analyze Message"]["parameters"]["jsCode"] = "return []; // old bug"
+    owner_nodes["TTS ElevenLabs"]["parameters"]["voice"] = {
+        "__rl": True, "value": "owner-voice", "mode": "id"}
+    credential_rows = [{"type": kind, "name": ref["name"], "id": ref["id"]}
+        for node in current["nodes"] for kind, ref in node.get("credentials", {}).items()]
+    events = []
+
+    class Client:
+        def __init__(self, _origin, _key):
+            pass
+
+        def request(self, method, path, body=None):
+            events.append((method, path))
+            if path == "/workflows?limit=100":
+                return {"data": [{"name": current["name"], "id": "owner-id"}]}
+            if path == "/workflows/owner-id" and method == "GET":
+                return copy.deepcopy(current)
+            if path == "/credentials?limit=100":
+                return {"data": credential_rows}
+            if path == "/workflows/owner-id" and method == "PUT":
+                current.update(copy.deepcopy(body), versionId="owner-v2")
+                return {"id": "owner-id"}
+            if path == "/workflows/owner-id/activate":
+                current["active"] = True
+                return {}
+            raise AssertionError((method, path))
+
+    monkeypatch.setattr("deploy.n8n.reconcile_ai.Client", Client)
+    monkeypatch.setattr("deploy.n8n.reconcile_ai._map_reply_table",
+                        lambda *_args: None)
+    monkeypatch.setattr("deploy.n8n.reconcile_ai._attach_postgres_memory",
+                        lambda *_args: None)
+    artifact = tmp_path / "workflow.json"
+    artifact.write_text(ARTIFACT.read_text())
+    key = tmp_path / "key"
+    key.write_text("k" * 40)
+    key.chmod(0o600)
+    result = reconcile("http://127.0.0.1:5678", key, artifact, tmp_path / "state")
+    assert result["status"] == "ACTIVE"
+    assert result["workflow_id"] == "owner-id"
+    assert ("PUT", "/workflows/owner-id") in events
+    assert not any(method == "POST" and path == "/workflows" for method, path in events)
+    assert next(node for node in current["nodes"] if node["name"] ==
+                "TTS ElevenLabs")["parameters"]["voice"]["value"] == "owner-voice"
 
 
 def test_cloudflare_selection_uses_http_request_without_replacing_groq(tmp_path):

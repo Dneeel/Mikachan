@@ -783,19 +783,23 @@ class N8NManager:
         result["ai_reconcile"] = self._reconcile_ai()
         return result
 
-    def _reconcile_ai(self) -> dict[str, str]:
+    def _reconcile_ai(self, release: Path | None = None) -> dict[str, str]:
         """Optional internal AI import; n8n itself remains independently usable."""
         key = self.root / "ai/api-key"
-        release = Path("/opt/Mikachan/current/deploy/n8n")
-        script = release / "reconcile_ai.py"
+        release = release or Path("/opt/Mikachan/current/deploy/n8n")
         artifact = release / "mikachan_ai_workflow.json"
-        if not (key.is_file() and script.is_file() and artifact.is_file()):
+        if not (key.is_file() and (release / "reconcile_ai.py").is_file()
+                and artifact.is_file()):
             return {"status": "NOT_CONFIGURED"}
         origin = "http://127.0.0.1:5678"
-        result = self._run(sys.executable, str(script), "--origin", origin,
-                           "--key-file", str(key), "--artifact", str(artifact),
-                           "--state-dir", str(self.root / "ai"),
-                           check=False, timeout=90)
+        try:
+            result = subprocess.run([sys.executable, "-m", "deploy.n8n.reconcile_ai",
+                "--origin", origin, "--key-file", str(key),
+                "--artifact", str(artifact), "--state-dir", str(self.root / "ai")],
+                cwd=release.parents[1], capture_output=True, text=True,
+                timeout=90, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            return {"status": "RECOVERABLE", "reason": "AI workflow reconciliation timed out or could not start"}
         if result.returncode:
             return {"status": "RECOVERABLE", "reason": "AI workflow reconciliation failed"}
         try:

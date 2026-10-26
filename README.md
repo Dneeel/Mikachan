@@ -17,6 +17,9 @@ local unit test is not evidence of working live Telegram delivery.
 
 ## Install on a server
 
+For the complete Mikachan and n8n sequence, use the
+[v2.1 start-to-finish guide](docs/START_HERE_V2_1.md).
+
 Use a Debian or Ubuntu server with systemd, Python 3.12+, `sudo`, internet access, and at least 2 GB free disk for Mikachan alone. The installer installs host media tools, retrieves the selected `v2` release, runs offline tests, installs one systemd service, and opens the terminal panel. It **does not start the Telegram bot** until Guided setup is complete. An optional, independent n8n installation needs at least 6 GB free disk, 3 GB installed RAM, and 1.2 GB available RAM; its own preflight decides whether it can proceed safely.
 
 For a public repository, run this single line in an interactive SSH terminal:

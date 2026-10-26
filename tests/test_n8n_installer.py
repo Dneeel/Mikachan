@@ -6,6 +6,7 @@ import json
 import shutil
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -488,6 +489,26 @@ def test_ai_key_is_verified_before_private_save(manager, monkeypatch):
     with pytest.raises(n8n.N8NError):
         manager.connect_ai("short")
     assert key_file.read_text().strip() == "a" * 40
+
+
+def test_ai_reconcile_runs_as_module_from_mikachan_release(manager, monkeypatch,
+                                                           tmp_path):
+    release = tmp_path / "Mikachan" / "deploy" / "n8n"
+    release.mkdir(parents=True)
+    (release / "reconcile_ai.py").write_text("# test")
+    (release / "mikachan_ai_workflow.json").write_text("{}")
+    (manager.root / "ai").mkdir(parents=True, exist_ok=True)
+    (manager.root / "ai/api-key").write_text("k" * 40)
+    seen = {}
+
+    def run(command, **kwargs):
+        seen.update(command=command, cwd=kwargs["cwd"])
+        return SimpleNamespace(returncode=0, stdout='{"status":"ACTIVE"}')
+
+    monkeypatch.setattr(n8n.subprocess, "run", run)
+    assert manager._reconcile_ai(release)["status"] == "ACTIVE"
+    assert seen["command"][1:3] == ["-m", "deploy.n8n.reconcile_ai"]
+    assert seen["cwd"] == release.parents[1]
 
 
 def test_tavily_key_is_verified_and_only_saved_as_n8n_credential(manager, monkeypatch):

@@ -32,6 +32,35 @@ def _body(graph: dict[str, Any]) -> dict[str, Any]:
     return {key: graph[key] for key in ("name", "nodes", "connections", "settings")}
 
 
+def _owner_graph(current: dict[str, Any]) -> dict[str, Any] | None:
+    """Use a verified existing Mikachan graph as the repair source.
+
+    This keeps owner media settings, notes, memory and prompts on the same
+    workflow ID. A foreign workflow with the same name is never adopted.
+    """
+    from deploy.n8n.build_ai_workflow import build
+
+    try:
+        graph = build(current)
+    except (KeyError, TypeError, ValueError):
+        return None
+    nodes = {str(node.get("name")): node for node in graph.get("nodes", [])}
+    required = {"Private Webhook", "Telegram Trigger", "Analyze Message",
+                "Decide AI", "AI Agent", "Mika Serious Agent", "TTS ElevenLabs",
+                "STT ElevenLabs", "Get Mikasa"}
+    if not required <= nodes.keys():
+        return None
+    hooks = [node for node in graph["nodes"] if node.get("type") ==
+             "n8n-nodes-base.webhook" and not node.get("disabled")]
+    if len(hooks) != 1:
+        return None
+    params = hooks[0].get("parameters", {})
+    if (params.get("path"), params.get("httpMethod"),
+            params.get("authentication")) != ("mikachan-relay", "POST", "headerAuth"):
+        return None
+    return graph
+
+
 def _preserve_owner_settings(desired: dict[str, Any], current: dict[str, Any] | None,
                              credentials: list[dict[str, Any]]) -> None:
     """Carry instance-owned choices through a managed graph update.
@@ -194,6 +223,8 @@ class Client:
         try:
             with urllib.request.urlopen(request, timeout=20) as response:
                 result = json.load(response)
+        except urllib.error.HTTPError as exc:
+            raise ReconcileError(f"n8n API {method} {path} returned HTTP {exc.code}") from None
         except (urllib.error.URLError, TimeoutError, ValueError) as exc:
             # n8n error bodies can contain submitted values. Never print them.
             raise ReconcileError(f"n8n API {method} {path} failed") from exc
@@ -661,7 +692,6 @@ def reconcile(origin: str, key_file: Path, artifact: Path, state_dir: Path,
         return {"status": "NOT_CONFIGURED", "reason": "n8n API credential unavailable"}
     client = Client(origin, _private_file(key_file))
     desired = json.loads(artifact.read_text(encoding="utf-8"))
-    _select_models(desired, state_dir)
     state_file = state_dir / "workflow-state.json"
     previous = json.loads(state_file.read_text(encoding="utf-8")) if state_file.is_file() else {}
     listing = client.request("GET", "/workflows?limit=100").get("data", [])
@@ -670,6 +700,10 @@ def reconcile(origin: str, key_file: Path, artifact: Path, state_dir: Path,
         return {"status": "BLOCKED_CONFLICT", "reason": "Duplicate named workflows"}
     current = client.request("GET", "/workflows/" + str(matches[0]["id"])) if matches else None
     original = current
+    owner_graph = _owner_graph(current) if current else None
+    if owner_graph is not None:
+        desired = owner_graph
+    _select_models(desired, state_dir)
     conflict = False
     credential_rows = client.request("GET", "/credentials?limit=100").get("data", [])
     _preserve_owner_settings(desired, current, credential_rows)
@@ -677,6 +711,9 @@ def reconcile(origin: str, key_file: Path, artifact: Path, state_dir: Path,
                             for node in desired["nodes"] if not node.get("disabled")}
     needed = {(kind, ref.get("name")) for node in desired["nodes"]
               if not node.get("disabled")
+              and node.get("name") not in {"Tavily MCP", "Tavily MCP1", "Tavily MCP2",
+                  "Mika Wikipedia Fallback", "Mika News Fallback",
+                  "Serious Wikipedia Fallback", "Serious News Fallback"}
               for kind, ref in node.get("credentials", {}).items()
               if node.get("name") != "Tavily HTTP Search"}
     available = {(item.get("type"), item.get("name")): item.get("id")
@@ -722,7 +759,7 @@ def reconcile(origin: str, key_file: Path, artifact: Path, state_dir: Path,
             repaired_current = None
     known_repair = bool(repaired_current and
                         _fingerprint(repaired_current) == base_fingerprint)
-    if current and _fingerprint(current) != wanted and (not previous or
+    if current and owner_graph is None and _fingerprint(current) != wanted and (not previous or
             previous.get("id") != current.get("id") or
             previous.get("version_id") != current.get("versionId")) and \
             _fingerprint(current) != base_fingerprint and not known_repair:
@@ -796,7 +833,7 @@ def reconcile(origin: str, key_file: Path, artifact: Path, state_dir: Path,
     if conflict and current:
         return {"status": "DRAFT_EDITED", "workflow_id": str(current["id"]),
                 "reason": "Existing setup draft was edited; it was preserved"}
-    if current and (not previous or previous.get("id") != current.get("id") or
+    if current and owner_graph is None and (not previous or previous.get("id") != current.get("id") or
                     previous.get("version_id") != current.get("versionId")) and \
             _fingerprint(current) != base_fingerprint and not known_repair:
         return {"status": "BLOCKED_CONFLICT", "reason": "Existing workflow changed outside the reconciler"}
@@ -848,7 +885,11 @@ def main() -> None:
     parser.add_argument("--artifact", type=Path, required=True)
     parser.add_argument("--state-dir", type=Path, required=True)
     args = parser.parse_args()
-    print(json.dumps(reconcile(args.origin, args.key_file, args.artifact, args.state_dir)))
+    try:
+        result = reconcile(args.origin, args.key_file, args.artifact, args.state_dir)
+    except ReconcileError as exc:
+        result = {"status": "RECOVERABLE", "reason": str(exc)}
+    print(json.dumps(result))
 
 
 if __name__ == "__main__":
