@@ -142,6 +142,21 @@ async def test_bare_mika_call_responds_without_empty_agent_prompt():
 
 
 @pytest.mark.asyncio
+async def test_plain_mika_prompt_reports_unconnected_relay():
+    app = App.__new__(App)
+    app.settings = SimpleNamespace(mika_n8n_telegram_relay=False)
+    app.authorized = lambda *_args: True
+    app.module_enabled = lambda *_args: True
+    for text in ("میکا سلام", "can i see you"):
+        message = SimpleNamespace(from_user=SimpleNamespace(id=7),
+            chat=SimpleNamespace(id=7, type="private"), text=text,
+            reply_to_message=None, new_chat_members=None, reply=AsyncMock())
+        await app.message(message)
+        message.reply.assert_awaited_once_with(
+            "Mika is not connected to the owner's n8n workflow yet.")
+
+
+@pytest.mark.asyncio
 async def test_plain_reply_to_bot_is_marked_for_ai_row_verification():
     app = App.__new__(App)
     app.store = SimpleNamespace(rate=lambda *_args: True)

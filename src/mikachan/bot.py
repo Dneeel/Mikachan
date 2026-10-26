@@ -565,12 +565,14 @@ class App:
             self.store.clear_query(m.from_user.id, m.chat.id)
             await self.command(m, text)
             return
-        if (self.settings.mika_n8n_telegram_relay and
-                self.module_enabled("utilities", m.chat.id) and
+        if (self.module_enabled("utilities", m.chat.id) and
                 (text == "میکا" or text.startswith("میکا ") or
                  re.match(r"^mika(?:\s|$)", text, re.I) or
                  text.casefold() == "can i see you")):
-            await self.relay_n8n_command(m, text)
+            if self.settings.mika_n8n_telegram_relay:
+                await self.relay_n8n_command(m, text)
+            else:
+                await m.reply("Mika is not connected to the owner's n8n workflow yet.")
             return
         if hasattr(self, "community") and await self.community.search_reply(m):
             return
