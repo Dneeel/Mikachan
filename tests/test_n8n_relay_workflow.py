@@ -137,7 +137,7 @@ async def test_bare_mika_call_responds_without_empty_agent_prompt():
         chat=SimpleNamespace(id=7, type="private"), message_id=15,
         reply_to_message=None, reply=AsyncMock())
     await app.relay_n8n_command(message, "میکا")
-    message.reply.assert_awaited_once_with("I'm here, darling. What do you need?")
+    message.reply.assert_awaited_once_with("اینجام دنی. چی شده؟")
     app.n8n_gateway.relay_telegram.assert_not_awaited()
 
 
