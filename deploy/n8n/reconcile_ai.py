@@ -531,11 +531,13 @@ def _configure_search(desired: dict[str, Any],
         prepare = "Prepare Search Query"
         search = "Tavily HTTP Search"
         attach = "Attach Search Results"
+        news_gate = "Is News Result?"
+        news_render = "Render Sourced Headlines"
         # Memory can be added after a previous search repair. Always reconnect
         # its exit to Search Intent, including when the search nodes exist.
         incoming = []
         for source, ports in desired["connections"].items():
-            if source in {entry, attach}:
+            if source in {entry, attach, news_gate}:
                 continue
             for row in ports.get("main", []):
                 for edge in row:
@@ -547,7 +549,7 @@ def _configure_search(desired: dict[str, Any],
             incoming[0][1]["node"] = entry
         elif not any(edge.get("node") == entry
                      for source, ports in desired["connections"].items()
-                     if source not in {entry, attach}
+                     if source not in {entry, attach, news_gate}
                      for row in ports.get("main", []) for edge in row):
             raise ReconcileError("AI route has no search insertion point")
         definitions = (
@@ -555,13 +557,16 @@ def _configure_search(desired: dict[str, Any],
                 "conditions": {"options": {"caseSensitive": False,
                     "leftValue": "", "typeValidation": "strict", "version": 4},
                     "conditions": [{"id": "mikachan-search-intent",
-                        "leftValue": "={{ /(?:اخبار|خبر|آخرین|جدیدترین|امروز|الان|به.?روز|جست.?وجو|سرچ|تحقیق|قیمت|نرخ|هواشناسی|news|latest|today|current|recent|search|browse|look up|weather|price)/iu.test(String($json.mika?.cleanText ?? '')) }}",
+                        "leftValue": "={{ /(?:اخبار|خبر|آخرین|جدیدترین|امروز|الان|وضعیت|بررسی|چک|تا حالا|به.?روز|جست.?وجو|سرچ|تحقیق|قیمت|نرخ|هواشناسی|ایران.*اسرائیل|اسرائیل.*ایران|news|latest|today|current|recent|search|browse|look up|weather|price)/iu.test(String($json.mika?.cleanText ?? '')) }}",
                         "operator": {"type": "boolean", "operation": "true"}}],
                     "combinator": "and"}, "options": {}}),
             (prepare, "n8n-nodes-base.code", 2, [176, 480], {
                 "jsCode": r"""const original = $input.first().json;
 const text = String(original.mika?.cleanText ?? '').trim().slice(0, 240);
-const news = /(?:اخبار|خبر|news|headlines?)/iu.test(text);
+const conflict = /(?:ایران.*اسرائیل|اسرائیل.*ایران)/iu.test(text) &&
+  /(?:جنگ|درگیری|وضعیت|تا حالا)/iu.test(text);
+const news = /(?:اخبار|خبر|news|headlines?)/iu.test(text) || conflict ||
+  /وضعیت.*جنگ/iu.test(text);
 const today = /(?:امروز|همین الان|today)/iu.test(text);
 let query = text;
 if (news) {
@@ -569,8 +574,9 @@ if (news) {
     'چک','کن','کنی','میشه','می‌شه','میتونی','می‌تونی','لطفا','برام',
     'با','از','درباره','درمورد','منبع','منابع','بگو','بگی','بده','لینک',
     'میکنی','می‌کنی','میکنید','می‌کنید','میکنه','می‌کنه',
+    'منظورم','یه','یک','خلاصه','نظر','نظرت','رو','بکن','بکنید',
     'news','latest','today','check','please','can','you']);
-  query = text.replace(/[؟?!،,.]/g, ' ').split(/\s+/)
+  query = text.replace(/اسرائیله/gu, 'اسرائیل').replace(/[؟?!،,.]/g, ' ').split(/\s+/)
     .filter(word => word && !ignored.has(word.toLowerCase()))
     .join(' ').trim().replace(/ناسا/gu, 'NASA');
   if (!query) query = 'major world';
@@ -625,7 +631,32 @@ const context = results.length
   : 'Live search failed or returned no usable sources. Say current facts could not be verified.';
 return [{json: {...original, mika: {...original.mika,
   aiPrompt: String(original.mika.aiPrompt ?? '').slice(0, 6000)
-    + '\n\n' + context}}}];"""}),
+    + '\n\n' + context,
+  searchTopic: search.searchTopic ?? 'general', searchSources: results}}}];"""}),
+            (news_gate, "n8n-nodes-base.if", 2.4, [624, 480], {
+                "conditions": {"options": {"caseSensitive": True,
+                    "leftValue": "", "typeValidation": "strict", "version": 4},
+                    "conditions": [{"id": "mikachan-news-result",
+                        "leftValue": "={{ $json.mika.searchTopic === 'news' }}",
+                        "operator": {"type": "boolean", "operation": "true"}}],
+                    "combinator": "and"}, "options": {}}),
+            (news_render, "n8n-nodes-base.code", 2, [736, 480], {
+                "jsCode": r"""const item = $input.first();
+const sources = Array.isArray(item.json.mika?.searchSources)
+  ? item.json.mika.searchSources.slice(0, 3) : [];
+const lines = sources.map((source, index) => {
+  const title = String(source.title ?? '').trim().slice(0, 180);
+  const url = String(source.url ?? '');
+  const parsed = Date.parse(String(source.date ?? ''));
+  const date = Number.isFinite(parsed) ? new Date(parsed).toISOString().slice(0, 10)
+    : 'Date unknown';
+  const host = url.match(/^https:\/\/([^/]+)/i)?.[1] ?? 'Source';
+  return `${index + 1}. ${title}\n${date} · ${host}\n${url}`;
+});
+const output = lines.length
+  ? `📰 News · ${new Date().toISOString().slice(0, 10)} UTC\n\n${lines.join('\n\n')}\n\nSource headlines only. Full articles were not independently verified.`
+  : 'I could not verify recent headlines from the selected sources. Try a more specific topic.';
+return [{json: {...item.json, output}}];"""}),
         )
         for name, kind, version, position, parameters in definitions:
             if name not in nodes:
@@ -653,7 +684,12 @@ return [{json: {...original, mika: {...original.mika,
         desired["connections"][search] = {"main": [[{
             "node": attach, "type": "main", "index": 0}]]}
         desired["connections"][attach] = {"main": [[{
-            "node": "Is AI Reply?", "type": "main", "index": 0}]]}
+            "node": news_gate, "type": "main", "index": 0}]]}
+        desired["connections"][news_gate] = {"main": [
+            [{"node": news_render, "type": "main", "index": 0}],
+            [{"node": "Is AI Reply?", "type": "main", "index": 0}]]}
+        desired["connections"][news_render] = {"main": [[{
+            "node": "Send a text message", "type": "main", "index": 0}]]}
     for node in desired["nodes"]:
         if node.get("name") in {"AI Agent", "Mika Serious Agent"}:
             options = node.get("parameters", {}).get("options", {})

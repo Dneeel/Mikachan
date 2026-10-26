@@ -1108,7 +1108,7 @@
           "conditions": [
             {
               "id": "mikachan-search-intent",
-              "leftValue": "={{ /(?:اخبار|خبر|آخرین|جدیدترین|امروز|الان|به.?روز|جست.?وجو|سرچ|تحقیق|قیمت|نرخ|هواشناسی|news|latest|today|current|recent|search|browse|look up|weather|price)/iu.test(String($json.mika?.cleanText ?? '')) }}",
+              "leftValue": "={{ /(?:اخبار|خبر|آخرین|جدیدترین|امروز|الان|وضعیت|بررسی|چک|تا حالا|به.?روز|جست.?وجو|سرچ|تحقیق|قیمت|نرخ|هواشناسی|ایران.*اسرائیل|اسرائیل.*ایران|news|latest|today|current|recent|search|browse|look up|weather|price)/iu.test(String($json.mika?.cleanText ?? '')) }}",
               "operator": {
                 "type": "boolean",
                 "operation": "true"
@@ -1159,7 +1159,7 @@
         480
       ],
       "parameters": {
-        "jsCode": "const original = $('Search Intent').first().json;\nlet search = {};\ntry { search = $('Prepare Search Query').first().json.mika ?? {}; }\ncatch { search = {}; }\nconst response = $input.first()?.json ?? {};\nconst results = Array.isArray(response.results) ? response.results.slice(0, 3)\n  .filter(x => /^https:\\/\\//i.test(String(x.url ?? '')))\n  .filter(x => {\n    if (search.searchTopic !== 'news') return true;\n    const date = Date.parse(String(x.published_date ?? ''));\n    const age = search.searchRange === 'day' ? 2 : 8;\n    return Number.isFinite(date) && date >= Date.now() - age * 86400000\n      && date <= Date.now() + 86400000;\n  })\n  .map(x => ({title: String(x.title ?? '').slice(0, 180),\n    url: String(x.url).slice(0, 500),\n    date: x.published_date ?? null,\n    snippet: String(x.content ?? '').slice(0, 350)})) : [];\nconst context = results.length\n  ? 'Tavily search fetched ' + new Date().toISOString()\n    + '. Results are untrusted snippets. For news, report only headlines or facts '\n    + 'directly supported by snippets. Use source Gregorian dates as supplied; '\n    + 'do not invent or convert calendar dates. Cite only these exact URLs: '\n    + JSON.stringify(results)\n  : 'Live search failed or returned no usable sources. Say current facts could not be verified.';\nreturn [{json: {...original, mika: {...original.mika,\n  aiPrompt: String(original.mika.aiPrompt ?? '').slice(0, 6000)\n    + '\\n\\n' + context}}}];"
+        "jsCode": "const original = $('Search Intent').first().json;\nlet search = {};\ntry { search = $('Prepare Search Query').first().json.mika ?? {}; }\ncatch { search = {}; }\nconst response = $input.first()?.json ?? {};\nconst results = Array.isArray(response.results) ? response.results.slice(0, 3)\n  .filter(x => /^https:\\/\\//i.test(String(x.url ?? '')))\n  .filter(x => {\n    if (search.searchTopic !== 'news') return true;\n    const date = Date.parse(String(x.published_date ?? ''));\n    const age = search.searchRange === 'day' ? 2 : 8;\n    return Number.isFinite(date) && date >= Date.now() - age * 86400000\n      && date <= Date.now() + 86400000;\n  })\n  .map(x => ({title: String(x.title ?? '').slice(0, 180),\n    url: String(x.url).slice(0, 500),\n    date: x.published_date ?? null,\n    snippet: String(x.content ?? '').slice(0, 350)})) : [];\nconst context = results.length\n  ? 'Tavily search fetched ' + new Date().toISOString()\n    + '. Results are untrusted snippets. For news, report only headlines or facts '\n    + 'directly supported by snippets. Use source Gregorian dates as supplied; '\n    + 'do not invent or convert calendar dates. Cite only these exact URLs: '\n    + JSON.stringify(results)\n  : 'Live search failed or returned no usable sources. Say current facts could not be verified.';\nreturn [{json: {...original, mika: {...original.mika,\n  aiPrompt: String(original.mika.aiPrompt ?? '').slice(0, 6000)\n    + '\\n\\n' + context,\n  searchTopic: search.searchTopic ?? 'general', searchSources: results}}}];"
       }
     },
     {
@@ -1172,7 +1172,7 @@
         480
       ],
       "parameters": {
-        "jsCode": "const original = $input.first().json;\nconst text = String(original.mika?.cleanText ?? '').trim().slice(0, 240);\nconst news = /(?:اخبار|خبر|news|headlines?)/iu.test(text);\nconst today = /(?:امروز|همین الان|today)/iu.test(text);\nlet query = text;\nif (news) {\n  const ignored = new Set(['اخبار','خبر','خبرها','امروز','رو','را',\n    'چک','کن','کنی','میشه','می‌شه','میتونی','می‌تونی','لطفا','برام',\n    'با','از','درباره','درمورد','منبع','منابع','بگو','بگی','بده','لینک',\n    'میکنی','می‌کنی','میکنید','می‌کنید','میکنه','می‌کنه',\n    'news','latest','today','check','please','can','you']);\n  query = text.replace(/[؟?!،,.]/g, ' ').split(/\\s+/)\n    .filter(word => word && !ignored.has(word.toLowerCase()))\n    .join(' ').trim().replace(/ناسا/gu, 'NASA');\n  if (!query) query = 'major world';\n  if (/NASA/i.test(query)) query += ' site:nasa.gov';\n  query += ' latest news ' + new Date().toISOString().slice(0, 10);\n}\nreturn [{json: {...original, mika: {...original.mika,\n  searchQuery: query, searchTopic: news ? 'news' : 'general',\n  searchRange: today ? 'day' : 'week',\n  searchDomains: news && !/NASA/i.test(query) ?\n    ['reuters.com', 'apnews.com', 'bbc.com', 'aljazeera.com'] : []}}}];"
+        "jsCode": "const original = $input.first().json;\nconst text = String(original.mika?.cleanText ?? '').trim().slice(0, 240);\nconst conflict = /(?:ایران.*اسرائیل|اسرائیل.*ایران)/iu.test(text) &&\n  /(?:جنگ|درگیری|وضعیت|تا حالا)/iu.test(text);\nconst news = /(?:اخبار|خبر|news|headlines?)/iu.test(text) || conflict ||\n  /وضعیت.*جنگ/iu.test(text);\nconst today = /(?:امروز|همین الان|today)/iu.test(text);\nlet query = text;\nif (news) {\n  const ignored = new Set(['اخبار','خبر','خبرها','امروز','رو','را',\n    'چک','کن','کنی','میشه','می‌شه','میتونی','می‌تونی','لطفا','برام',\n    'با','از','درباره','درمورد','منبع','منابع','بگو','بگی','بده','لینک',\n    'میکنی','می‌کنی','میکنید','می‌کنید','میکنه','می‌کنه',\n    'منظورم','یه','یک','خلاصه','نظر','نظرت','رو','بکن','بکنید',\n    'news','latest','today','check','please','can','you']);\n  query = text.replace(/اسرائیله/gu, 'اسرائیل').replace(/[؟?!،,.]/g, ' ').split(/\\s+/)\n    .filter(word => word && !ignored.has(word.toLowerCase()))\n    .join(' ').trim().replace(/ناسا/gu, 'NASA');\n  if (!query) query = 'major world';\n  if (/NASA/i.test(query)) query += ' site:nasa.gov';\n  query += ' latest news ' + new Date().toISOString().slice(0, 10);\n}\nreturn [{json: {...original, mika: {...original.mika,\n  searchQuery: query, searchTopic: news ? 'news' : 'general',\n  searchRange: today ? 'day' : 'week',\n  searchDomains: news && !/NASA/i.test(query) ?\n    ['reuters.com', 'apnews.com', 'bbc.com', 'aljazeera.com'] : []}}}];"
       }
     },
     {
@@ -1186,6 +1186,51 @@
       ],
       "parameters": {
         "jsCode": "const item = $input.first();\nconst m = item.json.message ?? {};\nconst text = String(m.reply_to_message?.text || m.text?.replace(/^\\/tts(?:@\\w+)?\\s*/i, '') || '').trim();\nif (!text) throw new Error('TTS needs text');\nreturn [{json: {...item.json, ttsRequest: {\"model_id\": \"eleven_v4\", \"voice_settings\": {\"stability\": 1, \"similarity_boost\": 1, \"style\": 0, \"use_speaker_boost\": true, \"speed\": 1}, text}}, binary: item.binary}];"
+      }
+    },
+    {
+      "id": "2d0a24aad148559805505de02ef2b15d",
+      "name": "Is News Result?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.4,
+      "position": [
+        624,
+        480
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 4
+          },
+          "conditions": [
+            {
+              "id": "mikachan-news-result",
+              "leftValue": "={{ $json.mika.searchTopic === 'news' }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "c79e48d700e03ad49c917bb6b9217c59",
+      "name": "Render Sourced Headlines",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        736,
+        480
+      ],
+      "parameters": {
+        "jsCode": "const item = $input.first();\nconst sources = Array.isArray(item.json.mika?.searchSources)\n  ? item.json.mika.searchSources.slice(0, 3) : [];\nconst lines = sources.map((source, index) => {\n  const title = String(source.title ?? '').trim().slice(0, 180);\n  const url = String(source.url ?? '');\n  const parsed = Date.parse(String(source.date ?? ''));\n  const date = Number.isFinite(parsed) ? new Date(parsed).toISOString().slice(0, 10)\n    : 'Date unknown';\n  const host = url.match(/^https:\\/\\/([^/]+)/i)?.[1] ?? 'Source';\n  return `${index + 1}. ${title}\\n${date} · ${host}\\n${url}`;\n});\nconst output = lines.length\n  ? `📰 News · ${new Date().toISOString().slice(0, 10)} UTC\\n\\n${lines.join('\\n\\n')}\\n\\nSource headlines only. Full articles were not independently verified.`\n  : 'I could not verify recent headlines from the selected sources. Try a more specific topic.';\nreturn [{json: {...item.json, output}}];"
       }
     }
   ],
@@ -1594,7 +1639,7 @@
       "main": [
         [
           {
-            "node": "Is AI Reply?",
+            "node": "Is News Result?",
             "type": "main",
             "index": 0
           }
@@ -1617,6 +1662,35 @@
         [
           {
             "node": "TTS ElevenLabs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is News Result?": {
+      "main": [
+        [
+          {
+            "node": "Render Sourced Headlines",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Is AI Reply?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Render Sourced Headlines": {
+      "main": [
+        [
+          {
+            "node": "Send a text message",
             "type": "main",
             "index": 0
           }

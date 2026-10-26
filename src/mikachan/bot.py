@@ -378,6 +378,11 @@ class App:
             await m.reply(response("called", self.personality_mode(
                 m.from_user.id, m.chat.type)))
             return
+        if (re.search(r"جنگ\s+ایران(?:و|رو|را)?(?=\s|$|[،؟?!])", text) and
+                not re.search(r"عراق|اسرائیل|اسراییل|اسرائيل|افغانستان|آمریکا|امریکا",
+                              text)):
+            await m.reply("منظورت جنگ ایران و عراق است یا درگیری ایران و اسرائیل؟")
+            return
         if not self.store.rate(m.from_user.id, "n8n_relay", 6):
             await m.reply("Too many audio or AI requests. Try again shortly.")
             return

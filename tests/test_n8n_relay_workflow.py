@@ -142,6 +142,21 @@ async def test_bare_mika_call_responds_without_empty_agent_prompt():
 
 
 @pytest.mark.asyncio
+async def test_ambiguous_iran_war_request_asks_before_ai_infers_a_conflict():
+    app = App.__new__(App)
+    app.store = SimpleNamespace(rate=lambda *_args: True)
+    app.n8n_gateway = SimpleNamespace(relay_telegram=AsyncMock())
+    app.authorized = lambda *_args: True
+    message = SimpleNamespace(from_user=SimpleNamespace(id=7),
+        chat=SimpleNamespace(id=7, type="private"), message_id=42,
+        reply_to_message=None, reply=AsyncMock())
+    await app.relay_n8n_command(message, "میکا یه چک بکن وضعیت جنگ ایرانو خلاصه بگو")
+    message.reply.assert_awaited_once_with(
+        "منظورت جنگ ایران و عراق است یا درگیری ایران و اسرائیل؟")
+    app.n8n_gateway.relay_telegram.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_plain_mika_prompt_reports_unconnected_relay():
     app = App.__new__(App)
     app.settings = SimpleNamespace(mika_n8n_telegram_relay=False)

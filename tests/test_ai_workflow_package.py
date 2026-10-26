@@ -43,6 +43,14 @@ def test_search_reconnects_after_long_term_memory_is_added():
         "Prepare Search Query"
     assert graph["connections"]["Tavily HTTP Search"]["main"][0][0]["node"] == \
         "Attach Search Results"
+    assert graph["connections"]["Attach Search Results"]["main"][0][0]["node"] == \
+        "Is News Result?"
+    assert graph["connections"]["Is News Result?"]["main"][0][0]["node"] == \
+        "Render Sourced Headlines"
+    assert graph["connections"]["Is News Result?"]["main"][1][0]["node"] == \
+        "Is AI Reply?"
+    assert graph["connections"]["Render Sourced Headlines"]["main"][0][0]["node"] == \
+        "Send a text message"
     first = _fingerprint(graph)
     _configure_search(graph, "search-credential")
     assert _fingerprint(graph) == first

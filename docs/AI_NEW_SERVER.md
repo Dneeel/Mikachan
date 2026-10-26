@@ -88,10 +88,11 @@ Serious PostgreSQL chat-memory nodes and an explicit fact write/read on one
 instance; the synthetic test fact and identity were removed afterward.
 General chat does not automatically create durable facts.
 
-Search requests take one bounded Tavily HTTP request before either Agent. Up to
-three titles, URLs and short snippets are passed to a single Groq call; ordinary
-chat bypasses Tavily. This avoids the extra Groq calls made by the former MCP
-tool path. The Tavily key lives only in n8n's encrypted **Mikachan Tavily Search**
+Search requests take one bounded Tavily HTTP request. For non-news searches,
+up to three titles, URLs and short snippets are passed to a single Groq call;
+ordinary chat bypasses Tavily. News headlines are rendered directly from the
+source results without a Groq call. This avoids the extra Groq calls made by
+the former MCP tool path. The Tavily key lives only in n8n's encrypted **Mikachan Tavily Search**
 Header Auth credential, restricted to `api.tavily.com`. Connect it once through
 **n8n-manage → AI Search · Tavily** or `n8n-manage ai-search-connect` after the
 n8n API key is connected. The key is not saved in Mikachan files. Without it,
@@ -105,8 +106,12 @@ An earlier import left search nodes present but bypassed them; the reconciler
 now reconnects that edge even when the nodes already exist. NASA news queries
 prefer the official `nasa.gov` source. General news searches prefer Reuters,
 AP, BBC and Al Jazeera, and conversational filler is removed from the query.
-Search result relevance and model claims still need review for time-sensitive
-subjects.
+News and current-conflict requests return source headlines, publication dates
+and direct links. They bypass free-form model summaries so the bot cannot
+invent events or calendar conversions from snippets. Other search requests
+still reach Mika or Serious with bounded source context. If an Iran-war
+request does not identify the other party, the bot asks for clarification.
+Source relevance still depends on the provider's indexing.
 
 ElevenLabs TTS uses its v4 REST endpoint through n8n's HTTP Request node with
 the existing encrypted ElevenLabs credential and selected voice ID. The
