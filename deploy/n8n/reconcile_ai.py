@@ -108,6 +108,81 @@ def _fingerprint(graph: dict[str, Any]) -> str:
         sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
+def _configure_tts_v4(graph: dict[str, Any]) -> None:
+    """Use ElevenLabs' working REST route for v4 while keeping the owner's voice.
+
+    The installed community node sends an invalid v4 request (HTTP 400,
+    invalid_uid). The same credential and voice work with the v4 REST API.
+    Other model choices and an already configured HTTP node are left alone.
+    """
+    node = next((item for item in graph.get("nodes", []) if
+                 item.get("name") == "TTS ElevenLabs"), None)
+    if not node or node.get("type") == "n8n-nodes-base.httpRequest":
+        return
+    if node.get("type") != "@elevenlabs/n8n-nodes-elevenlabs.elevenLabs":
+        raise ReconcileError("TTS ElevenLabs node type is unsupported")
+    params = node.get("parameters", {})
+    options = params.get("additionalOptions", {})
+    model = options.get("model", {})
+    model_id = model.get("value") if isinstance(model, dict) else model
+    # n8n can clear a list-mode resource locator during import even when the
+    # export selected v4. An empty selection is not a usable model choice.
+    if not model_id:
+        model_id = "eleven_v4"
+    if model_id not in {"eleven_v4", "eleven_v4_turbo"}:
+        return
+    voice = params.get("voice", {})
+    voice_id = voice.get("value") if isinstance(voice, dict) else voice
+    if not isinstance(voice_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{10,80}", voice_id):
+        raise ReconcileError("ElevenLabs v4 voice ID is invalid")
+    output_format = options.get("outputFormat", "mp3_44100_128")
+    if not isinstance(output_format, str) or not re.fullmatch(r"mp3_[0-9]+_[0-9]+", output_format):
+        output_format = "mp3_44100_128"
+    body: dict[str, Any] = {"model_id": model_id}
+    try:
+        settings = options.get("voiceSettings")
+        if isinstance(settings, str):
+            body["voice_settings"] = json.loads(settings)
+        elif isinstance(settings, dict):
+            body["voice_settings"] = settings
+    except json.JSONDecodeError:
+        pass
+    body_js = json.dumps(body, ensure_ascii=False)
+    prepare = "Prepare TTS Text"
+    if prepare not in {item.get("name") for item in graph["nodes"]}:
+        graph["nodes"].append({"id": hashlib.sha256(prepare.encode()).hexdigest()[:32],
+            "name": prepare, "type": "n8n-nodes-base.code", "typeVersion": 2,
+            "position": [node["position"][0] - 160, node["position"][1]],
+            "parameters": {"jsCode": "const item = $input.first();\n"
+                "const m = item.json.message ?? {};\n"
+                "const text = String(m.reply_to_message?.text || "
+                "m.text?.replace(/^\\/tts(?:@\\w+)?\\s*/i, '') || '').trim();\n"
+                "if (!text) throw new Error('TTS needs text');\n"
+                "return [{json: {...item.json, ttsRequest: " + body_js[:-1] +
+                ", text}}, binary: item.binary}];"}})
+    for ports in graph["connections"].values():
+        for row in ports.get("main", []):
+            for edge in row:
+                if edge.get("node") == "TTS ElevenLabs":
+                    edge["node"] = prepare
+    graph["connections"][prepare] = {"main": [[{
+        "node": "TTS ElevenLabs", "type": "main", "index": 0}]]}
+    node["type"] = "n8n-nodes-base.httpRequest"
+    node["typeVersion"] = 4.2
+    node["parameters"] = {
+        "method": "POST",
+        "url": "https://api.elevenlabs.io/v1/text-to-speech/" + voice_id +
+               "?output_format=" + output_format,
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "elevenLabsApi",
+        "sendBody": True,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.ttsRequest) }}",
+        "options": {"timeout": 30000, "response": {"response": {
+            "responseFormat": "file"}}},
+    }
+
+
 def _draft_missing_credentials(draft: dict[str, Any], desired: dict[str, Any],
                                credentials: list[dict[str, Any]],
                                required: dict[str, set[str]]) -> list[str]:
@@ -456,16 +531,25 @@ def _configure_search(desired: dict[str, Any],
         prepare = "Prepare Search Query"
         search = "Tavily HTTP Search"
         attach = "Attach Search Results"
-        if entry not in nodes:
-            incoming = []
-            for source, ports in desired["connections"].items():
-                for row in ports.get("main", []):
-                    for edge in row:
-                        if edge.get("node") == "Is AI Reply?":
-                            incoming.append((source, edge))
-            if len(incoming) != 1:
-                raise ReconcileError("AI route has no unique search insertion point")
+        # Memory can be added after a previous search repair. Always reconnect
+        # its exit to Search Intent, including when the search nodes exist.
+        incoming = []
+        for source, ports in desired["connections"].items():
+            if source in {entry, attach}:
+                continue
+            for row in ports.get("main", []):
+                for edge in row:
+                    if edge.get("node") == "Is AI Reply?":
+                        incoming.append((source, edge))
+        if len(incoming) > 1:
+            raise ReconcileError("AI route has multiple search insertion points")
+        if incoming:
             incoming[0][1]["node"] = entry
+        elif not any(edge.get("node") == entry
+                     for source, ports in desired["connections"].items()
+                     if source not in {entry, attach}
+                     for row in ports.get("main", []) for edge in row):
+            raise ReconcileError("AI route has no search insertion point")
         definitions = (
             (entry, "n8n-nodes-base.if", 2.4, [64, 288], {
                 "conditions": {"options": {"caseSensitive": False,
@@ -483,11 +567,13 @@ let query = text;
 if (news) {
   const ignored = new Set(['اخبار','خبر','خبرها','امروز','رو','را',
     'چک','کن','کنی','میشه','می‌شه','میتونی','می‌تونی','لطفا','برام',
+    'با','از','درباره','درمورد','منبع','منابع','بگو','بگی','بده','لینک',
     'news','latest','today','check','please','can','you']);
   query = text.replace(/[؟?!،,.]/g, ' ').split(/\s+/)
     .filter(word => word && !ignored.has(word.toLowerCase()))
     .join(' ').trim().replace(/ناسا/gu, 'NASA');
   if (!query) query = 'major world';
+  if (/NASA/i.test(query)) query += ' site:nasa.gov';
   query += ' latest news ' + new Date().toISOString().slice(0, 10);
 }
 return [{json: {...original, mika: {...original.mika,
@@ -734,16 +820,18 @@ def reconcile(origin: str, key_file: Path, artifact: Path, state_dir: Path,
                 del node["credentials"][kind]
         if not node.get("credentials"):
             node.pop("credentials", None)
+    _configure_tts_v4(desired)
     table_problem = _map_reply_table(client, desired)
     if table_problem:
         return table_problem
     search_credential = available.get(("httpHeaderAuth", "Mikachan Tavily Search"))
     _configure_search(desired, search_credential)
+    base_fingerprint = _fingerprint(desired)
     # A verified base graph may receive our additive memory wiring even when
     # its API version changed after the last local state file was written.
     # Any other owner edit still takes the separate draft path below.
-    base_fingerprint = _fingerprint(desired)
     _attach_postgres_memory(client, desired, memory_root)
+    _configure_search(desired, search_credential)
     for node in desired["nodes"]:
         if not node.get("disabled"):
             required_credentials.setdefault(str(node["name"]), set()).update(

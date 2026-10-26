@@ -980,31 +980,26 @@
     },
     {
       "parameters": {
-        "resource": "speech",
-        "voice": {
-          "__rl": true,
-          "value": "FGY2WhTYpPnrIDTdsKH5",
-          "mode": "list",
-          "cachedResultName": "Laura - Enthusiast, Quirky Attitude"
-        },
-        "text": "={{ $json.message.reply_to_message?.text || $json.message.text.replace(/^\\/tts(?:@\\w+)?\\s*/i, '') }}",
-        "additionalOptions": {
-          "model": {
-            "__rl": true,
-            "value": "eleven_v4",
-            "mode": "list",
-            "cachedResultName": "Eleven v4",
-            "cachedResultUrl": ""
-          },
-          "outputFormat": "mp3_44100_128",
-          "voiceSettings": "{\n  \"stability\": 1,\n  \"similarity_boost\": 1,\n  \"style\": 0,\n  \"use_speaker_boost\": true,\n  \"speed\": 1\n}"
-        },
-        "requestOptions": {}
+        "method": "POST",
+        "url": "https://api.elevenlabs.io/v1/text-to-speech/FGY2WhTYpPnrIDTdsKH5?output_format=mp3_44100_128",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "elevenLabsApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.ttsRequest) }}",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "responseFormat": "file"
+            }
+          }
+        }
       },
       "id": "57497afe-01d4-435d-8b3d-4e3a2a05174d",
       "name": "TTS ElevenLabs",
-      "type": "@elevenlabs/n8n-nodes-elevenlabs.elevenLabs",
-      "typeVersion": 1,
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
       "position": [
         736,
         -752
@@ -1177,7 +1172,20 @@
         480
       ],
       "parameters": {
-        "jsCode": "const original = $input.first().json;\nconst text = String(original.mika?.cleanText ?? '').trim().slice(0, 240);\nconst news = /(?:اخبار|خبر|news|headlines?)/iu.test(text);\nconst today = /(?:امروز|همین الان|today)/iu.test(text);\nlet query = text;\nif (news) {\n  const ignored = new Set(['اخبار','خبر','خبرها','امروز','رو','را',\n    'چک','کن','کنی','میشه','می‌شه','میتونی','می‌تونی','لطفا','برام',\n    'news','latest','today','check','please','can','you']);\n  query = text.replace(/[؟?!،,.]/g, ' ').split(/\\s+/)\n    .filter(word => word && !ignored.has(word.toLowerCase()))\n    .join(' ').trim().replace(/ناسا/gu, 'NASA');\n  if (!query) query = 'major world';\n  query += ' latest news ' + new Date().toISOString().slice(0, 10);\n}\nreturn [{json: {...original, mika: {...original.mika,\n  searchQuery: query, searchTopic: news ? 'news' : 'general',\n  searchRange: today ? 'day' : 'week'}}}];"
+        "jsCode": "const original = $input.first().json;\nconst text = String(original.mika?.cleanText ?? '').trim().slice(0, 240);\nconst news = /(?:اخبار|خبر|news|headlines?)/iu.test(text);\nconst today = /(?:امروز|همین الان|today)/iu.test(text);\nlet query = text;\nif (news) {\n  const ignored = new Set(['اخبار','خبر','خبرها','امروز','رو','را',\n    'چک','کن','کنی','میشه','می‌شه','میتونی','می‌تونی','لطفا','برام',\n    'با','از','درباره','درمورد','منبع','منابع','بگو','بگی','بده','لینک',\n    'news','latest','today','check','please','can','you']);\n  query = text.replace(/[؟?!،,.]/g, ' ').split(/\\s+/)\n    .filter(word => word && !ignored.has(word.toLowerCase()))\n    .join(' ').trim().replace(/ناسا/gu, 'NASA');\n  if (!query) query = 'major world';\n  if (/NASA/i.test(query)) query += ' site:nasa.gov';\n  query += ' latest news ' + new Date().toISOString().slice(0, 10);\n}\nreturn [{json: {...original, mika: {...original.mika,\n  searchQuery: query, searchTopic: news ? 'news' : 'general',\n  searchRange: today ? 'day' : 'week'}}}];"
+      }
+    },
+    {
+      "id": "2acf9f9c1f3c511c69b77ae8d09253cf",
+      "name": "Prepare TTS Text",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        576,
+        -752
+      ],
+      "parameters": {
+        "jsCode": "const item = $input.first();\nconst m = item.json.message ?? {};\nconst text = String(m.reply_to_message?.text || m.text?.replace(/^\\/tts(?:@\\w+)?\\s*/i, '') || '').trim();\nif (!text) throw new Error('TTS needs text');\nreturn [{json: {...item.json, ttsRequest: {\"model_id\": \"eleven_v4\", \"voice_settings\": {\"stability\": 1, \"similarity_boost\": 1, \"style\": 0, \"use_speaker_boost\": true, \"speed\": 1}, text}}, binary: item.binary}];"
       }
     }
   ],
@@ -1344,7 +1352,7 @@
         ],
         [
           {
-            "node": "TTS ElevenLabs",
+            "node": "Prepare TTS Text",
             "type": "main",
             "index": 0
           }
@@ -1598,6 +1606,17 @@
         [
           {
             "node": "Tavily HTTP Search",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare TTS Text": {
+      "main": [
+        [
+          {
+            "node": "TTS ElevenLabs",
             "type": "main",
             "index": 0
           }

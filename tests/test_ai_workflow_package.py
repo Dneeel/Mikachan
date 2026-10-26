@@ -11,7 +11,7 @@ from deploy.n8n.ai_assets import core_prompt, style_seeds
 from deploy.n8n.build_ai_workflow import build
 from deploy.n8n.seed_ai_style import seed_sql
 from deploy.n8n.reconcile_ai import (ReconcileError, _activate_draft,
-    _configure_search, _draft_missing_credentials, _fingerprint,
+    _configure_search, _configure_tts_v4, _draft_missing_credentials, _fingerprint,
     _owner_graph, _preserve_owner_settings, _repair_active_search, _select_models,
     _map_reply_table, reconcile)
 
@@ -26,6 +26,50 @@ def test_packaged_ai_handles_first_reply_and_captioned_media():
     analyze = nodes["Analyze Message"]["parameters"]["jsCode"]
     assert "found ? String(found.json.agent_type || 'chat') : 'chat'" in decide
     assert "m.reply_to_message?.text?.trim() || m.reply_to_message?.caption?.trim()" in analyze
+
+
+def test_search_reconnects_after_long_term_memory_is_added():
+    graph = json.loads(ARTIFACT.read_text())
+    graph["nodes"].append({"name": "Attach Scoped Memory", "type": "n8n-nodes-base.code",
+                           "parameters": {"jsCode": "return $input.all();"}})
+    graph["connections"]["Decide AI"]["main"] = [[{"node": "Attach Scoped Memory",
+        "type": "main", "index": 0}]]
+    graph["connections"]["Attach Scoped Memory"] = {"main": [[{
+        "node": "Is AI Reply?", "type": "main", "index": 0}]]}
+    _configure_search(graph, "search-credential")
+    assert graph["connections"]["Attach Scoped Memory"]["main"][0][0]["node"] == \
+        "Search Intent"
+    assert graph["connections"]["Search Intent"]["main"][0][0]["node"] == \
+        "Prepare Search Query"
+    assert graph["connections"]["Tavily HTTP Search"]["main"][0][0]["node"] == \
+        "Attach Search Results"
+    first = _fingerprint(graph)
+    _configure_search(graph, "search-credential")
+    assert _fingerprint(graph) == first
+
+
+def test_v4_tts_repairs_legacy_node_and_preserves_owner_voice():
+    graph = json.loads(ARTIFACT.read_text())
+    graph["nodes"] = [n for n in graph["nodes"] if n["name"] != "Prepare TTS Text"]
+    graph["connections"].pop("Prepare TTS Text")
+    graph["connections"]["Switch"]["main"][1] = [{"node": "TTS ElevenLabs",
+        "type": "main", "index": 0}]
+    node = next(n for n in graph["nodes"] if n["name"] == "TTS ElevenLabs")
+    node["type"] = "@elevenlabs/n8n-nodes-elevenlabs.elevenLabs"
+    node["parameters"] = {"resource": "speech", "voice": {"value": "ownerVoice12345"},
+        "additionalOptions": {"model": {"value": ""},
+                              "outputFormat": "mp3_44100_128"}}
+    _configure_tts_v4(graph)
+    assert node["type"] == "n8n-nodes-base.httpRequest"
+    assert "/ownerVoice12345?" in node["parameters"]["url"]
+    assert node["parameters"]["nodeCredentialType"] == "elevenLabsApi"
+    assert node["parameters"]["jsonBody"] == \
+        "={{ JSON.stringify($json.ttsRequest) }}"
+    assert graph["connections"]["Switch"]["main"][1][0]["node"] == \
+        "Prepare TTS Text"
+    first = _fingerprint(graph)
+    _configure_tts_v4(graph)
+    assert _fingerprint(graph) == first
 
 
 def test_owner_postgres_template_keeps_media_voice_and_memory_when_repaired():

@@ -83,9 +83,10 @@ to Mika stores a bounded user assertion. Only that numeric sender's private
 facts are retrieved for that sender in a private chat. Group prompts never
 receive private facts. These assertions are labelled unverified data, not
 instructions or independently established truth. Database uniqueness prevents
-duplicate writes on retry. The workflow and container are offline tested;
-neither has been exercised on the owner's VPS, so live memory behavior remains
-unverified. General chat does not automatically create durable facts.
+duplicate writes on retry. An isolated live n8n probe verified the Mika and
+Serious PostgreSQL chat-memory nodes and an explicit fact write/read on one
+instance; the synthetic test fact and identity were removed afterward.
+General chat does not automatically create durable facts.
 
 Search requests take one bounded Tavily HTTP request before either Agent. Up to
 three titles, URLs and short snippets are passed to a single Groq call; ordinary
@@ -98,6 +99,20 @@ search prompts receive an explicit unavailable-source context while other AI
 routes remain usable. Search snippets are untrusted; the Agent must check dates
 and cite returned URLs. Provider quota and Telegram delivery still require live
 verification on each installation.
+
+The AI route passes through long-term memory and then the bounded search node.
+An earlier import left search nodes present but bypassed them; the reconciler
+now reconnects that edge even when the nodes already exist. NASA news queries
+prefer the official `nasa.gov` source. Search result relevance and model claims
+still need review for time-sensitive subjects.
+
+ElevenLabs TTS uses its v4 REST endpoint through n8n's HTTP Request node with
+the existing encrypted ElevenLabs credential and selected voice ID. The
+community TTS node returned HTTP 400 for v4 on a live test. A separate Code
+node prepares the text and request body; STT remains the ElevenLabs speech
+recognition node. The v4 audio, STT transcription and Telegram audio delivery
+were verified with short isolated live probes. Longer audio and quota behavior
+remain provider-dependent.
 
 Two Cloudflare Workers AI HTTP Request nodes are packaged for Mika and Serious,
 using Cloudflare's REST endpoint for `@cf/google/gemma-4-26b-a4b-it`. Groq

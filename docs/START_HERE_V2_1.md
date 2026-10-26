@@ -60,3 +60,9 @@ paths are retained. If the n8n API key is absent, run `sudo n8n-manage
 ai-connect` first. If the status says `RECOVERABLE`, use `sudo n8n-manage
 diagnostics` and read the returned sanitized HTTP operation/status; do not
 delete either workflow or its credentials.
+
+If you created a newer n8n API key, run `sudo n8n-manage ai-connect` and paste
+that key at the hidden prompt before `sudo n8n-manage ai-auto-setup`. An active
+workflow with no executions after `/mika` means the bot relay is still not
+connected. Use the auto-setup result to repair that link; do not import a
+second copy of the workflow.
