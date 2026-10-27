@@ -103,6 +103,18 @@ async def test_style_buttons_are_live_and_bound_to_user_chat_message():
 
 
 @pytest.mark.asyncio
+async def test_style_menu_with_buttons_and_no_text_is_delivered():
+    upstream = SimpleNamespace(id=501, raw_text="", media=None,
+        buttons=[[SimpleNamespace(text="Typewriter", data=b"style", url=None)]])
+    bot = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=8)))
+    relay = ExternalUtilities(SimpleNamespace(external_request=AsyncMock(
+        return_value=[upstream])), bot)
+    assert await relay.command(message(), "/style", "sample")
+    assert bot.send_message.await_args.args[1] == "Choose a style"
+    assert next(iter(relay.sessions.values())).upstream == 501
+
+
+@pytest.mark.asyncio
 async def test_userbot_required_and_pronunciation_rejects_nonenglish_word():
     relay = ExternalUtilities(None, None)
     original = message()
@@ -199,6 +211,82 @@ async def test_media_edit_stages_replied_sticker_without_invalid_caption():
 
 
 @pytest.mark.asyncio
+async def test_edit_prompt_accepts_followup_without_reply_in_private_and_cleans_result():
+    prompt = SimpleNamespace(id=102, sender_id=77, raw_text="متنی که می خوای رو بفرست",
+                             media=None, buttons=None)
+    result = SimpleNamespace(id=103, sender_id=77, raw_text="@AbzarMediaBot",
+                             media=SimpleNamespace(document=SimpleNamespace(mime_type="audio/mpeg")),
+                             file=SimpleNamespace(size=8, name="result.mp3"), buttons=None)
+    bot = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=50)),
+                          edit_message_text=AsyncMock(), send_audio=AsyncMock(),
+                          delete_message=AsyncMock())
+    async def download(_message, *, file):
+        from pathlib import Path
+        Path(file).write_bytes(b"ID3audio")
+        return file
+    bridge = SimpleNamespace(staging_chat_id=0, external_peers={"edit": SimpleNamespace(id=77)},
+        client=SimpleNamespace(download_media=AsyncMock(side_effect=download)),
+        external_request=AsyncMock(return_value=[result]))
+    relay = ExternalUtilities(bridge, bot)
+    await relay._edit_result(42, 42, 10, [prompt])
+    row = next(iter(relay.edit_sessions.values()))
+    assert row.awaiting_input and row.upstream == 102
+    user_input = SimpleNamespace(chat=SimpleNamespace(id=42, type="private"),
+        from_user=SimpleNamespace(id=42), text="hello", caption=None,
+        reply_to_message=None, document=None, audio=None, voice=None, video=None,
+        video_note=None, animation=None, sticker=None, photo=None, reply=AsyncMock())
+    assert await relay.reply(user_input)
+    assert bridge.external_request.await_args.kwargs["reply_to_upstream"] == 102
+    assert bridge.external_request.await_args.args == ("edit", "hello")
+    bot.send_audio.assert_awaited_once()
+    assert bot.send_audio.await_args.kwargs["caption"] == ""
+    bot.delete_message.assert_awaited_once_with(42, 50)
+    assert not relay.edit_sessions
+
+
+@pytest.mark.asyncio
+async def test_edit_prompt_in_group_requires_reply_and_sessions_expire():
+    import time
+    from mikachan.external_utilities import EditSession
+
+    relay = ExternalUtilities(SimpleNamespace(), SimpleNamespace())
+    relay.edit_sessions["token"] = EditSession(42, -100, 70, 10, 900,
+                                               time.time() + 600, {}, True)
+    user_input = SimpleNamespace(chat=SimpleNamespace(id=-100, type="supergroup"),
+        from_user=SimpleNamespace(id=42), text="30", caption=None, reply_to_message=None)
+    assert not await relay.reply(user_input)
+    relay.edit_sessions["token"].expires = time.time() - 1
+    assert not await relay.reply(user_input)
+    assert not relay.edit_sessions
+
+
+@pytest.mark.asyncio
+async def test_edit_prompt_with_position_button_still_accepts_text():
+    prompt = SimpleNamespace(id=105, sender_id=77, raw_text="متنی که می خوای روی فایل نوشته بشه رو بفرست",
+        media=None, buttons=[[SimpleNamespace(text="تغییر جای متن", data=b"position", url=None)]])
+    bot = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=62)))
+    relay = ExternalUtilities(SimpleNamespace(external_peers={"edit": SimpleNamespace(id=77)}),
+                              bot)
+    await relay._edit_result(42, 42, 10, [prompt])
+    row = next(iter(relay.edit_sessions.values()))
+    assert row.awaiting_input and row.buttons
+
+
+@pytest.mark.asyncio
+async def test_edit_new_question_wins_over_old_edited_menu():
+    old_menu = SimpleNamespace(id=100, sender_id=77, raw_text="Choose an edit", media=None,
+        buttons=[[SimpleNamespace(text="Convert", data=b"convert", url=None)]])
+    question = SimpleNamespace(id=101, sender_id=77, raw_text="زمان شروع را بفرست",
+                               media=None, buttons=None)
+    bot = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=62)))
+    relay = ExternalUtilities(SimpleNamespace(external_peers={"edit": SimpleNamespace(id=77)}),
+                              bot)
+    await relay._edit_result(42, 42, 10, [old_menu, question])
+    row = next(iter(relay.edit_sessions.values()))
+    assert row.upstream == 101 and row.awaiting_input
+
+
+@pytest.mark.asyncio
 async def test_utility_reply_requires_verified_sender():
     bridge = UserbotBridge.__new__(UserbotBridge)
     peer = SimpleNamespace(id=77)
@@ -207,3 +295,19 @@ async def test_utility_reply_requires_verified_sender():
     bridge.client = SimpleNamespace(get_messages=AsyncMock(return_value=[other]))
     with pytest.raises(ValueError, match="did not finish"):
         await bridge._external_wait(peer, 100, timeout=0.1)
+
+
+@pytest.mark.asyncio
+async def test_text_provider_waits_past_empty_response_for_transcript():
+    from mikachan.userbot import UserbotBridge
+
+    peer = SimpleNamespace(id=77)
+    empty = SimpleNamespace(id=101, sender_id=77, raw_text="", media=None, buttons=None)
+    transcript = SimpleNamespace(id=102, sender_id=77, raw_text="📝 Transcript\nHello",
+                                 media=None, buttons=None)
+    rows = [[empty], [transcript, empty]]
+    bridge = UserbotBridge.__new__(UserbotBridge)
+    bridge.client = SimpleNamespace(get_messages=AsyncMock(side_effect=lambda *_a, **_k:
+        rows.pop(0) if rows else [transcript, empty]))
+    found = await bridge._external_wait(peer, 100, timeout=4, need_text=True)
+    assert found[-1].raw_text.endswith("Hello")

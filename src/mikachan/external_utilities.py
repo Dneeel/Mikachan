@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 import html
 import io
 import mimetypes
+import os
 import re
 import secrets
+import tempfile
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import urlsplit
 
-from aiogram.types import (BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup,
+from aiogram.types import (BufferedInputFile, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup,
                            Message, ReplyParameters)
 from aiogram.exceptions import TelegramAPIError
 
@@ -40,13 +44,29 @@ class EditSession:
     upstream: int
     expires: float
     buttons: dict[int, tuple[int, int, str]]
+    awaiting_input: bool = False
 
 
 class ExternalUtilities:
-    def __init__(self, bridge: UserbotBridge | None, bot):
+    def __init__(self, bridge: UserbotBridge | None, bot, ensure_staging=None):
         self.bridge, self.bot = bridge, bot
+        self.ensure_staging = ensure_staging
         self.sessions: dict[str, StyleSession] = {}
         self.edit_sessions: dict[str, EditSession] = {}
+
+    def _prune(self) -> None:
+        now = time.time()
+        self.sessions = {key: row for key, row in self.sessions.items() if row.expires > now}
+        self.edit_sessions = {key: row for key, row in self.edit_sessions.items()
+                              if row.expires > now}
+        for rows in (self.sessions, self.edit_sessions):
+            while len(rows) > 100:
+                rows.pop(next(iter(rows)))
+
+    async def cleanup_loop(self) -> None:
+        while True:
+            await asyncio.sleep(60)
+            self._prune()
 
     def _require(self) -> UserbotBridge:
         if self.bridge is None:
@@ -55,9 +75,10 @@ class ExternalUtilities:
 
     async def _stage_reply(self, command: Message, *, image: bool = False,
                            audio: bool = False,
-                           any_media: bool = False) -> tuple[int | None, bytes | None, str | None]:
+                           any_media: bool = False,
+                           source: Message | None = None) -> tuple[int | None, bytes | None, str | None]:
         bridge = self._require()
-        source = command.reply_to_message
+        source = source or command.reply_to_message
         if source is None:
             raise ValueError("Reply to an image with /ocr" if image else
                              "Reply to an audio or voice message with /asr")
@@ -78,8 +99,10 @@ class ExternalUtilities:
         if media is None:
             raise ValueError("No supported media was found in the replied message")
         size = int(getattr(media, "file_size", 0) or 0)
-        if size > (1_900_000_000 if bridge.staging_chat_id < 0 else 20_000_000):
+        if size > 1_900_000_000:
             raise ValueError("Media exceeds the available relay limit")
+        if size > 20_000_000 and bridge.staging_chat_id >= 0 and self.ensure_staging:
+            await self.ensure_staging()
         if bridge.staging_chat_id < 0:
             copy_args = {"caption": ""} if not (getattr(source, "sticker", None) or
                                                   source.video_note or source.voice) else {}
@@ -87,7 +110,7 @@ class ExternalUtilities:
                                                  source.message_id, **copy_args)
             return int(copied.message_id), None, None
         if size > 20_000_000:
-            raise ValueError("Media above 20 MB needs USERBOT_STAGING_CHAT_ID")
+            raise ValueError("Media above 20 MB needs a private transfer chat")
         buffer = io.BytesIO()
         await self.bot.download(media, destination=buffer, timeout=45)
         data = buffer.getvalue()
@@ -186,53 +209,113 @@ class ExternalUtilities:
         rows.append([InlineKeyboardButton(text="✖ Close", callback_data=f"ed:{token}:close")])
         return InlineKeyboardMarkup(inline_keyboard=rows), actions
 
+    @staticmethod
+    def _clean_edit_text(value: str) -> str:
+        lines = [line for line in value.splitlines() if not any(term in line.casefold()
+                 for term in ("@abzarmediabot", "downloaded by", "دانلود از اینستاگرام",
+                              "دریافت لینک دانلود", "ادامه روی همین"))]
+        return "\n".join(lines).strip()[:3500]
+
+    @staticmethod
+    def _expects_edit_input(value: str) -> bool:
+        text = value.casefold()
+        return any(phrase in text for phrase in
+                   ("بفرست", "ارسال کن", "وارد کن", "بنویس",
+                    "متنی که", "صدایی که", "عکس کاور", "زمان شروع", "زمان پایان",
+                    "send the", "enter the", "type the", "reply with", "upload"))
+
+    async def _deliver_edit_media(self, bridge: UserbotBridge, item, chat: int,
+                                  original: int) -> None:
+        """Small results use bounded Bot API upload; larger ones use private Telegram copy."""
+        size = int(getattr(getattr(item, "file", None), "size", 0) or 0)
+        media = getattr(item, "media", None)
+        document = getattr(media, "document", None)
+        mime = str(getattr(document, "mime_type", "") or "")
+        method = ("send_photo" if getattr(media, "photo", None) else
+                  "send_video" if mime.startswith("video/") else
+                  "send_audio" if mime.startswith("audio/") else "send_document")
+        if 0 < size <= 45_000_000 and hasattr(bridge, "client"):
+            extension = mimetypes.guess_extension(mime) or \
+                (".jpg" if method == "send_photo" else ".bin")
+            name = os.path.basename(str(getattr(getattr(item, "file", None), "name", "")
+                or "result" + extension))[:120]
+            with tempfile.TemporaryDirectory(prefix="mikachan-edit-") as directory:
+                target = Path(directory) / name
+                downloaded = await bridge.client.download_media(item, file=str(target))
+                path = Path(downloaded) if isinstance(downloaded, str) else target
+                if path.is_file() and path.parent == Path(directory) and \
+                        0 < path.stat().st_size <= 45_000_000:
+                    parameter = {"send_photo": "photo", "send_video": "video",
+                                 "send_audio": "audio", "send_document": "document"}[method]
+                    await getattr(self.bot, method)(chat,
+                        **{parameter: FSInputFile(path, filename=name)},
+                        caption="", reply_markup=None,
+                        reply_parameters=ReplyParameters(message_id=original))
+                    return
+        if bridge.staging_chat_id >= 0 and self.ensure_staging:
+            await self.ensure_staging()
+        if bridge.staging_chat_id >= 0:
+            raise ValueError("Large edited media needs a private transfer chat")
+        staged = await bridge.external_stage("edit", item)
+        try:
+            await self.bot.copy_message(chat, bridge.staging_chat_id, staged,
+                caption="", reply_markup=None,
+                reply_parameters=ReplyParameters(message_id=original))
+        finally:
+            try:
+                await bridge.instagram_unstage(staged)
+            except Exception:
+                pass
+
     async def _edit_result(self, chat: int, user: int, original: int,
                            results: list, *, replace=None) -> None:
         bridge = self._require()
+        self._prune()
         media = [item for item in results if getattr(item, "media", None) and
                  getattr(item, "sender_id", None) ==
                  getattr(bridge.external_peers.get("edit"), "id", None)]
         if media:
-            if bridge.staging_chat_id >= 0:
-                raise ValueError("Media editing requires the private relay chat")
             for item in media:
-                staged = await bridge.external_stage("edit", item)
-                try:
-                    await self.bot.copy_message(chat, bridge.staging_chat_id, staged,
-                        caption="", reply_markup=None,
-                        reply_parameters=ReplyParameters(message_id=original))
-                finally:
-                    try:
-                        await bridge.instagram_unstage(staged)
-                    except Exception:
-                        pass
+                await self._deliver_edit_media(bridge, item, chat, original)
             if replace is not None:
                 await self.bot.delete_message(chat, replace)
             return
-        upstream = next((item for item in results if getattr(item, "buttons", None)), None)
+        upstream = next((item for item in reversed(results)
+                         if getattr(item, "buttons", None) or
+                         self._clean_edit_text(str(getattr(item, "raw_text", "") or ""))), None)
         if upstream is None:
             raise ValueError("The media editor returned no usable conversion or edit options")
         token = secrets.token_urlsafe(9)
         markup, actions = self._edit_buttons(upstream, token)
-        if not actions:
+        prompt = self._clean_edit_text(str(getattr(upstream, "raw_text", "") or ""))
+        if not actions and not prompt:
             raise ValueError("The media editor returned no supported edit options")
+        awaiting_input = self._expects_edit_input(prompt)
+        if not actions and not awaiting_input:
+            await self.bot.send_message(chat, html.escape(prompt),
+                reply_parameters=ReplyParameters(message_id=original))
+            if replace is not None:
+                await self.bot.delete_message(chat, replace)
+            return
+        body = html.escape(prompt) if prompt else "🛠 <b>Choose an edit</b>"
         if replace is None:
-            sent = await self.bot.send_message(chat, "🛠 <b>Choose an edit</b>",
+            sent = await self.bot.send_message(chat, body,
                                                reply_markup=markup)
             message_id = sent.message_id
         else:
-            await self.bot.edit_message_text("🛠 <b>Choose an edit</b>",
+            await self.bot.edit_message_text(body,
                 chat_id=chat, message_id=replace, reply_markup=markup)
             message_id = replace
-        self.edit_sessions = {key: value for key, value in self.edit_sessions.items()
-                              if value.expires > time.time()}
         self.edit_sessions[token] = EditSession(user, chat, message_id, original,
-                                               upstream.id, time.time() + 600, actions)
+                                               upstream.id, time.time() + 600, actions,
+                                               awaiting_input=awaiting_input or not bool(actions))
 
     async def _style_result(self, chat: int, user: int, upstream, *, replace=None) -> None:
         token = secrets.token_urlsafe(8)
         markup, actions = self._style_markup(upstream, token)
         text = str(getattr(upstream, "raw_text", "") or "").strip()
+        if not text and actions:
+            text = "Choose a style"
         if not text:
             raise ValueError("Style provider returned no text")
         if len(text) > 3900:
@@ -242,16 +325,14 @@ class ExternalUtilities:
             sent = replace
         else:
             sent = await self.bot.send_message(chat, html.escape(text), reply_markup=markup)
-        self.sessions = {key: value for key, value in self.sessions.items()
-                         if value.expires > time.time()}
-        if len(self.sessions) >= 100:
-            self.sessions.pop(next(iter(self.sessions)))
+        self._prune()
         self.sessions[token] = StyleSession(user, chat, sent.message_id, upstream.id,
                                             time.time() + 600, actions)
 
     async def command(self, message: Message, cmd: str, arg: str) -> bool:
         if cmd not in {"/ocr", "/tr", "/pron", "/asr", "/style", "/edit"}:
             return False
+        self._prune()
         try:
             bridge = self._require()
             staged = None
@@ -308,11 +389,16 @@ class ExternalUtilities:
                         pass
             if cmd == "/edit":
                 assert message.from_user is not None
+                self.edit_sessions = {key: row for key, row in self.edit_sessions.items()
+                                      if (row.chat, row.user) !=
+                                      (message.chat.id, message.from_user.id)}
                 await self._edit_result(message.chat.id, message.from_user.id,
                                         message.message_id, results)
             elif cmd == "/style":
                 assert message.from_user is not None
-                await self._style_result(message.chat.id, message.from_user.id, results[-1])
+                upstream = next((item for item in reversed(results)
+                                 if getattr(item, "buttons", None)), results[-1])
+                await self._style_result(message.chat.id, message.from_user.id, upstream)
             else:
                 await self._text_results(message, results, kind=kind,
                                          audio=cmd == "/pron")
@@ -322,7 +408,60 @@ class ExternalUtilities:
             await message.reply("⚠️ " + html.escape(detail))
         return True
 
+    async def reply(self, message: Message) -> bool:
+        """Continue the active media-editor conversation with its verified provider."""
+        self._prune()
+        sender = getattr(message, "from_user", None)
+        if sender is None:
+            return False
+        candidates = [(key, row) for key, row in self.edit_sessions.items()
+                      if row.awaiting_input and row.user == sender.id and
+                      row.chat == message.chat.id]
+        if not candidates:
+            return False
+        token, session = max(candidates, key=lambda pair: pair[1].expires)
+        reply = getattr(message, "reply_to_message", None)
+        if message.chat.type != "private" and (reply is None or
+                                                reply.message_id != session.message):
+            return False
+        value = str(message.text or message.caption or "").strip()
+        if value.startswith("/"):
+            if value.casefold() != "/cancel":
+                return False
+            self.edit_sessions.pop(token, None)
+            await self.bot.delete_message(session.chat, session.message)
+            return True
+        has_media = any(getattr(message, name, None) for name in
+                        ("document", "audio", "voice", "video", "video_note",
+                         "animation", "sticker", "photo"))
+        if not value and not has_media:
+            return False
+        staged = None
+        try:
+            media_data = media_name = None
+            if has_media:
+                staged, media_data, media_name = await self._stage_reply(message,
+                    any_media=True, source=message)
+            results = await self._require().external_request("edit", "" if has_media else value,
+                staged_id=staged, media_data=media_data, media_name=media_name,
+                reply_to_upstream=session.upstream, timeout=180)
+            self.edit_sessions.pop(token, None)
+            await self._edit_result(session.chat, session.user, session.original,
+                                    results, replace=session.message)
+        except (ValueError, TelegramAPIError, OSError) as exc:
+            detail = str(exc)[:200] if isinstance(exc, ValueError) else \
+                "Media editor could not complete this step"
+            await message.reply("⚠️ " + html.escape(detail))
+        finally:
+            if staged is not None:
+                try:
+                    await self.bot.delete_message(self._require().staging_chat_id, staged)
+                except TelegramAPIError:
+                    pass
+        return True
+
     async def callback(self, query) -> bool:
+        self._prune()
         data = str(query.data or "")
         if data.startswith("ed:"):
             parts = data.split(":")

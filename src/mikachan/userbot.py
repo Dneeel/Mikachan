@@ -592,7 +592,7 @@ class UserbotBridge:
 
     async def _external_wait(self, peer, after: int, *, timeout: float,
                              edited=None, need_buttons: bool = False,
-                             need_media: bool = False) -> list:
+                             need_media: bool = False, need_text: bool = False) -> list:
         found: dict[int, object] = {}
         deadline = time.monotonic() + timeout
         quiet = 0.0
@@ -613,6 +613,9 @@ class UserbotBridge:
                          self._button_signature(item) != self._button_signature(edited))):
                     found[item.id] = item
                     quiet = time.monotonic() + 1.2
+            if len(found) > 40:
+                for old_id in sorted(found)[:-40]:
+                    found.pop(old_id, None)
             ready = [item for item in found.values() if not self._external_pending(item)]
             provider_error = any(any(word in str(getattr(item, "raw_text", "") or "").casefold()
                                      for word in ("not found", "unsupported", "failed", "cannot", "error"))
@@ -620,6 +623,8 @@ class UserbotBridge:
             if ready and (not need_buttons or any(getattr(item, "buttons", None) for item in ready)) \
                     and (not need_media or provider_error or
                          any(getattr(item, "media", None) for item in ready)) \
+                    and (not need_text or any(str(getattr(item, "raw_text", "") or "").strip()
+                                              for item in ready)) \
                     and time.monotonic() >= quiet:
                 return sorted(ready, key=lambda item: item.id)
             await asyncio.sleep(0.35 if not found else 0.55)
@@ -628,9 +633,11 @@ class UserbotBridge:
     async def external_request(self, kind: str, command: str, *, staged_id: int | None = None,
                                reply_text: str | None = None, timeout: float = 65,
                                media_data: bytes | None = None,
-                               media_name: str | None = None) -> list:
+                               media_name: str | None = None,
+                               reply_to_upstream: int | None = None) -> list:
         """Send one fixed-command interaction; verify every reply's real bot sender."""
-        if (not command and staged_id is None and media_data is None or len(command) > 3500 or
+        if (not command and staged_id is None and media_data is None and reply_text is None or
+                len(command) > 3500 or
                 reply_text is not None and len(reply_text) > 3500):
             raise ValueError("Utility input is too long")
         if media_data is not None and (staged_id is not None or not 0 < len(media_data) <= 20_000_000):
@@ -652,8 +659,12 @@ class UserbotBridge:
                             await asyncio.sleep(0.3)
                         if not source or not getattr(source, "media", None):
                             raise ValueError("Staged media is unavailable")
-                        sent = await self.client.forward_messages(peer, source,
-                            drop_author=True, drop_media_captions=True)
+                        if reply_to_upstream is not None:
+                            sent = await self.client.send_file(peer, source.media,
+                                caption="", reply_to=reply_to_upstream)
+                        else:
+                            sent = await self.client.forward_messages(peer, source,
+                                drop_author=True, drop_media_captions=True)
                         if isinstance(sent, list):
                             if len(sent) != 1:
                                 raise ValueError("External media relay returned an unexpected batch")
@@ -662,16 +673,20 @@ class UserbotBridge:
                     elif media_data is not None:
                         buffer = io.BytesIO(media_data)
                         buffer.name = media_name or "source.bin"
-                        sent = await self.client.send_file(peer, buffer, caption="")
+                        sent = await self.client.send_file(peer, buffer, caption="",
+                            reply_to=reply_to_upstream)
                         replied_to = sent.id
                     elif reply_text is not None:
-                        sent = await self.client.send_message(peer, reply_text)
+                        sent = await self.client.send_message(peer, reply_text,
+                            reply_to=reply_to_upstream)
                         replied_to = sent.id
                     if command:
-                        sent = await self.client.send_message(peer, command, reply_to=replied_to)
+                        sent = await self.client.send_message(peer, command,
+                            reply_to=replied_to or reply_to_upstream)
                     return await self._external_wait(peer, sent.id, timeout=timeout,
                         need_buttons=command.startswith("/style "),
-                        need_media=command.startswith("/pron "))
+                        need_media=command.startswith("/pron "),
+                        need_text=command.startswith(("/tr ", "/asr")))
         except (ValueError, asyncio.CancelledError):
             raise
         except Exception as exc:

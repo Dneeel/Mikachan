@@ -266,7 +266,8 @@ class App:
         self.community = Community(self.bot, community_store, settings.owner_telegram_id,
                                    self.store.access_registry)
         self.utilities = Utilities(self.bot, settings, self.store.db)
-        self.external_utilities = ExternalUtilities(self.userbot, self.bot)
+        self.external_utilities = ExternalUtilities(self.userbot, self.bot,
+                                                   self._ensure_media_staging)
         self.explore = Explore(self.bot)
         self.content_ui = ContentUI(self.store.db, self.bot,
                                     enabled=settings.mika_content_enabled,
@@ -410,6 +411,10 @@ class App:
                 and self.module_enabled("community", m.chat.id)):
             await self.community.welcome(m, self.store.allowlist())
         if not m.from_user or not self.authorized(m.from_user.id, m.chat.id, m.chat.type):
+            return
+        if (self.module_enabled("utilities", m.chat.id) and
+                hasattr(self, "external_utilities") and
+                await self.external_utilities.reply(m)):
             return
         if hasattr(self, "group_status") and await self.group_status.reply(m):
             return
@@ -668,12 +673,6 @@ class App:
             return
         if hasattr(self, "audio_ui") and await self.audio_ui.command(m, cmd, arg):
             return
-        if cmd == "/edit" and self.userbot and self.userbot.staging_chat_id >= 0:
-            try:
-                await self._ensure_media_staging()
-            except Exception:
-                await m.reply("⚠️ Private media relay could not be prepared. Try again later.")
-                return
         if hasattr(self, "external_utilities") and await self.external_utilities.command(m, cmd, arg):
             return
         if cmd == "/vpn":
@@ -1612,6 +1611,7 @@ class App:
                    "fn": "follow", "fd": "follow", "u": "community", "g": "community",
                    "gs": "community", "gc": "community", "n": "utilities",
                    "px": "utilities", "ms": "utilities", "uh": "utilities",
+                   "ed": "utilities",
                    "ir": "follow", "au": "utilities", "ct": "content"}).get(prefix)
         if domain and not self.module_enabled(domain, q.message.chat.id):
             await acknowledge(q, "This module is currently unavailable")
@@ -2508,6 +2508,7 @@ class App:
                                        scope=BotCommandScopeAllGroupChats())
         task = asyncio.create_task(self.worker.loop())
         follow_task = asyncio.create_task(self.follow.loop())
+        utility_cleanup = asyncio.create_task(self.external_utilities.cleanup_loop())
         self.mikasub_core.background = asyncio.create_task(self.mikasub_core.periodic())
         try:
             await self.dp.start_polling(self.bot)
@@ -2524,6 +2525,8 @@ class App:
             await asyncio.gather(*self._ph_tasks, return_exceptions=True)
             follow_task.cancel()
             await asyncio.gather(follow_task, return_exceptions=True)
+            utility_cleanup.cancel()
+            await asyncio.gather(utility_cleanup, return_exceptions=True)
             await self.worker.stop()
             task.cancel()
             await self.settings_ui.close()
