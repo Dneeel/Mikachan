@@ -53,6 +53,10 @@ sudo mikachan update
 sudo n8n-manage ai-auto-setup
 ```
 
+If the VPS still reports branch `v2.1`, run `sudo mikachan switch v2` first.
+The temporary branch was removed after its code was merged into `v2`;
+`sudo mikachan update` on the deleted branch cannot fetch a new release.
+
 The Mikachan update refreshes the owned n8n manager without restarting n8n.
 The reconciler backs up a recognized owner workflow and repairs its AI route
 on the same workflow ID; voice, prompts, valid credentials, notes and media
