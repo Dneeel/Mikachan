@@ -101,6 +101,10 @@ class ExternalUtilities:
         size = int(getattr(media, "file_size", 0) or 0)
         if size > 1_900_000_000:
             raise ValueError("Media exceeds the available relay limit")
+        if any_media and bridge.staging_chat_id >= 0 and self.ensure_staging:
+            await self.ensure_staging()
+        if any_media and bridge.staging_chat_id >= 0:
+            raise ValueError("Media editing needs a private transfer chat to preserve its format")
         if size > 20_000_000 and bridge.staging_chat_id >= 0 and self.ensure_staging:
             await self.ensure_staging()
         if bridge.staging_chat_id < 0:

@@ -659,12 +659,8 @@ class UserbotBridge:
                             await asyncio.sleep(0.3)
                         if not source or not getattr(source, "media", None):
                             raise ValueError("Staged media is unavailable")
-                        if reply_to_upstream is not None:
-                            sent = await self.client.send_file(peer, source.media,
-                                caption="", reply_to=reply_to_upstream)
-                        else:
-                            sent = await self.client.forward_messages(peer, source,
-                                drop_author=True, drop_media_captions=True)
+                        sent = await self.client.forward_messages(peer, source,
+                            drop_author=True, drop_media_captions=True)
                         if isinstance(sent, list):
                             if len(sent) != 1:
                                 raise ValueError("External media relay returned an unexpected batch")

@@ -211,6 +211,23 @@ async def test_media_edit_stages_replied_sticker_without_invalid_caption():
 
 
 @pytest.mark.asyncio
+async def test_edit_video_note_is_copied_without_reencoding_or_mp3_name():
+    source = SimpleNamespace(message_id=20, document=None, audio=None, voice=None,
+        video=None, video_note=SimpleNamespace(file_size=50_000), animation=None,
+        photo=None, sticker=None)
+    bot = SimpleNamespace(copy_message=AsyncMock(return_value=SimpleNamespace(message_id=77)),
+                          download=AsyncMock())
+    bridge = SimpleNamespace(staging_chat_id=0)
+    async def prepare():
+        bridge.staging_chat_id = -200
+    relay = ExternalUtilities(bridge, bot, prepare)
+    staged, data, name = await relay._stage_reply(message(reply=source), any_media=True)
+    assert (staged, data, name) == (77, None, None)
+    bot.copy_message.assert_awaited_once_with(-200, -100, 20)
+    bot.download.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_edit_prompt_accepts_followup_without_reply_in_private_and_cleans_result():
     prompt = SimpleNamespace(id=102, sender_id=77, raw_text="متنی که می خوای رو بفرست",
                              media=None, buttons=None)
