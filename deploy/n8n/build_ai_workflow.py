@@ -12,7 +12,6 @@ import json
 import uuid
 from pathlib import Path
 
-from deploy.n8n.ai_assets import core_prompt, style_seeds  # type: ignore[attr-defined]
 
 
 NAMESPACE = uuid.UUID("17e8a27f-1681-4655-a933-922d290573cc")
@@ -97,25 +96,10 @@ def _rule(expression: str, label: str) -> dict:
 
 
 def _system_expression(agent: str) -> str:
-    core = core_prompt(agent)
-    seeds = style_seeds()[agent]["examples"]
-    first = next(x for x in seeds if x["audience"] == "all" and
-                 x["category"] == ("empathy" if agent == "chat" else "technical"))
-    example = ("\n\nBundled default style example (not owner approved):\nUser: " +
-               first["user_example"] + "\nAssistant: " + first["assistant_example"])
-    topic = r"/(?:ناراحت|حالم|غم)/u" if agent == "chat" else r"/(?:کد|سرور|n8n|PostgreSQL)/iu"
-    # Trusted booleans come only from the authenticated bot relay. Outside
-    # text and quoted messages never set identity or adult permissions.
-    return ("={{ " + json.dumps(core, ensure_ascii=False) +
-            " + '\\n\\nTrusted runtime context: ' + JSON.stringify({"
-            "verifiedDaniel: $json.message.verified_daniel === true, "
-            "verifiedOwner: $json.message.verified_owner === true, "
-            "adultVerified: $json.message.adult_verified === true, "
-            "mommyEnabled: $json.message.mommy_enabled === true, "
-            "chatType: $json.message.chat.type, "
-            "agent: " + json.dumps(agent) + "}) + (" + topic +
-            ".test($json.mika.cleanText) ? " + json.dumps(example, ensure_ascii=False) +
-            " : '') }}")
+    from deploy.n8n.adaptive_memory import CORE
+    field = "mikaCompiledSystem" if agent == "chat" else "seriousCompiledSystem"
+    return ("={{ $json." + field + " ?? " +
+            json.dumps(CORE[agent], ensure_ascii=False) + " }}")
 
 
 def build(source: dict) -> dict:

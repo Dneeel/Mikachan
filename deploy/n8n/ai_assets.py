@@ -14,6 +14,8 @@ FILES = {
     "chat_dna": ("03_MIKA_CHAT_STYLE_DNA.md", "d32453c025b678743e8004e1cb13db6cd410c7de8aa2b0e774e0ab8a4e0b1b7d"),
     "serious_dna": ("04_MIKA_SERIOUS_WRITING_DNA.md", "0854c3c5875a1aa01d7bcac9f293654334b12bd1bb07f684bbb97cab23d30907"),
     "seeds": ("05_STYLE_SEEDS.json", "4ddb68854250bad7f1922eaafa29daf2f25734e90ef83a3029a2ec3f1fdfb85e"),
+    "chat_compact": ("06_MIKA_CHAT_COMPACT.md", "04a7800af009ad102b480647f190d9d2328bbc8b710768bc34317cefc1aec0b9"),
+    "serious_compact": ("07_MIKA_SERIOUS_COMPACT.md", "23af9260bf34782c9c0403c5d6055d32b9ac630a6869186c804a212bae3fd5e5"),
 }
 
 

@@ -899,7 +899,12 @@ class N8NManager:
             try:
                 current = json.loads(status.stdout)
                 if current.get("status") == "DATABASE_READY":
-                    return {"status": "DATABASE_READY"}
+                    migrated = subprocess.run([sys.executable, "-m",
+                        "deploy.n8n.pg_memory", "repair"], cwd=release,
+                        capture_output=True, text=True, timeout=180, check=False)
+                    return ({"status": "DATABASE_READY"} if migrated.returncode == 0
+                            else {"status": "RECOVERABLE",
+                                  "reason": "AI memory schema migration needs repair"})
                 if current.get("status") == "UNOWNED":
                     return {"status": "BLOCKED_CONFLICT", "reason": "AI memory directory is unowned"}
             except json.JSONDecodeError:

@@ -838,8 +838,20 @@ class Manager:
         script = self.paths.releases / sha / "deploy/n8n/reconcile_ai.py"
         artifact = self.paths.releases / sha / "deploy/n8n/mikachan_ai_workflow.json"
         state_file = n8n_root / "installation.json"
+        memory_marker = n8n_root / "ai-memory/.managed-by-mikachan-ai-memory"
+        memory_ready = True
+        if self.paths.base == Path("/opt/Mikachan") and memory_marker.is_file():
+            try:
+                migrated = self._run(sys.executable, "-m", "deploy.n8n.pg_memory",
+                    "repair", cwd=self.paths.releases / sha, check=False, timeout=180)
+                memory_ready = migrated.returncode == 0
+            except ManagerError:
+                memory_ready = False
+            if not memory_ready:
+                self.on_event("AI memory migration needs repair; n8n workflow kept unchanged")
         if (self.paths.base == Path("/opt/Mikachan") and key.is_file() and
-                script.is_file() and artifact.is_file() and state_file.is_file()):
+                script.is_file() and artifact.is_file() and state_file.is_file() and
+                memory_ready):
             try:
                 result = self._run(sys.executable, str(script), "--origin", "http://127.0.0.1:5678",
                     "--key-file", str(key), "--artifact", str(artifact),

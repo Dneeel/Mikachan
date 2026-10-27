@@ -9,6 +9,7 @@ import pytest
 
 from deploy.n8n.pg_memory import MemoryError, MemoryManager
 from deploy.n8n.reconcile_ai import _attach_postgres_memory
+from deploy.n8n.adaptive_memory import install as install_adaptive_memory
 
 
 def test_memory_install_is_repeatable_and_keeps_secrets(tmp_path, monkeypatch):
@@ -58,29 +59,29 @@ def test_installed_memory_wires_independent_agent_tables(tmp_path):
             assert method == "POST" and body["type"] == "postgres"
             return {"id": "pg-cred"}
 
-    _attach_postgres_memory(Client(), graph, root)
+    credential = _attach_postgres_memory(Client(), graph, root)
+    assert credential == "pg-cred"
+    install_adaptive_memory(graph, credential)
     links = graph["connections"]
     assert links["Mika Postgres Memory"]["ai_memory"][0][0]["node"] == "AI Agent"
     assert links["Serious Postgres Memory"]["ai_memory"][0][0]["node"] == \
         "Mika Serious Agent"
-    assert links["Mika Simple Memory"]["ai_memory"] == [[]]
-    assert links["Serious Simple Memory"]["ai_memory"] == [[]]
     assert links["Decide AI"]["main"][0][0]["node"] == "Memory Intent"
-    assert links["Write Explicit Memory"]["main"][0][0]["node"] == "Read Scoped Memory"
-    assert links["Attach Scoped Memory"]["main"][0][0]["node"] == "Is AI Reply?"
+    assert links["Is Memory Command?"]["main"][0][0]["node"] == "Apply Memory Command"
+    assert links["Need Memory?"]["main"][0][0]["node"] == "Read Relevant Memory"
     nodes = {node["name"]: node for node in graph["nodes"]}
-    writer = nodes["Write Explicit Memory"]
-    reader = nodes["Read Scoped Memory"]
+    writer = nodes["Apply Memory Command"]
+    reader = nodes["Read Relevant Memory"]
     assert writer["credentials"]["postgres"]["id"] == "pg-cred"
-    assert "ON CONFLICT DO NOTHING" in writer["parameters"]["query"]
-    assert "visibility='private' AND $1=$2" in reader["parameters"]["query"]
-    assert "source_kind='explicit_user'" in reader["parameters"]["query"]
-    assert "m.chat?.type === 'private'" in nodes["Memory Intent"]["parameters"]["jsCode"]
+    assert "mika_teach" in writer["parameters"]["query"]
+    assert "scope='private' AND owner_user_id=$1 AND $1=$2" in reader["parameters"]["query"]
+    assert "privateChat" in nodes["Memory Intent"]["parameters"]["jsCode"]
     (root / "backend").write_text("simple\n")
     simple = json.loads((Path(__file__).resolve().parents[1] /
         "deploy/n8n/mikachan_ai_workflow.json").read_text())
     _attach_postgres_memory(Client(), simple, root)
-    assert "Mika Postgres Memory" not in simple["connections"]
+    assert simple["connections"]["Mika Postgres Memory"]["ai_memory"] == [[]]
+    assert simple["connections"]["Mika Simple Memory"]["ai_memory"][0][0]["node"] == "AI Agent"
 
 
 def test_failed_restore_attempts_automatic_rollback(tmp_path, monkeypatch):

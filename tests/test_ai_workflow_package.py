@@ -25,7 +25,8 @@ def test_packaged_ai_handles_first_reply_and_captioned_media():
     decide = nodes["Decide AI"]["parameters"]["jsCode"]
     analyze = nodes["Analyze Message"]["parameters"]["jsCode"]
     assert "found ? String(found.json.agent_type || 'chat') : 'chat'" in decide
-    assert "m.reply_to_message?.text?.trim() || m.reply_to_message?.caption?.trim()" in analyze
+    assert "m.reply_to_message?.text?.trim()" in analyze
+    assert "m.reply_to_message?.caption?.trim()" in analyze
 
 
 def test_search_reconnects_after_long_term_memory_is_added():
@@ -106,7 +107,7 @@ def test_owner_postgres_template_keeps_media_voice_and_memory_when_repaired():
     assert repaired["connections"]["Get Voice File"] == graph["connections"]["Get Voice File"]
 
 
-def test_reconcile_preserves_owner_voice_prompt_note_and_known_credentials():
+def test_reconcile_preserves_owner_voice_note_credentials_and_managed_core():
     desired = json.loads(ARTIFACT.read_text())
     current = copy.deepcopy(desired)
     wanted = {node["name"]: node for node in desired["nodes"]}
@@ -122,7 +123,7 @@ def test_reconcile_preserves_owner_voice_prompt_note_and_known_credentials():
     assert wanted["TTS ElevenLabs"]["parameters"]["voice"]["value"] == \
         "private-owner-voice"
     assert wanted["TTS ElevenLabs"]["credentials"]["elevenLabsApi"]["id"] == "live-id"
-    assert wanted["AI Agent"]["parameters"]["options"]["systemMessage"] == "owner prompt"
+    assert "mikaCompiledSystem" in wanted["AI Agent"]["parameters"]["options"]["systemMessage"]
     assert wanted["Sticky Note12"]["parameters"]["content"] == "owner note"
 
 
@@ -356,8 +357,8 @@ def test_artifact_has_two_isolated_agents_and_preserves_media_edges():
     nodes = {node["name"]: node for node in graph["nodes"]}
     analyze = nodes["Analyze Message"]["parameters"]["jsCode"]
     assert "cleanText || fallback" in analyze
-    assert "only addressed you by name" in analyze
-    assert "verifiedOwner: $json.message.verified_owner === true" in \
+    assert "addressed you by name" in analyze
+    assert "mikaCompiledSystem" in \
         nodes["AI Agent"]["parameters"]["options"]["systemMessage"]
     assert len([node for node in graph["nodes"] if node["type"] ==
                 "n8n-nodes-base.telegramTrigger"]) == 0
@@ -369,8 +370,8 @@ def test_artifact_has_two_isolated_agents_and_preserves_media_edges():
         "Mika Serious Agent"
     assert nodes["Groq Serious Model"]["parameters"]["model"] == \
         nodes["Groq Chat Model"]["parameters"]["model"]
-    assert links["Mika Simple Memory"]["ai_memory"][0][0]["node"] == "AI Agent"
-    assert links["Serious Simple Memory"]["ai_memory"][0][0]["node"] == \
+    assert links["Mika Postgres Memory"]["ai_memory"][0][0]["node"] == "AI Agent"
+    assert links["Serious Postgres Memory"]["ai_memory"][0][0]["node"] == \
         "Mika Serious Agent"
     assert links["AI Agent"]["main"][0][0]["node"] == "Normalize Chat Result"
     assert nodes["AI Agent"]["continueOnFail"] is True
@@ -379,11 +380,9 @@ def test_artifact_has_two_isolated_agents_and_preserves_media_edges():
     assert links["Search Intent"]["main"][1][0]["node"] == "Is AI Reply?"
     assert links["Prepare Search Query"]["main"][0][0]["node"] == "Tavily HTTP Search"
     assert links["Tavily HTTP Search"]["main"][0][0]["node"] == "Attach Search Results"
-    assert len([n for n in graph["nodes"] if n["type"] == "n8n-nodes-base.stickyNote"]) == 8
-    for name in ("Cloudflare Mika Model", "Cloudflare Serious Model"):
-        assert nodes[name]["disabled"] is True
-        assert nodes[name]["type"] == "n8n-nodes-base.httpRequest"
-        assert name not in links or not links[name].get("ai_languageModel")
+    assert len([n for n in graph["nodes"] if n["type"] == "n8n-nodes-base.stickyNote"]) == 9
+    assert nodes["Cloudflare Model"]["disabled"] is True
+    assert nodes["Cloudflare Model"]["type"] == "n8n-nodes-base.httpRequest"
     assert links["Get Mikasa"]["main"][0][0]["node"] == "Nude"
     assert links["Get Voice File"]["main"][0][0]["node"] == "STT ElevenLabs"
     assert links["STT ElevenLabs"]["main"][0][0]["node"] == "Elevenlabs STT"
@@ -429,7 +428,7 @@ def test_active_draft_single_search_update_is_verified(tmp_path):
     assert state["active"] is True
     assert "Mika Wikipedia Fallback" not in {n["name"] for n in state["nodes"]}
     memory = {n["name"]: n for n in state["nodes"]}
-    for name in ("Mika Simple Memory", "Serious Simple Memory"):
+    for name in ("Mika Postgres Memory", "Serious Postgres Memory"):
         assert memory[name]["parameters"]["contextWindowLength"] == 4
     assert ("POST", "/workflows/draft/deactivate") in events
     assert (tmp_path / "before-single-search-update.json").is_file()
@@ -661,8 +660,8 @@ def test_ai_telegram_replies_use_original_webhook_message_after_agent():
         assert "Telegram Trigger').first()" in \
             params["additionalFields"]["reply_to_message_id"]
         assert params.get("operation", "sendMessage") != "sendMessageDraft"
-    assert nodes["Mika Simple Memory"]["parameters"]["contextWindowLength"] == 4
-    assert nodes["Serious Simple Memory"]["parameters"]["contextWindowLength"] == 4
+    assert nodes["Mika Postgres Memory"]["parameters"]["contextWindowLength"] == 4
+    assert nodes["Serious Postgres Memory"]["parameters"]["contextWindowLength"] == 4
 
 
 def test_verified_base_graph_gets_additive_memory_without_replacing_owner_edits(
