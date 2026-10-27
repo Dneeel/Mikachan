@@ -1,4 +1,4 @@
-# Mikachan Intelligence Desk · v2.1
+# Mikachan Intelligence Desk · v2
 
 This is a fictional owner tool for terms observed in approved Telegram groups.
 It is not affiliated with an intelligence agency. It starts counting only after

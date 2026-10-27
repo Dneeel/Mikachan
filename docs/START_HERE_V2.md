@@ -1,4 +1,4 @@
-# Mikachan v2.1 · start to finish
+# Mikachan v2 · start to finish
 
 Use an interactive Ubuntu/Debian SSH terminal. The installer keeps Mikachan
 under `/opt/Mikachan` and optional n8n independently under `/opt/n8n`.
@@ -7,10 +7,10 @@ It does not require an AI key before the bot can run.
 ## New server
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Dneeel/Mikachan/v2.1/deploy/bootstrap.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/Dneeel/Mikachan/v2/deploy/bootstrap.sh | sudo bash
 ```
 
-Choose **v2.1**, optionally install n8n, and select a verified domain for n8n
+Choose **v2**, optionally install n8n, and select a verified domain for n8n
 if the bot will use its public HTTPS webhook. The domain's DNS A record must
 already point to this server. Finish **Guided setup** in the Mikachan panel:
 enter the BotFather bot token and numeric Owner ID; add groups and the
@@ -46,7 +46,7 @@ it does not prove Groq, ElevenLabs, Tavily, Cloudflare, or Telegram delivery.
 Send `/help`, `/mika hello`, `/tts hello`, and a replied `/stt` from an
 authorized Telegram ID to verify those separate paths.
 
-## Existing installation on v2.1
+## Existing installation on v2
 
 ```bash
 sudo mikachan update

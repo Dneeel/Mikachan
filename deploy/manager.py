@@ -486,7 +486,7 @@ class Manager:
 
     def _target(self, branch: str, commit: str | None = None) -> str:
         if not BRANCH.fullmatch(branch):
-            raise ManagerError("Select an existing version branch such as v2 or v2.1")
+            raise ManagerError("Select an existing version branch such as v1 or v2")
         ref = f"refs/remotes/origin/{branch}^{{commit}}"
         tip = self._run("git", "--git-dir", str(self.paths.repo), "rev-parse", "--verify",
                         ref, check=False)

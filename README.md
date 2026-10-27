@@ -2,7 +2,7 @@
 
 **A private Telegram bot with Downloader, Follow, Community, and Utilities.** One aiogram dispatcher, one SQLite database, one bot identity. Access is denied by default: a registered numeric user ID and an approved group are required for group use. Only Owners can interact in a private bot chat.
 
-The active development branch is **`v2.1`**. The `v1` branch preserves the earlier downloader generation. AI chat is available only through explicit `/mika`, `میکا`, or a supported reply to an AI message.
+The current release branch is **`v2`**. The `v1` branch preserves the earlier downloader generation. AI chat is available only through explicit `/mika`, `میکا`, or a supported reply to an AI message.
 
 ## Follow + social repair (local source patch)
 
@@ -18,7 +18,7 @@ local unit test is not evidence of working live Telegram delivery.
 ## Install on a server
 
 For the complete Mikachan and n8n sequence, use the
-[v2.1 start-to-finish guide](docs/START_HERE_V2_1.md).
+[v2 start-to-finish guide](docs/START_HERE_V2.md).
 
 Use a Debian or Ubuntu server with systemd, Python 3.12+, `sudo`, internet access, and at least 2 GB free disk for Mikachan alone. The installer installs host media tools, retrieves the selected `v2` release, runs offline tests, installs one systemd service, and opens the terminal panel. It **does not start the Telegram bot** until Guided setup is complete. An optional, independent n8n installation needs at least 6 GB free disk, 3 GB installed RAM, and 1.2 GB available RAM; its own preflight decides whether it can proceed safely.
 
@@ -62,7 +62,7 @@ Commands, eligible links, exact triggers, valid interaction replies, and authori
 ## Development and verification
 
 ```bash
-git clone --branch v2.1 https://github.com/Dneeel/Mikachan.git
+git clone --branch v2 https://github.com/Dneeel/Mikachan.git
 cd Mikachan
 uv sync --locked --extra dev
 uv run pytest -q

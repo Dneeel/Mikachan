@@ -117,7 +117,7 @@ def page(section: str, *, relay_enabled: bool, tts_enabled: bool = True,
     if admin and group:
         visible.append("admin")
     if section == "home":
-        return ("✦ <b>MIKACHAN</b>\nCOMMAND DIRECTORY · v2.1\n\n"
+        return ("✦ <b>MIKACHAN</b>\nCOMMAND DIRECTORY · v2\n\n"
                 "<i>Everything you need, one command at a time.</i>\n\n"
                 + "\n".join("⌁ " + SECTIONS[key][0] for key in visible)
                 + "\n\nChoose a section below. Send a supported link to begin.")

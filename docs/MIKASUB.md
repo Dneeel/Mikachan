@@ -1,4 +1,4 @@
-# MikaSub on Mikachan `v2.1`
+# MikaSub on Mikachan `v2`
 
 ## Direct source mode
 
@@ -159,7 +159,7 @@ returns a truthful 503.
 
 ## Deployment and rollback
 
-Use the existing `v2.1` code. Back up the VPS SQLite database and
+Use the existing `v2` code. Back up the VPS SQLite database and
 `/opt/Mikachan/config/bot.env` through the Mikachan manager before activating
 new bot code. Do not start a second bot poller.
 
