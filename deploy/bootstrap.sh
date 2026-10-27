@@ -213,7 +213,7 @@ if ! command -v git >/dev/null 2>&1; then
   safe_apt_install git ca-certificates
 fi
 
-# Read the actual remote branches. No implicit 'latest' or default version.
+# Read every actual remote branch. No implicit 'latest' or default version.
 if ! remote_refs="$(git ls-remote --heads "$repo_url")"; then
   echo 'Could not query GitHub branches; installation cancelled.' >&2
   exit 1
