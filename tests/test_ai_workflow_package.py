@@ -3,6 +3,8 @@
 import json
 import os
 import copy
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -25,8 +27,29 @@ def test_packaged_ai_handles_first_reply_and_captioned_media():
     decide = nodes["Decide AI"]["parameters"]["jsCode"]
     analyze = nodes["Analyze Message"]["parameters"]["jsCode"]
     assert "found ? String(found.json.agent_type || 'chat') : 'chat'" in decide
+    assert "original.mika.userId].join(':')" in decide
+    assert "original.mika.userId, String(m.message_id)" not in decide
     assert "m.reply_to_message?.text?.trim()" in analyze
     assert "m.reply_to_message?.caption?.trim()" in analyze
+
+
+def test_new_messages_from_same_user_reuse_chat_history_session():
+    if not shutil.which("node"):
+        pytest.skip("Node.js is needed to evaluate the n8n route")
+    graph = json.loads(ARTIFACT.read_text())
+    code = next(node for node in graph["nodes"] if node["name"] == "Decide AI")["parameters"]["jsCode"]
+    script = """const code=JSON.parse(process.argv[1]);
+const run=(id)=>{
+  const original={message:{message_id:id,ai_reply_only:false},mika:{
+    explicit:'chat',chatId:'-1001',threadId:'0',userId:'123',replyId:null,replyKey:'__no_reply__'}};
+  const $=()=>({first:()=>({json:original})});
+  const $input={all:()=>[]};
+  return new Function('$input','$',code)($input,$)[0].json.mika.sessionId;
+};
+console.log(JSON.stringify([run(1),run(2)]));"""
+    result = subprocess.run(["node", "-e", script, json.dumps(code)],
+        check=True, capture_output=True, text=True, timeout=5)
+    assert json.loads(result.stdout) == ["chat:-1001:0:123", "chat:-1001:0:123"]
 
 
 def test_search_reconnects_after_long_term_memory_is_added():

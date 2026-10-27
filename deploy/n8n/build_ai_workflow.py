@@ -77,7 +77,7 @@ const agentType = original.mika.explicit || (m.ai_reply_only ?
 if (!['chat', 'serious'].includes(agentType)) return [];
 const sessionId = !original.mika.explicit && found ? String(found.json.session_id) :
   [agentType, original.mika.chatId, original.mika.threadId,
-   original.mika.userId, String(m.message_id)].join(':');
+   original.mika.userId].join(':');
 return [{json: {...original, mika: {...original.mika, agentType, sessionId}}}];
 """.strip()
 

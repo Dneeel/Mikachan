@@ -21,12 +21,14 @@ make another AI call to decide what to store.
 | Chat command | Effect |
 | --- | --- |
 | `میکا یادت باشه: من کتاب قلعه را دوست دارم` | Private fact for that sender, visible to both agents only in that sender's private chat. |
+| `میکا اگه گفتم خیار برام اخبار اخیر مهم جنگ رو بگو` | Save `خیار` as an exact trigger. In private chat it belongs to that sender; in a group, only a verified Owner can teach a trigger and it works only for that Owner in that group. Saying `میکا خیار` then runs the saved request through the normal news and search route. Quote a multiword trigger with `«...»`. |
 | `میکا قانون ادبیاتت: درباره کتاب کوتاه بنویس` | Owner-only global Chat writing rule. Use `/mika قانون ادبیاتت: ...` for Serious. |
 | `میکا قانون شخصیتت: ...` | Owner-only global personality rule for the selected agent. |
 | `میکا نمونه طلایی: سؤال => پاسخ` | Owner-only global example. |
 | Reply to an AI answer with `میکا اصلاح جواب: پاسخ بهتر` | A private correction example for that sender. |
 | Reply with `میکا اصلاح جواب سراسری: پاسخ بهتر` | An Owner-only global correction example, explicitly shared with all users. |
 | `میکا حافظه` / `میکا قوانین` | Show personal facts / Owner's global rules and their IDs. |
+| `میکا حافظه گروه` | In the same group, show the Owner's group triggers and their IDs. |
 | `میکا حافظه ویرایش 12: متن جدید` | Edit a personal item. Use `قانون` for global items. |
 | `میکا حافظه حذف 12` / `میکا حافظه بازگردانی 12` | Delete or restore the preceding revision. Use `قانون` for global items. |
 | `میکا قانون تایید 12` | Activate a pending global rule or edit after reviewing a possible conflict. |
@@ -51,7 +53,16 @@ check and a second Code node check prevent another user or a group from
 receiving a private fact. Older explicit private facts are migrated into the
 editable table idempotently; the old table remains for rollback.
 
+Teaching a conditional phrase produces a database confirmation and does not
+run the news request immediately. A group instruction runs only when that Owner
+says the exact trigger again in the same group. Other members and other groups
+cannot see or activate it. Search still requires working sources; memory does
+not guarantee that a live article is available.
+
 Postgres Chat Memory keeps the last four conversation turns per agent session.
+The session key is stable for the same agent, chat, thread and numeric user ID;
+new messages no longer create a new history merely because their message IDs
+changed. Replies to an existing bot answer retain that answer's recorded session.
 Ordinary conversation is not automatically treated as a durable fact; teach a
 fact explicitly to avoid storing a mistaken inference. Back up or restore the
 independent AI database with `n8n-manage` → **AI Memory · PostgreSQL**.

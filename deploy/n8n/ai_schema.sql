@@ -105,10 +105,10 @@ CREATE INDEX IF NOT EXISTS mika_reply_by_session
 -- n8n's own Postgres Chat Memory tables and is never mined automatically.
 CREATE TABLE IF NOT EXISTS mika_teaching_entries (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    scope TEXT NOT NULL CHECK (scope IN ('private', 'global')),
+    scope TEXT NOT NULL CHECK (scope IN ('private', 'global', 'chat')),
     owner_user_id BIGINT NOT NULL,
     agent_type TEXT NOT NULL CHECK (agent_type IN ('chat', 'serious', 'both')),
-    kind TEXT NOT NULL CHECK (kind IN ('fact', 'personality', 'writing', 'example')),
+    kind TEXT NOT NULL CHECK (kind IN ('fact', 'personality', 'writing', 'example', 'trigger')),
     body TEXT NOT NULL CHECK (length(body) BETWEEN 1 AND 600),
     example_input TEXT,
     status TEXT NOT NULL DEFAULT 'active'
@@ -122,6 +122,18 @@ CREATE TABLE IF NOT EXISTS mika_teaching_entries (
 );
 CREATE INDEX IF NOT EXISTS mika_teaching_scope
     ON mika_teaching_entries (scope, owner_user_id, agent_type, status, updated_at DESC);
+ALTER TABLE mika_teaching_entries
+    DROP CONSTRAINT IF EXISTS mika_teaching_entries_scope_check;
+ALTER TABLE mika_teaching_entries
+    ADD CONSTRAINT mika_teaching_entries_scope_check
+    CHECK (scope IN ('private', 'global', 'chat'));
+-- Existing installations have the original four-kind constraint. Upgrade it
+-- without creating another database or discarding any rows.
+ALTER TABLE mika_teaching_entries
+    DROP CONSTRAINT IF EXISTS mika_teaching_entries_kind_check;
+ALTER TABLE mika_teaching_entries
+    ADD CONSTRAINT mika_teaching_entries_kind_check
+    CHECK (kind IN ('fact', 'personality', 'writing', 'example', 'trigger'));
 
 CREATE TABLE IF NOT EXISTS mika_teaching_revisions (
     entry_id BIGINT NOT NULL REFERENCES mika_teaching_entries(id),
@@ -176,56 +188,85 @@ DECLARE
     answer JSONB;
     chosen_status TEXT;
 BEGIN
-    IF p_actor IS NULL OR p_actor <= 0 OR p_chat <> p_actor OR
+    IF p_actor IS NULL OR p_actor <= 0 OR p_chat IS NULL OR
+       (p_chat <> p_actor AND NOT (p_owner AND p_scope='chat')) OR
        p_message IS NULL OR p_message <= 0 THEN
-        RETURN jsonb_build_object('status', 'DENIED', 'reason', 'Private chat required');
+        RETURN jsonb_build_object('status', 'DENIED', 'reason', 'Owner group or private chat required');
     END IF;
     PERFORM pg_advisory_xact_lock(hashtextextended(
       p_actor::text || ':' || p_message::text, 0));
     SELECT result INTO answer FROM mika_teaching_operations
       WHERE actor_id=p_actor AND chat_id=p_chat AND message_id=p_message;
     IF FOUND THEN RETURN answer; END IF;
-    IF p_scope = 'global' AND NOT p_owner THEN
+    IF p_scope IN ('global','chat') AND NOT p_owner THEN
         answer := jsonb_build_object('status', 'DENIED', 'reason', 'Owner required');
     ELSIF p_action = 'list' THEN
         SELECT jsonb_build_object('status', 'LIST', 'items',
           COALESCE(jsonb_agg(jsonb_build_object('id',id,'kind',kind,'agent',agent_type,
             'body',left(body,120),'status',status) ORDER BY updated_at DESC), '[]'::jsonb))
           INTO answer FROM (SELECT * FROM mika_teaching_entries
-            WHERE scope=p_scope AND (p_scope='global' OR owner_user_id=p_actor)
+            WHERE scope=p_scope AND (p_scope='global' OR
+              (owner_user_id=p_actor AND
+               (p_scope='private' OR source_chat_id=p_chat)))
               AND status <> 'deleted' ORDER BY updated_at DESC LIMIT 12) recent;
     ELSIF p_action = 'create' THEN
-        IF p_scope NOT IN ('private','global') OR
+        IF p_scope NOT IN ('private','global','chat') OR
            p_agent NOT IN ('chat','serious','both') OR
-           p_kind NOT IN ('fact','personality','writing','example') OR
+           p_kind NOT IN ('fact','personality','writing','example','trigger') OR
            p_body IS NULL OR length(btrim(p_body)) NOT BETWEEN 1 AND 600 OR
-           (p_scope='global' AND p_kind='fact') THEN
+           (p_scope='global' AND p_kind IN ('fact','trigger')) OR
+           (p_scope='chat' AND (p_chat=p_actor OR p_kind<>'trigger')) OR
+           (p_kind='trigger' AND (p_example IS NULL OR
+             length(btrim(p_example)) NOT BETWEEN 1 AND 120)) THEN
             answer := jsonb_build_object('status','INVALID');
         ELSIF p_scope='global' AND p_body ~* 'verifiedDaniel|verifiedOwner|adultVerified|توکن|رمز عبور|مجوز دسترسی|افشای اسرار' THEN
             answer := jsonb_build_object('status','CORE_CONFLICT');
         ELSE
-            chosen_status := 'active';
-            IF p_scope='global' AND EXISTS (SELECT 1 FROM mika_teaching_entries
-               WHERE scope='global' AND agent_type=p_agent AND kind=p_kind
-                 AND status='active') THEN
-                chosen_status := 'pending';
+            IF p_kind='trigger' THEN
+                PERFORM pg_advisory_xact_lock(hashtextextended(
+                  'trigger:' || p_actor::text || ':' || p_chat::text || ':' ||
+                  p_agent || ':' || lower(btrim(p_example)), 0));
+                SELECT * INTO row_item FROM mika_teaching_entries
+                  WHERE kind='trigger' AND scope=p_scope AND owner_user_id=p_actor
+                    AND agent_type=p_agent AND source_chat_id=p_chat
+                    AND lower(example_input)=lower(btrim(p_example))
+                    AND status='active'
+                  ORDER BY updated_at DESC,id DESC LIMIT 1 FOR UPDATE;
             END IF;
-            INSERT INTO mika_teaching_entries
-              (scope,owner_user_id,agent_type,kind,body,example_input,status,
-               source_chat_id,source_message_id)
-              VALUES (p_scope,p_actor,p_agent,p_kind,btrim(p_body),
-                nullif(btrim(p_example),''),chosen_status,p_chat,p_message)
-              RETURNING * INTO row_item;
-            INSERT INTO mika_teaching_revisions
-              (entry_id,revision,body,example_input,status,changed_by)
-              VALUES (row_item.id,1,row_item.body,row_item.example_input,
-                      chosen_status,p_actor);
-            answer := jsonb_build_object('status',upper(chosen_status),'id',row_item.id);
+            IF FOUND AND p_kind='trigger' THEN
+                UPDATE mika_teaching_entries SET body=btrim(p_body),
+                  revision=revision+1,updated_at=now() WHERE id=row_item.id
+                  RETURNING * INTO row_item;
+                INSERT INTO mika_teaching_revisions
+                  (entry_id,revision,body,example_input,status,changed_by)
+                  VALUES (row_item.id,row_item.revision,row_item.body,
+                          row_item.example_input,row_item.status,p_actor);
+                answer := jsonb_build_object('status','UPDATED','id',row_item.id);
+            ELSE
+                chosen_status := 'active';
+                IF p_scope='global' AND EXISTS (SELECT 1 FROM mika_teaching_entries
+                   WHERE scope='global' AND agent_type=p_agent AND kind=p_kind
+                     AND status='active') THEN
+                    chosen_status := 'pending';
+                END IF;
+                INSERT INTO mika_teaching_entries
+                  (scope,owner_user_id,agent_type,kind,body,example_input,status,
+                   source_chat_id,source_message_id)
+                  VALUES (p_scope,p_actor,p_agent,p_kind,btrim(p_body),
+                    nullif(btrim(p_example),''),chosen_status,p_chat,p_message)
+                  RETURNING * INTO row_item;
+                INSERT INTO mika_teaching_revisions
+                  (entry_id,revision,body,example_input,status,changed_by)
+                  VALUES (row_item.id,1,row_item.body,row_item.example_input,
+                          chosen_status,p_actor);
+                answer := jsonb_build_object('status',upper(chosen_status),'id',row_item.id);
+            END IF;
         END IF;
     ELSIF p_action IN ('edit','delete','restore','confirm') THEN
         SELECT * INTO row_item FROM mika_teaching_entries WHERE id=p_target FOR UPDATE;
-        IF NOT FOUND OR (row_item.scope='global' AND NOT p_owner) OR
-           (row_item.scope='private' AND row_item.owner_user_id<>p_actor) THEN
+        IF NOT FOUND OR row_item.scope<>p_scope OR
+           (row_item.scope='global' AND NOT p_owner) OR
+           (row_item.scope IN ('private','chat') AND row_item.owner_user_id<>p_actor) THEN
             answer := jsonb_build_object('status','DENIED');
         ELSIF p_action='edit' THEN
             IF p_body IS NULL OR length(btrim(p_body)) NOT BETWEEN 1 AND 600 THEN
