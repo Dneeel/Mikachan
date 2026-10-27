@@ -73,6 +73,39 @@ async def test_pornhub_confirmation_starts_relay_without_local_job(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_pornhub_user_quality_choice_reaches_provider():
+    app = App.__new__(App)
+    app.authorized = lambda *_args: True
+    app._ph_choices = {}
+    app.bot = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=88)),
+                              edit_message_text=AsyncMock())
+    chosen = []
+    async def provider(_url, choose_quality):
+        chosen.append(await choose_quality(["1080p · 550 MB", "720p · 312 MB",
+                                             "480p · 171 MB", "240p · 75 MB"]))
+        return object()
+    app.userbot = SimpleNamespace(pornhub_video=provider, deliver_pornhub=AsyncMock())
+    task = asyncio.create_task(app._deliver_pornhub_relay(
+        "https://www.pornhub.com/view_video.php?viewkey=6ac5dd5aca7cb",
+        42, 42, "private", 100))
+    for _ in range(20):
+        if app._ph_choices:
+            break
+        await asyncio.sleep(0.01)
+    assert app._ph_choices
+    token = next(iter(app._ph_choices))
+    q = SimpleNamespace(from_user=SimpleNamespace(id=42),
+                        message=SimpleNamespace(chat=SimpleNamespace(id=42, type="private"),
+                                                message_id=88),
+                        answer=AsyncMock(), data=f"ph:{token}:1")
+    await app.callback(q)
+    await task
+    assert chosen == [1]
+    assert not app._ph_choices
+    app.userbot.deliver_pornhub.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_quality_menu_opens_before_slow_metadata_and_adds_only_known_sizes(tmp_path):
     store = Store(tmp_path / "bot.sqlite")
     cid = store.confirm_create(42, 42, 100, 0,
