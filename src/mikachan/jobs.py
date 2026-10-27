@@ -101,6 +101,14 @@ def extractor_error(url: str, stderr: bytes) -> str:
     """Summarize extractor failures without forwarding untrusted output or URLs."""
     detail = stderr.decode(errors="replace").lower()
     provider = source(url)
+    if provider == "youtube" and any(term in detail for term in
+            ("sign in to confirm", "not a bot", "confirm you're not a bot",
+             "this video may be inappropriate", "age-restricted")):
+        return ("YouTube is asking this server to verify access. Configure an owner-owned "
+                "MIKACHAN_YOUTUBE_COOKIES_FILE, then retry; this is not proof the video was removed")
+    if provider == "youtube" and any(term in detail for term in
+            ("unable to connect to proxy", "proxyerror", "connection refused")):
+        return "YouTube is unreachable from this server's current network or proxy"
     if any(term in detail for term in ("cookies", "login", "authentication required",
                                         "sign in", "redirect to login page")):
         return ("Instagram requires an authorized public session; configure a private "
@@ -236,7 +244,8 @@ class Worker:
         validate_dns(url)
         proc = await asyncio.create_subprocess_exec(
             sys.executable, "-m", "yt_dlp", "--ignore-config",
-            "--compat-options", "no-certifi", *site_cookie_args(url),
+            "--compat-options", "no-certifi", "--js-runtimes", "deno",
+            *site_cookie_args(url),
             "--no-playlist", "--dump-single-json", "--skip-download", "--no-warnings", url,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
             start_new_session=True, env=extractor_env())
@@ -1766,6 +1775,7 @@ class Worker:
             "-m", "yt_dlp",
             "--ignore-config",
             "--compat-options", "no-certifi",
+            "--js-runtimes", "deno",
             *site_cookie_args(url),
             "--playlist-end",
             "10",

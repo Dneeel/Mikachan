@@ -28,7 +28,8 @@ def site_cookie_args(url: str) -> list[str]:
     provider. The bot runs without cookies when this is not configured.
     """
     provider = source(url)
-    setting = {"instagram": "MIKACHAN_INSTAGRAM_COOKIES_FILE",
+    setting = {"youtube": "MIKACHAN_YOUTUBE_COOKIES_FILE",
+               "instagram": "MIKACHAN_INSTAGRAM_COOKIES_FILE",
                "pornhub": "MIKACHAN_PORNHUB_COOKIES_FILE"}.get(provider)
     if not setting:
         return []

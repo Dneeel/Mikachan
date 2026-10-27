@@ -63,9 +63,11 @@ async def test_pornhub_confirmation_starts_relay_without_local_job(tmp_path):
     q.data = f"c:{cid}:y"
     await app.callback(q)
     await asyncio.gather(*app._ph_tasks)
-    assert "several minutes" in edits[0][0]
+    assert "Select the quality" in edits[0][0]
     assert store.jobs(42) == []
-    app.userbot.pornhub_video.assert_awaited_once()
+    assert app.userbot.pornhub_video.await_count == 1
+    assert app.userbot.pornhub_video.await_args.args[0].startswith("https://www.pornhub.com/")
+    assert callable(app.userbot.pornhub_video.await_args.args[1])
     app.userbot.deliver_pornhub.assert_awaited_once_with(app.bot,
         app.userbot.pornhub_video.return_value, 42, 100)
 

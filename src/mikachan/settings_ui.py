@@ -64,14 +64,26 @@ class SettingsUI:
     async def show(self, m: Message) -> None:
         if not m.from_user or not self.access.can_access(m.from_user.id, m.chat.id, m.chat.type):
             return
+        await self.open_for(m.from_user.id, m.chat.id, m.chat.type, reply_to=m)
+
+    async def open_for(self, user: int, chat: int, chat_type: str,
+                       *, reply_to: Message | None = None) -> None:
+        """Open settings for a verified callback actor, independent of bot message sender."""
+        if not self.access.can_access(user, chat, chat_type):
+            return
         token = secrets.token_urlsafe(9)
-        owner_private = m.chat.type == "private" and self.access.role(m.from_user.id) == "OWNER"
+        owner_private = chat_type == "private" and self.access.role(user) == "OWNER"
         page = "home" if owner_private else "personal"
         self.db.execute("INSERT INTO settings_sessions(token,user_id,chat_id,message_id,page,expires) "
                         "VALUES (?,?,?,NULL,?,?)",
-                        (token, m.from_user.id, m.chat.id, page, time.time() + 900))
-        body, buttons = self._render(token, m.from_user.id, m.chat.id, page)
-        sent = await m.reply(body, reply_markup=buttons)
+                        (token, user, chat, page, time.time() + 900))
+        body, buttons = self._render(token, user, chat, page)
+        if reply_to:
+            sent = await reply_to.reply(body, reply_markup=buttons)
+        else:
+            if self.bot is None:
+                raise ValueError("Bot transport is unavailable")
+            sent = await self.bot.send_message(chat, body, reply_markup=buttons)
         self.db.execute("UPDATE settings_sessions SET message_id=? WHERE token=?",
                         (sent.message_id, token))
 

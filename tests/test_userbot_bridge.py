@@ -160,3 +160,31 @@ async def test_pornhub_relay_accepts_only_video_from_verified_provider():
     bridge.client.send_message.assert_awaited_once_with(peer, url)
     with pytest.raises(ValueError, match="Pornhub"):
         await bridge.pornhub_video("https://example.com/video")
+
+
+@pytest.mark.asyncio
+async def test_pornhub_quality_menu_clicks_selected_provider_button():
+    peer = SimpleNamespace(id=77, bot=True, username="PHDownlBot")
+    menu = SimpleNamespace(id=102, sender_id=77, video=None, document=None,
+        media=object(), buttons=[
+            [SimpleNamespace(text="1080p · 550 MB")],
+            [SimpleNamespace(text="720p · 312 MB")],
+            [SimpleNamespace(text="480p · 171 MB")],
+            [SimpleNamespace(text="240p · 75 MB")],
+            [SimpleNamespace(text="Cancel")]], click=AsyncMock())
+    video = SimpleNamespace(id=103, sender_id=77, video=object(), media=object(),
+                            buttons=None)
+    bridge = UserbotBridge.__new__(UserbotBridge)
+    bridge.pornhub_lock = asyncio.Lock()
+    bridge.pornhub_peer = None
+    bridge._ready = AsyncMock()
+    bridge.client = SimpleNamespace(get_entity=AsyncMock(return_value=peer),
+        send_message=AsyncMock(return_value=SimpleNamespace(id=101)),
+        get_messages=AsyncMock(side_effect=[[menu], [menu, video]]))
+    async def choose(options):
+        assert options == ["1080p · 550 MB", "720p · 312 MB", "480p · 171 MB",
+                           "240p · 75 MB"]
+        return 1
+    assert await bridge.pornhub_video(
+        "https://www.pornhub.com/view_video.php?viewkey=6ac5dd5aca7cb", choose) is video
+    menu.click.assert_awaited_once_with(1, 0)

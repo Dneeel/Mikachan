@@ -13,6 +13,8 @@ from mikachan.explore import Explore, _post, topic_from_arg
 def test_topic_and_media_validation():
     assert topic_from_arg("#attackontitan") == "attackontitan"
     assert topic_from_arg("#MW4") == "MW4"
+    assert topic_from_arg("attack on titan edit") == "attack on titan edit"
+    assert topic_from_arg("mw4 reaction") == "mw4 reaction"
     with pytest.raises(ValueError):
         topic_from_arg("#bad/topic")
     assert _post({"video_id": "1234567890123456789", "author": {"unique_id": "alice"},
@@ -72,6 +74,28 @@ async def test_exact_challenge_identity_returns_posts_without_caption_hashtag(mo
     second = await explore._find(session)
     assert second["id"] != result["id"]
     assert seen == ["/api/challenge/search", "/api/challenge/posts"]
+
+
+@pytest.mark.asyncio
+async def test_multiword_search_keeps_provider_ranked_result_without_exact_caption(monkeypatch):
+    def handler(request):
+        assert request.url.path == "/api/feed/search"
+        assert request.url.params["keywords"] == "attack on titan edit"
+        return httpx.Response(200, json={"code": 0, "data": [
+            {"id": "1234567890123456789", "author": {"unique_id": "alice"},
+             "title": "An epic AOT montage", "play": "https://tikwm.com/a.mp4",
+             "play_count": 500},
+            {"id": "2234567890123456789", "author": {"unique_id": "bob"},
+             "title": "Attack on Titan", "play": "https://tikwm.com/b.mp4",
+             "play_count": 20}]})
+    original = httpx.AsyncClient
+    monkeypatch.setattr("mikachan.explore.httpx.AsyncClient",
+        lambda **kwargs: original(transport=httpx.MockTransport(handler), **kwargs))
+    explore = Explore(object())
+    _token, session = explore._new(7, 70, "attack on titan edit")
+    assert (await explore._find(session))["handle"] == "alice"
+    session.seen.add("1234567890123456789")
+    assert (await explore._find(session))["handle"] == "bob"
 
 
 @pytest.mark.asyncio

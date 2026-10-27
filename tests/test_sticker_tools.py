@@ -161,11 +161,16 @@ async def test_xst_requires_replied_sticker():
 
 
 def test_command_registration_and_removed_rate():
+    from mikachan.command_guide import SECTIONS, commands
+
     src = (Path(__file__).resolve().parents[1] / "src/mikachan/bot.py").read_text()
     utilities = (Path(__file__).resolve().parents[1] / "src/mikachan/utilities.py").read_text()
-    assert '("st", "Convert replied image to sticker")' in src
-    assert '("xst", "Convert replied sticker to PNG")' in src
-    assert '("rate", "Fiat or crypto reference rate")' not in src
+    tools = dict(SECTIONS["tools"][1])
+    assert tools["st"] == "Turn a replied image into a sticker"
+    assert tools["xst"] == "Turn a replied sticker into PNG"
+    registered = {item.command for item in commands(relay_enabled=False,
+                                                    tts_enabled=False, stt_enabled=False)}
+    assert {"st", "xst"} <= registered and "rate" not in registered
     assert 'if cmd == "/rate":' in src  # explicit no-op for deprecated slash route
     assert '"/rate"' not in utilities
     assert '"عکس به استیکر"' in src and '"استیکر به عکس"' in src

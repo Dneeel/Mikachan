@@ -7,6 +7,7 @@ import mimetypes
 import re
 import tempfile
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -197,12 +198,13 @@ class UserbotBridge:
             self.internal_file_peer = peer
         return peer
 
-    async def pornhub_video(self, url: str):
-        """Wait for verified PHDownlBot video; no site extraction or local cache."""
+    async def pornhub_video(self, url: str,
+                            choose_quality: Callable[[list[str]], Awaitable[int]] | None = None):
+        """Ask the verified provider, mirror its first four quality choices, then await video."""
         if source(url) != "pornhub":
             raise ValueError("This relay accepts Pornhub video links only")
         try:
-            async with asyncio.timeout(720):
+            async with asyncio.timeout(1200):
                 async with self.pornhub_lock:
                     await self._ready()
                     peer = self.pornhub_peer
@@ -213,11 +215,29 @@ class UserbotBridge:
                             raise ValueError("Video provider identity could not be verified")
                         self.pornhub_peer = peer
                     sent = await self.client.send_message(peer, url)
+                    menu_id = 0
                     while True:
-                        for answer in await self.client.get_messages(peer, limit=12):
+                        answers = sorted(await self.client.get_messages(peer, limit=20),
+                                         key=lambda item: getattr(item, "id", 0))
+                        for answer in answers:
                             if (getattr(answer, "sender_id", None) != peer.id or
                                     getattr(answer, "id", 0) <= sent.id):
                                 continue
+                            if choose_quality and not menu_id and getattr(answer, "buttons", None):
+                                options = [(r, c, str(getattr(button, "text", "") or "").strip())
+                                           for r, row in enumerate(answer.buttons)
+                                           for c, button in enumerate(row)
+                                           if re.search(r"\b(?:1080|720|480|240)p\b",
+                                                        str(getattr(button, "text", "") or ""), re.I)]
+                                if options:
+                                    options = options[:4]
+                                    selected = await choose_quality([entry[2] for entry in options])
+                                    if not 0 <= selected < len(options):
+                                        raise ValueError("Video quality choice expired")
+                                    row, col, _ = options[selected]
+                                    await answer.click(row, col)
+                                    menu_id = answer.id
+                                    continue
                             document = getattr(answer, "document", None)
                             if (getattr(answer, "video", None) or document and
                                     str(getattr(document, "mime_type", "") or "").startswith(
@@ -225,7 +245,7 @@ class UserbotBridge:
                                 return answer
                         await asyncio.sleep(2)
         except asyncio.TimeoutError as exc:
-            raise ValueError("Video provider did not deliver within 12 minutes") from exc
+            raise ValueError("Video provider did not deliver within 20 minutes") from exc
 
     async def deliver_pornhub(self, bot: Bot, answer, chat: int,
                               original_message: int) -> None:

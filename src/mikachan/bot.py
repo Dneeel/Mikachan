@@ -19,7 +19,6 @@ from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import (
-    BotCommand,
     BufferedInputFile,
     CallbackQuery,
     InlineKeyboardButton,
@@ -46,6 +45,10 @@ from .mikasub_ui import MikaSubUI
 from .instagram_relay import InstagramRelay
 from .external_utilities import ExternalUtilities
 from .explore import Explore
+from .command_guide import (START_TEXT, commands as guide_commands,
+                            navigation as guide_navigation, page as guide_page,
+                            start_navigation)
+from .quick_math import calculate
 from .content_ui import ContentUI, COMMANDS as CONTENT_COMMANDS
 from .n8n_gateway import GatewayError, N8NGateway
 from .intelligence import Intelligence
@@ -194,51 +197,18 @@ def public_media_result(hit: dict[str, object]) -> bool:
     }
 
 
-HELP_TEXT = (
-    "✦ <b>MIKACHAN</b>\n"
-    "Your private toolkit. Choose a task below.\n\n"
-    "⬇️ <b>DOWNLOAD &amp; DISCOVER</b>\n"
-    "Send a supported link → choose <b>Yes</b> or <b>No</b>.\n"
-    "/music QUERY · songs  |  /pod QUERY · shows\n"
-    "/lyric ARTIST - TITLE · find lyrics\n"
-    "/book TITLE · local books  |  /queue · download status\n\n"
-    "👀 <b>PROFILES &amp; FOLLOWING</b>\n"
-    "/in USER · /tw USER · /tt USER · /yt USER\n"
-    "/follow PROFILE_URL · watch a profile\n"
-    "/explore #TOPIC · discover TikTok posts\n"
-    "/following · manage and check follows\n\n"
-    "🛠 <b>QUICK TOOLS</b>\n"
-    "/weather CITY · forecast  |  /now · local time\n"
-    "/nasa · astronomy picture  |  /qr TEXT · QR code\n"
-    "Reply to a file or image: /url · /scan · /ocr · /st · /xst\n"
-    "/tr fa TEXT · translate  |  /asr · transcribe replied audio\n\n"
-    "🎭 <b>CULTURE &amp; MORE</b>\n"
-    "/fal · Hafez  |  /poem · poetry  |  /dice · roll\n"
-    "/pishi · cats  |  /earth · nature  |  /art · art\n"
-    "/proxy · proxies  |  /vpn · subscriptions\n"
-    "Send <b>دلار</b>, <b>سکه</b> or <b>طلا</b> for Toman quotes.\n"
-)
-
-
 def help_text(*, relay_enabled: bool, group: bool, closing: str) -> str:
-    sections = [HELP_TEXT]
+    """Compatibility entrypoint for a static, single-message command directory."""
+    from .command_guide import PUBLIC
+
+    keys = list(PUBLIC)
     if relay_enabled:
-        sections.append(
-            "\n🗣 <b>MIKACHAN AI</b>\n"
-            "/mika QUESTION or <b>میکا QUESTION</b>\n"
-            "Reply to an AI answer to continue the conversation.\n"
-            "/tts TEXT · speech  |  /stt · reply to audio\n"
-        )
+        keys.insert(2, "ai")
     if group:
-        sections.append(
-            "\n👥 <b>IN GROUPS</b>\n"
-            "/rules · /notes · /groupstats\n"
-            "Reply to a member with /id for their profile.\n"
-            "Admins: /groupsettings · /setnote · /mute · /del\n"
-        )
-    sections.append("\n⚙️ /settings · preferences  |  /status · bot status\n"
-                    "<i>" + html.escape(closing) + "</i>")
-    return "".join(sections)
+        keys.append("group")
+    sections = [guide_page(key, relay_enabled=relay_enabled, group=group)
+                for key in keys]
+    return "\n\n".join(sections) + "\n\n<i>" + html.escape(closing) + "</i>"
 
 
 class App:
@@ -283,6 +253,8 @@ class App:
         self._check_all_tasks: dict[int, asyncio.Task[None]] = {}
         self._quality_tasks: set[asyncio.Task[None]] = set()
         self._ph_tasks: set[asyncio.Task[None]] = set()
+        self._ph_choices: dict[str, tuple[int, int, int, asyncio.Future[int], float]] = {}
+        self._guide_sessions: dict[tuple[int, int], tuple[int, float]] = {}
         community_store = CommunityStore(self.store.db)
         community_store.seed_hafez(Path(__file__).parent / "content/hafez.json")
         self.community = Community(self.bot, community_store, settings.owner_telegram_id,
@@ -448,6 +420,9 @@ class App:
                 await self.utilities.command(m, "/st", "")
             return
         text = m.text.strip()
+        if self.module_enabled("utilities", m.chat.id) and (answer := calculate(text)) is not None:
+            await m.reply("🧮 <code>" + html.escape(answer) + "</code>")
+            return
         normalized_text = " ".join(text.replace("ي", "ی").replace("ك", "ک").split())
         if ((normalized_text in {"آیدی", "ایدی"} or
              normalized_text.casefold() == "id" and m.reply_to_message) and
@@ -513,7 +488,7 @@ class App:
                              text.startswith(("ارز ", "هواشناسی ", "اکنون ", "امروز ")) or
                              text in {"هواشناسی", "اکنون", "امروز"})
             builtin = command_name in {
-                "help", "music", "pod", "lyric", "book", "id", "tw", "in",
+                "start", "help", "music", "pod", "lyric", "book", "id", "tw", "in",
                 "follow", "following", "explore",
                 "tt", "yt", "settings", "queue", "status",
                 "fal", "poem", "quote", "pishi", "phishi", "earth", "art", "xotd", "wiki",
@@ -653,7 +628,7 @@ class App:
                 cmd in follow_commands and not self.module_enabled("follow", m.chat.id) or
                 cmd in utility_commands and not self.module_enabled("utilities", m.chat.id) or
                 cmd not in downloader_commands | follow_commands | utility_commands | CONTENT_COMMANDS |
-                    {"/help", "/settings", "/queue", "/status"} and
+                    {"/start", "/help", "/settings", "/queue", "/status"} and
                     not self.module_enabled("community", m.chat.id)):
             return
         if cmd == "/rate":
@@ -782,12 +757,24 @@ class App:
             return
         if await self.utilities.command(m, cmd, arg):
             return
-        if cmd == "/help":
-            personality_mode = self.personality_mode(m.from_user.id, m.chat.type)
-            await m.reply(help_text(
-                relay_enabled=self.settings.mika_n8n_telegram_relay,
-                group=m.chat.type in {"group", "supergroup"},
-                closing=response("ready", personality_mode)))
+        if cmd in {"/start", "/help"}:
+            is_group = m.chat.type in {"group", "supergroup"}
+            access = self.store.access_registry
+            admin = bool(is_group and access and access.can_manage(m.from_user.id, m.chat.id))
+            if cmd == "/start":
+                sent = await m.reply(START_TEXT, reply_markup=start_navigation())
+            else:
+                sent = await m.reply(guide_page("home",
+                    relay_enabled=self.settings.mika_n8n_telegram_relay,
+                    tts_enabled=self.settings.mika_tts_enabled,
+                    stt_enabled=self.settings.mika_stt_enabled,
+                    group=is_group, admin=admin),
+                    reply_markup=guide_navigation("home",
+                        relay_enabled=self.settings.mika_n8n_telegram_relay,
+                        group=is_group, admin=admin))
+            self._guide_sessions[(m.chat.id, sent.message_id)] = (m.from_user.id,
+                                                                  time.monotonic() + 1800)
+            return
         elif cmd == "/follow":
             target = command_target(arg)
             if target is None:
@@ -1369,13 +1356,44 @@ class App:
         bridge = self.userbot
         if bridge is None:
             return
+        token = secrets.token_urlsafe(9)
+
+        async def choose_quality(options: list[str]) -> int:
+            if not self.authorized(user, chat, chat_type):
+                raise ValueError("Request is no longer authorized")
+            future: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+            prompt = await self.bot.send_message(chat,
+                "🎛 <b>Choose the video quality</b>\n"
+                "The provider starts downloading after you select one.",
+                reply_markup=kb([[(label[:64], f"ph:{token}:{index}")]
+                                 for index, label in enumerate(options)] +
+                                [[("✖ Cancel", f"ph:{token}:cancel")]]),
+                reply_parameters=ReplyParameters(message_id=original_message))
+            self._ph_choices[token] = (user, chat, prompt.message_id, future,
+                                       time.monotonic() + 300)
+            try:
+                selected = await asyncio.wait_for(future, 300)
+                await self.bot.edit_message_text(
+                    "⏳ Downloading your selected quality. Delivery can take 5–15 minutes.",
+                    chat_id=chat, message_id=prompt.message_id)
+                return selected
+            finally:
+                self._ph_choices.pop(token, None)
+
         try:
-            video = await bridge.pornhub_video(url)
+            video = await bridge.pornhub_video(url, choose_quality)
             if not self.authorized(user, chat, chat_type):
                 return
             await bridge.deliver_pornhub(self.bot, video, chat, original_message)
         except asyncio.CancelledError:
             raise
+        except ValueError as exc:
+            if str(exc) == "Video request cancelled":
+                return
+            if self.authorized(user, chat, chat_type):
+                await self.bot.send_message(chat,
+                    "⚠️ The video provider did not deliver a usable video. Try again later.",
+                    reply_parameters=ReplyParameters(message_id=original_message))
         except Exception:
             if self.authorized(user, chat, chat_type):
                 await self.bot.send_message(chat,
@@ -1392,6 +1410,69 @@ class App:
             await acknowledge(q)
             return
         data = q.data or ""
+        if data.startswith("ph:"):
+            parts = data.split(":")
+            entry = getattr(self, "_ph_choices", {}).get(parts[1]) if len(parts) == 3 else None
+            if (not entry or entry[0] != q.from_user.id or entry[1] != q.message.chat.id or
+                    entry[2] != q.message.message_id or entry[4] < time.monotonic() or
+                    entry[3].done()):
+                await acknowledge(q, "Quality choice expired or belongs to another user")
+                return
+            await acknowledge(q)
+            if parts[2] == "cancel":
+                entry[3].set_exception(ValueError("Video request cancelled"))
+                await q.message.edit_text("Video request cancelled.")
+            elif parts[2].isdigit() and int(parts[2]) < 4:
+                entry[3].set_result(int(parts[2]))
+            return
+        if data.startswith("guide:"):
+            session = getattr(self, "_guide_sessions", {}).get(
+                (q.message.chat.id, q.message.message_id))
+            if not session or session[0] != q.from_user.id or session[1] < time.monotonic():
+                await acknowledge(q, "This menu expired or belongs to another user")
+                return
+            action = data.partition(":")[2]
+            if action not in {"start", "home", "music", "social", "tools", "culture",
+                              "network", "system", "ai", "group", "admin", "meet",
+                              "musicfind", "settings", "close"}:
+                await acknowledge(q)
+                return
+            await acknowledge(q)
+            if action == "close":
+                self._guide_sessions.pop((q.message.chat.id, q.message.message_id), None)
+                await q.message.delete()
+                return
+            if action == "settings":
+                await self.settings_ui.open_for(q.from_user.id, q.message.chat.id,
+                                                q.message.chat.type)
+                return
+            if action == "musicfind":
+                if not self.module_enabled("downloader", q.message.chat.id):
+                    await q.message.edit_text("Music search is disabled for this chat.")
+                    return
+                self.store.prompt_query(q.from_user.id, q.message.chat.id, "music", 600)
+                await q.message.edit_text("🎧 Send a song, artist, or album name in the next 10 minutes.",
+                                          reply_markup=guide_navigation("music",
+                                            relay_enabled=self.settings.mika_n8n_telegram_relay,
+                                            group=q.message.chat.type in {"group", "supergroup"},
+                                            admin=self.is_owner(q.from_user.id)))
+                return
+            group = q.message.chat.type in {"group", "supergroup"}
+            access = self.store.access_registry
+            admin = bool(group and access and access.can_manage(q.from_user.id,
+                                                                 q.message.chat.id))
+            if action == "start":
+                await q.message.edit_text(START_TEXT, reply_markup=start_navigation())
+                return
+            await q.message.edit_text(guide_page(action,
+                relay_enabled=self.settings.mika_n8n_telegram_relay,
+                tts_enabled=self.settings.mika_tts_enabled,
+                stt_enabled=self.settings.mika_stt_enabled,
+                group=group, admin=admin),
+                reply_markup=guide_navigation(action,
+                    relay_enabled=self.settings.mika_n8n_telegram_relay,
+                    group=group, admin=admin))
+            return
         if (data.startswith("ct:") and
                 not self.module_enabled("content", q.message.chat.id) or
                 data.startswith("au:") and
@@ -1790,8 +1871,8 @@ class App:
                 if state == "REJECTED":
                     await q.message.delete()
                 elif state == "ACCEPTED" and relay_url:
-                    await q.message.edit_text("⏳ Waiting for the video provider. "
-                        "The video will be sent here when it arrives; this may take several minutes.")
+                    await q.message.edit_text("⏳ Contacting the video provider. "
+                        "Select the quality when its menu appears.")
                     ph_task = asyncio.create_task(self._deliver_pornhub_relay(relay_url,
                         q.from_user.id, q.message.chat.id, q.message.chat.type,
                         int(ph_row["message_id"])))
@@ -2369,55 +2450,10 @@ class App:
         identity = await self.bot.get_me()
         self.bot_username = identity.username or ""
         await self.audio_ui.recover()
-        await self.bot.set_my_commands(
-            [
-                BotCommand(command=x, description=y)
-                for x, y in (
-                    ("help", "How to use"),
-                    ("music", "Search music"),
-                    ("pod", "Search podcasts"),
-                    ("lyric", "Find lyrics for a song"),
-                    ("book", "Find books in local sources"),
-                    ("tw", "Twitter profile"),
-                    ("in", "Instagram profile"),
-                    ("tt", "TikTok profile"),
-                    ("yt", "YouTube profile"),
-                    ("follow", "Follow a public profile"),
-                    ("explore", "Discover TikTok posts"),
-                    ("following", "Manage followed profiles"),
-                    ("settings", "Preferences"),
-                    ("queue", "My jobs"),
-                    ("status", "Status"),
-                    ("fal", "Reviewed Hafez fortune"),
-                    ("pishi", "Reviewed domestic cat photos"),
-                    ("earth", "Species and nature"),
-                    ("art", "Open-access art"),
-                    ("xotd", "Daily sourced features"),
-                    ("quote", "Sourced Wikiquote excerpts"),
-                    ("wiki", "Wikipedia search and discovery"),
-                    ("tts", "Configure text to speech"),
-                    ("stt", "Configure speech to text"),
-                    ("poem", "Poetry menu"),
-                    ("dice", "Roll a Telegram die"),
-                    ("rules", "Group rules"),
-                    ("groupstatus", "Observed group message statistics"),
-                    ("id", "Identify a replied group member"),
-                    ("notes", "Manage group notes"),
-                    ("qr", "Create a QR image"),
-                    ("url", "Get a link for a replied file"),
-                    ("mika", "Ask Mikachan through n8n"),
-                    ("scan", "Scan a replied QR or barcode"),
-                    ("ocr", "Read text in a replied image"),
-                    ("st", "Convert replied image to sticker"),
-                    ("xst", "Convert replied sticker to PNG"),
-                    ("weather", "Weather and forecast"),
-                    ("now", "Local time and calendars"),
-                    ("nasa", "NASA astronomy picture"),
-                    ("proxy", "Current Telegram proxies"),
-                    ("vpn", "MikaSub and subscription converter"),
-                )
-            ]
-        )
+        await self.bot.set_my_commands(guide_commands(
+            relay_enabled=self.settings.mika_n8n_telegram_relay,
+            tts_enabled=self.settings.mika_tts_enabled,
+            stt_enabled=self.settings.mika_stt_enabled))
         task = asyncio.create_task(self.worker.loop())
         follow_task = asyncio.create_task(self.follow.loop())
         self.mikasub_core.background = asyncio.create_task(self.mikasub_core.periodic())

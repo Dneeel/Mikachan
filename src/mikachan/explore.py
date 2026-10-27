@@ -29,6 +29,7 @@ class ExploreSession:
     challenge_id: str = ""
     challenge_cursor: int = 0
     challenge_more: bool = True
+    search_cursor: int = 0
     pool: list[dict[str, object]] = field(default_factory=list)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -134,8 +135,10 @@ class Explore:
             raise ValueError("No more accessible TikTok posts were found for this topic")
         async with httpx.AsyncClient(timeout=12, follow_redirects=False,
                                      limits=httpx.Limits(max_connections=4)) as client:
+            source_success = False
             async def get(path: str, params: dict[str, str | int], *,
                           challenge: bool = False) -> dict:
+                nonlocal source_success
                 # The public challenge endpoints document a one request per
                 # second budget. Serialize across concurrent Explore users.
                 if challenge:
@@ -150,6 +153,7 @@ class Explore:
                     response = await client.get("https://www.tikwm.com/api/" + path,
                     params=params, headers={"Accept": "application/json"})
                 response.raise_for_status()
+                source_success = True
                 if len(response.content) > 2_000_000:
                     raise ValueError("TikTok discovery response is too large")
                 payload = response.json()
@@ -190,7 +194,13 @@ class Explore:
             if session.topic and not items:
                 try:
                     items = await fetch("search", {"keywords": session.topic,
-                                                    "count": 20, "cursor": 0})
+                                                    "count": 30,
+                                                    "cursor": session.search_cursor})
+                    if items:
+                        # A provider search can identify a topic even when the
+                        # creator's caption does not repeat every search word.
+                        verified_topic = True
+                        session.search_cursor += len(items)
                 except (httpx.HTTPError, ValueError):
                     pass  # The public search endpoint often returns a 403 challenge.
             if not items:
@@ -211,10 +221,12 @@ class Explore:
                     all(term in str(item.get("title") or item.get(
                         "content_desc") or "").casefold() for term in terms)]
         posts = [post for item in items[:40] if (post := _post(item)) is not None]
-        if session.topic:
-            session.pool.extend(posts)
+        session.pool.extend(post for post in posts if post["id"] not in
+                            {existing["id"] for existing in session.pool})
         unseen = [post for post in posts if post["id"] not in session.seen]
         if not unseen:
+            if not source_success:
+                raise ValueError("TikTok search is blocked from this server right now")
             raise ValueError("No more accessible TikTok posts were found for this topic")
         return max(unseen, key=lambda post: int(str(post.get("score") or 0))) \
             if session.topic else random.choice(unseen)
@@ -226,30 +238,43 @@ class Explore:
             await self._send_next(token, session)
 
     async def _send_next(self, token: str, session: ExploreSession) -> None:
-        try:
-            post = await self._find(session)
-            ident, handle = str(post["id"]), str(post["handle"])
-            caption = ("🎬 <b>TikTok Explore</b>" +
-                       (" · #" + html.escape(session.topic) if session.topic else " · Random") +
-                       "\n👤 @" + html.escape(handle) +
-                       ("\n\n" + html.escape(str(post["title"])) if post["title"] else ""))[:900]
-            profile = f"https://www.tiktok.com/@{handle}"
-            images = post["images"]
-            if isinstance(images, list) and images:
-                for image in images[:-1]:
-                    await self.bot.send_photo(session.chat_id, image)
-                sent = await self.bot.send_photo(session.chat_id, images[-1], caption=caption,
-                    reply_markup=_markup(token, profile))
-            else:
-                sent = await self.bot.send_video(session.chat_id, str(post["video"]),
-                    caption=caption, reply_markup=_markup(token, profile))
-            session.seen.add(ident)
-            session.message_id = sent.message_id
-            session.message_ids.add(sent.message_id)
-        except (httpx.HTTPError, TelegramAPIError, ValueError, TypeError) as exc:
-            reason = ("TikTok discovery or media delivery is unavailable right now"
-                      if isinstance(exc, (httpx.HTTPError, TelegramAPIError)) else str(exc))
-            await self.bot.send_message(session.chat_id, "⚠️ " + html.escape(reason))
+        for attempt in range(3):
+            try:
+                post = await self._find(session)
+                ident, handle = str(post["id"]), str(post["handle"])
+                topic_label = (("#" if " " not in session.topic else "") +
+                               html.escape(session.topic)) if session.topic else "Random"
+                caption = ("🎬 <b>TikTok Explore</b>" +
+                           " · " + topic_label +
+                           "\n👤 @" + html.escape(handle) +
+                           ("\n\n" + html.escape(str(post["title"])) if post["title"] else ""))[:900]
+                profile = f"https://www.tiktok.com/@{handle}"
+                images = post["images"]
+                if isinstance(images, list) and images:
+                    for image_url in images[:-1]:
+                        await self.bot.send_photo(session.chat_id, image_url)
+                    sent = await self.bot.send_photo(session.chat_id, images[-1], caption=caption,
+                        reply_markup=_markup(token, profile))
+                else:
+                    sent = await self.bot.send_video(session.chat_id, str(post["video"]),
+                        caption=caption, reply_markup=_markup(token, profile))
+                session.seen.add(ident)
+                session.message_id = sent.message_id
+                session.message_ids.add(sent.message_id)
+                return
+            except TelegramAPIError:
+                # Signed CDN URLs may expire. Try the next ranked post first.
+                session.seen.add(str(post["id"]))
+                if attempt < 2:
+                    continue
+                await self.bot.send_message(session.chat_id,
+                    "⚠️ TikTok returned posts, but Telegram could not deliver their media.")
+                return
+            except (httpx.HTTPError, ValueError, TypeError) as exc:
+                reason = ("TikTok discovery is unavailable right now"
+                          if isinstance(exc, httpx.HTTPError) else str(exc))
+                await self.bot.send_message(session.chat_id, "⚠️ " + html.escape(reason))
+                return
 
     async def callback(self, query: CallbackQuery) -> bool:
         data = query.data or ""
