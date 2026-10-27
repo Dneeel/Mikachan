@@ -8,7 +8,10 @@ def test_command_order_matches_directory_and_optional_ai():
     names = [command.command for command in commands(relay_enabled=True,
                                                       tts_enabled=True, stt_enabled=False)]
     assert names[:5] == ["start", "help", "music", "pod", "lyric"]
-    assert "mika" in names and "tts" in names and "stt" not in names
+    assert "mika" in names and "tts" in names and "stt" in names
+    disconnected = [command.command for command in commands(
+        relay_enabled=False, tts_enabled=False, stt_enabled=False)]
+    assert "tts" in disconnected and "stt" in disconnected and "edit" in disconnected
     assert "<code>/music</code>" in page("music", relay_enabled=False)
     assert "<code>/pod</code>" in page("music", relay_enabled=False)
     assert "<code>/mika</code>" not in page("home", relay_enabled=False)

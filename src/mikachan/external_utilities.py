@@ -11,7 +11,8 @@ import time
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup,
+                           Message, ReplyParameters)
 from aiogram.exceptions import TelegramAPIError
 
 from .userbot import UserbotBridge
@@ -30,10 +31,22 @@ class StyleSession:
     buttons: dict[int, tuple[int, int, str]]
 
 
+@dataclass
+class EditSession:
+    user: int
+    chat: int
+    message: int
+    original: int
+    upstream: int
+    expires: float
+    buttons: dict[int, tuple[int, int, str]]
+
+
 class ExternalUtilities:
     def __init__(self, bridge: UserbotBridge | None, bot):
         self.bridge, self.bot = bridge, bot
         self.sessions: dict[str, StyleSession] = {}
+        self.edit_sessions: dict[str, EditSession] = {}
 
     def _require(self) -> UserbotBridge:
         if self.bridge is None:
@@ -41,7 +54,8 @@ class ExternalUtilities:
         return self.bridge
 
     async def _stage_reply(self, command: Message, *, image: bool = False,
-                           audio: bool = False) -> tuple[int | None, bytes | None, str | None]:
+                           audio: bool = False,
+                           any_media: bool = False) -> tuple[int | None, bytes | None, str | None]:
         bridge = self._require()
         source = command.reply_to_message
         if source is None:
@@ -53,14 +67,24 @@ class ExternalUtilities:
         if audio and not (source.audio or source.voice or source.video_note or
                           source.document and str(source.document.mime_type or "").startswith("audio/")):
             raise ValueError("Reply to an audio or voice message with /asr")
-        media = (source.document or source.audio or source.voice or source.video_note or
+        if any_media and not any(getattr(source, name, None) for name in
+                                 ("document", "audio", "voice", "video", "video_note",
+                                  "animation", "sticker", "photo")):
+            raise ValueError("Reply to a media message with /edit")
+        media = (source.document or source.audio or source.voice or
+                 getattr(source, "video", None) or getattr(source, "animation", None) or
+                 getattr(source, "sticker", None) or source.video_note or
                  (source.photo[-1] if source.photo else None))
+        if media is None:
+            raise ValueError("No supported media was found in the replied message")
         size = int(getattr(media, "file_size", 0) or 0)
-        if size > 50_000_000:
-            raise ValueError("Media exceeds the 50 MB provider limit")
+        if size > (1_900_000_000 if bridge.staging_chat_id < 0 else 20_000_000):
+            raise ValueError("Media exceeds the available relay limit")
         if bridge.staging_chat_id < 0:
+            copy_args = {"caption": ""} if not (getattr(source, "sticker", None) or
+                                                  source.video_note or source.voice) else {}
             copied = await self.bot.copy_message(bridge.staging_chat_id, command.chat.id,
-                                                 source.message_id, caption="")
+                                                 source.message_id, **copy_args)
             return int(copied.message_id), None, None
         if size > 20_000_000:
             raise ValueError("Media above 20 MB needs USERBOT_STAGING_CHAT_ID")
@@ -88,6 +112,18 @@ class ExternalUtilities:
             if not getattr(item, "media", None):
                 continue
             bridge = self._require()
+            if bridge.staging_chat_id >= 0:
+                size = int(getattr(getattr(item, "file", None), "size", 0) or 0)
+                if size > 20_000_000:
+                    raise ValueError("Pronunciation audio exceeds the direct upload limit")
+                data = await bridge.client.download_media(item, file=bytes)
+                if not isinstance(data, bytes) or not 0 < len(data) <= 20_000_000:
+                    raise ValueError("Pronunciation audio is unavailable")
+                await self.bot.send_audio(command.chat.id,
+                    BufferedInputFile(data, "pronunciation.mp3"), caption="",
+                    reply_markup=None,
+                    reply_parameters=ReplyParameters(message_id=command.message_id))
+                continue
             staged = await bridge.external_stage(kind, item)
             try:
                 await self.bot.copy_message(command.chat.id, bridge.staging_chat_id,
@@ -127,6 +163,72 @@ class ExternalUtilities:
         rows.append([InlineKeyboardButton(text="🙏 Thanks", callback_data=f"uh:{token}:close")])
         return InlineKeyboardMarkup(inline_keyboard=rows), actions
 
+    @staticmethod
+    def _edit_buttons(upstream, token: str) -> tuple[InlineKeyboardMarkup,
+                                                     dict[int, tuple[int, int, str]]]:
+        rows: list[list[InlineKeyboardButton]] = []
+        actions: dict[int, tuple[int, int, str]] = {}
+        banned = ("instagram", "اینستاگرام", "ادامه روی همین", "continue on this",
+                  "لینک دانلود", "دریافت لینک", "download link", "copy link")
+        for row_index, row in enumerate((getattr(upstream, "buttons", None) or [])[:16]):
+            rendered = []
+            for column, button in enumerate(row[:4]):
+                label = str(getattr(button, "text", "") or "").strip()[:64]
+                if (not label or any(term in label.casefold() for term in banned)
+                        or getattr(button, "data", None) is None):
+                    continue
+                index = len(actions)
+                actions[index] = row_index, column, label
+                rendered.append(InlineKeyboardButton(text=label,
+                    callback_data=f"ed:{token}:{index}"))
+            if rendered:
+                rows.append(rendered)
+        rows.append([InlineKeyboardButton(text="✖ Close", callback_data=f"ed:{token}:close")])
+        return InlineKeyboardMarkup(inline_keyboard=rows), actions
+
+    async def _edit_result(self, chat: int, user: int, original: int,
+                           results: list, *, replace=None) -> None:
+        bridge = self._require()
+        media = [item for item in results if getattr(item, "media", None) and
+                 getattr(item, "sender_id", None) ==
+                 getattr(bridge.external_peers.get("edit"), "id", None)]
+        if media:
+            if bridge.staging_chat_id >= 0:
+                raise ValueError("Media editing requires the private relay chat")
+            for item in media:
+                staged = await bridge.external_stage("edit", item)
+                try:
+                    await self.bot.copy_message(chat, bridge.staging_chat_id, staged,
+                        caption="", reply_markup=None,
+                        reply_parameters=ReplyParameters(message_id=original))
+                finally:
+                    try:
+                        await bridge.instagram_unstage(staged)
+                    except Exception:
+                        pass
+            if replace is not None:
+                await self.bot.delete_message(chat, replace)
+            return
+        upstream = next((item for item in results if getattr(item, "buttons", None)), None)
+        if upstream is None:
+            raise ValueError("The media editor returned no usable conversion or edit options")
+        token = secrets.token_urlsafe(9)
+        markup, actions = self._edit_buttons(upstream, token)
+        if not actions:
+            raise ValueError("The media editor returned no supported edit options")
+        if replace is None:
+            sent = await self.bot.send_message(chat, "🛠 <b>Choose an edit</b>",
+                                               reply_markup=markup)
+            message_id = sent.message_id
+        else:
+            await self.bot.edit_message_text("🛠 <b>Choose an edit</b>",
+                chat_id=chat, message_id=replace, reply_markup=markup)
+            message_id = replace
+        self.edit_sessions = {key: value for key, value in self.edit_sessions.items()
+                              if value.expires > time.time()}
+        self.edit_sessions[token] = EditSession(user, chat, message_id, original,
+                                               upstream.id, time.time() + 600, actions)
+
     async def _style_result(self, chat: int, user: int, upstream, *, replace=None) -> None:
         token = secrets.token_urlsafe(8)
         markup, actions = self._style_markup(upstream, token)
@@ -148,20 +250,25 @@ class ExternalUtilities:
                                             time.time() + 600, actions)
 
     async def command(self, message: Message, cmd: str, arg: str) -> bool:
-        if cmd not in {"/ocr", "/tr", "/pron", "/asr", "/style"}:
+        if cmd not in {"/ocr", "/tr", "/pron", "/asr", "/style", "/edit"}:
             return False
         try:
             bridge = self._require()
             staged = None
             media_data = None
             media_name = None
-            kind = "ocr" if cmd == "/ocr" else "util"
+            kind = "ocr" if cmd == "/ocr" else "edit" if cmd == "/edit" else "util"
             command = ""
             reply_text = None
             if cmd == "/ocr":
                 if arg:
                     raise ValueError("Use /ocr as a reply to an image")
                 staged, media_data, media_name = await self._stage_reply(message, image=True)
+            elif cmd == "/edit":
+                if arg:
+                    raise ValueError("Use /edit as a reply to media")
+                staged, media_data, media_name = await self._stage_reply(message,
+                                                                          any_media=True)
             elif cmd == "/asr":
                 if arg:
                     raise ValueError("Use /asr as a reply to audio")
@@ -199,7 +306,11 @@ class ExternalUtilities:
                         await self.bot.delete_message(bridge.staging_chat_id, staged)
                     except TelegramAPIError:
                         pass
-            if cmd == "/style":
+            if cmd == "/edit":
+                assert message.from_user is not None
+                await self._edit_result(message.chat.id, message.from_user.id,
+                                        message.message_id, results)
+            elif cmd == "/style":
                 assert message.from_user is not None
                 await self._style_result(message.chat.id, message.from_user.id, results[-1])
             else:
@@ -213,6 +324,36 @@ class ExternalUtilities:
 
     async def callback(self, query) -> bool:
         data = str(query.data or "")
+        if data.startswith("ed:"):
+            parts = data.split(":")
+            session = self.edit_sessions.get(parts[1]) if len(parts) == 3 else None
+            if (session is None or session.expires < time.time() or
+                    session.user != query.from_user.id or
+                    session.chat != query.message.chat.id or
+                    session.message != query.message.message_id):
+                await query.answer("Edit menu expired or belongs to another user")
+                return True
+            if parts[2] == "close":
+                await query.answer()
+                self.edit_sessions.pop(parts[1], None)
+                await query.message.delete()
+                return True
+            if not parts[2].isdigit() or int(parts[2]) not in session.buttons:
+                await query.answer("Edit option unavailable")
+                return True
+            await query.answer()
+            edit_row, column, label = session.buttons[int(parts[2])]
+            try:
+                results = await self._require().external_click(session.upstream,
+                    edit_row, column, label, kind="edit")
+                self.edit_sessions.pop(parts[1], None)
+                await self._edit_result(session.chat, session.user, session.original,
+                                        results, replace=session.message)
+            except (ValueError, TelegramAPIError, OSError) as exc:
+                await self.bot.send_message(session.chat,
+                    "⚠️ " + html.escape(str(exc)[:250] if isinstance(exc, ValueError)
+                                      else "Media editing is unavailable right now"))
+            return True
         if not data.startswith("uh:"):
             return False
         parts = data.split(":")

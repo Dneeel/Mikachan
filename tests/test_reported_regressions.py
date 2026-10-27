@@ -56,7 +56,8 @@ async def test_pornhub_confirmation_starts_relay_without_local_job(tmp_path):
     app = App.__new__(App)
     app.store = store
     app.authorized = lambda *_args: True
-    app.userbot = SimpleNamespace(pornhub_video=AsyncMock(return_value=object()),
+    app.userbot = SimpleNamespace(staging_chat_id=-1000,
+        pornhub_video=AsyncMock(return_value=object()),
         deliver_pornhub=AsyncMock())
     app.bot = SimpleNamespace(send_message=AsyncMock())
     app._ph_tasks = set()
@@ -84,7 +85,8 @@ async def test_pornhub_user_quality_choice_reaches_provider():
         chosen.append(await choose_quality(["1080p · 550 MB", "720p · 312 MB",
                                              "480p · 171 MB", "240p · 75 MB"]))
         return object()
-    app.userbot = SimpleNamespace(pornhub_video=provider, deliver_pornhub=AsyncMock())
+    app.userbot = SimpleNamespace(staging_chat_id=-1000,
+                                  pornhub_video=provider, deliver_pornhub=AsyncMock())
     task = asyncio.create_task(app._deliver_pornhub_relay(
         "https://www.pornhub.com/view_video.php?viewkey=6ac5dd5aca7cb",
         42, 42, "private", 100))
@@ -103,6 +105,38 @@ async def test_pornhub_user_quality_choice_reaches_provider():
     assert chosen == [1]
     assert not app._ph_choices
     app.userbot.deliver_pornhub.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_large_pornhub_video_creates_private_staging_then_copies_without_caption(tmp_path):
+    store = Store(tmp_path / "bot.sqlite")
+    store.db.execute("CREATE TABLE media_relay_staging (singleton INTEGER PRIMARY KEY,"
+                     "chat_id INTEGER NOT NULL)")
+    app = App.__new__(App)
+    app.store = store
+    app.bot_username = "MikachanBot"
+    app.bot = SimpleNamespace(id=123, get_chat_member=AsyncMock())
+    app.worker = SimpleNamespace(userbot=None)
+    app.userbot = SimpleNamespace(staging_chat_id=0,
+        create_private_staging=AsyncMock(return_value=-100123))
+    await app._ensure_media_staging()
+    assert app.userbot.staging_chat_id == -100123
+    assert store.db.execute("SELECT chat_id FROM media_relay_staging").fetchone()[0] == -100123
+    app.userbot.staging_chat_id = 0
+    await app._ensure_media_staging()
+    app.userbot.create_private_staging.assert_awaited_once()
+
+    from mikachan.userbot import UserbotBridge
+    bridge = UserbotBridge.__new__(UserbotBridge)
+    bridge.staging_chat_id = -100123
+    bridge.client = SimpleNamespace(forward_messages=AsyncMock(
+        return_value=SimpleNamespace(id=44)), delete_messages=AsyncMock())
+    bot = SimpleNamespace(copy_message=AsyncMock())
+    video = SimpleNamespace(file=SimpleNamespace(size=82_000_000))
+    await bridge.deliver_pornhub(bot, video, 42, 100)
+    kwargs = bot.copy_message.await_args.kwargs
+    assert kwargs["caption"] == "" and kwargs["reply_markup"] is None
+    assert bot.copy_message.await_args.args[:3] == (42, -100123, 44)
 
 
 @pytest.mark.asyncio

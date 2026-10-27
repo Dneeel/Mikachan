@@ -59,6 +59,15 @@ Commands, eligible links, exact triggers, valid interaction replies, and authori
 
 `/book TITLE` or `/book` then a title searches active owner-managed Telegram Local Sources for PDF and EPUB files up to 48 MB. `/music` and `/pod` also search sources marked for those categories and show separate local audio results (MP3, M4A, OGG, FLAC). `/lyric ARTIST - TITLE` resolves a catalog recording and checks attributed public lyric providers; noisy queries work only when the artist and title can be confirmed. In private `/settings`, the Owner can add a joined channel/group by negative numeric ID, edit its display name and categories, suspend/resume it, or delete it. The user account must already have joined the source. Search results are bound to the requesting user and expire after 15 minutes; fetched files are validated and deleted from temporary storage after delivery.
 
+Reply to a media message with `/edit` to use the optional @AbzarMediaBot bridge.
+The bot mirrors conversion choices without provider ads, then copies completed
+media without captions or buttons. Large userbot media uses a private staging
+supergroup created on demand when no staging chat was configured. `/pron` and
+`/tr` resolve @UtilHubBot directly through Telegram to avoid stale username
+cache entries. BotFather lists `/tts` and `/stt` even while their optional
+provider setup is incomplete, so users can discover the commands and receive
+the current setup status.
+
 ## Development and verification
 
 ```bash

@@ -188,3 +188,37 @@ async def test_pornhub_quality_menu_clicks_selected_provider_button():
     assert await bridge.pornhub_video(
         "https://www.pornhub.com/view_video.php?viewkey=6ac5dd5aca7cb", choose) is video
     menu.click.assert_awaited_once_with(1, 0)
+
+
+@pytest.mark.asyncio
+async def test_private_staging_verifies_bot_can_copy_before_using_it(monkeypatch):
+    import telethon.utils
+    from telethon.tl.functions.channels import (CreateChannelRequest,
+                                                EditAdminRequest, InviteToChannelRequest)
+
+    monkeypatch.setattr(telethon.utils, "get_peer_id", lambda _channel: -10088)
+    calls = []
+
+    class Client:
+        get_entity = AsyncMock(return_value=SimpleNamespace(id=123, bot=True))
+        send_message = AsyncMock(return_value=SimpleNamespace(id=5))
+        delete_messages = AsyncMock()
+
+        async def __call__(self, request):
+            calls.append(type(request))
+            if isinstance(request, CreateChannelRequest):
+                return SimpleNamespace(chats=[SimpleNamespace(id=88)])
+            return None
+
+    bridge = UserbotBridge.__new__(UserbotBridge)
+    bridge.staging_chat_id = 0
+    bridge._ready = AsyncMock()
+    bridge.client = Client()
+    bot = SimpleNamespace(get_chat_member=AsyncMock(), copy_message=AsyncMock(
+        return_value=SimpleNamespace(message_id=6)))
+    assert await bridge.create_private_staging(123, "MikachanBot", bot) == -10088
+    assert bridge.staging_chat_id == -10088
+    assert calls == [CreateChannelRequest, InviteToChannelRequest, EditAdminRequest]
+    bot.copy_message.assert_awaited_once_with(-10088, -10088, 5)
+    bridge.client.delete_messages.assert_awaited_once_with(
+        SimpleNamespace(id=88), [5, 6])

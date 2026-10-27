@@ -25,6 +25,7 @@ SECTIONS: dict[str, tuple[str, tuple[tuple[str, str], ...]]] = {
         ("ocr", "Extract text from a replied image"),
         ("st", "Turn a replied image into a sticker"),
         ("xst", "Turn a replied sticker into PNG"),
+        ("edit", "Edit or convert replied media"),
         ("url", "Create a link from a replied file"),
         ("tr", "Translate text into another language"),
         ("pron", "Hear English word pronunciation"),
@@ -90,7 +91,7 @@ def commands(*, relay_enabled: bool, tts_enabled: bool, stt_enabled: bool) -> li
     """Put daily actions first in BotFather, using the same directory labels."""
     order = ("start", "help", "music", "pod", "lyric", "book", "explore", "in",
              "tt", "yt", "tw", "follow", "following", "mika", "tts", "stt",
-             "weather", "now", "qr", "scan", "ocr", "st", "xst", "url",
+             "weather", "now", "qr", "scan", "ocr", "st", "xst", "edit", "url",
              "tr", "pron", "asr", "style", "proxy", "vpn",
              "pishi", "earth", "art", "xotd", "poem", "fal", "dice",
              "quote", "wiki", "nasa",
@@ -99,11 +100,9 @@ def commands(*, relay_enabled: bool, tts_enabled: bool, stt_enabled: bool) -> li
               for name, description in entries}
     enabled = set(lookup)
     if not relay_enabled:
-        enabled.difference_update({"mika", "tts", "stt"})
-    if not tts_enabled:
-        enabled.discard("tts")
-    if not stt_enabled:
-        enabled.discard("stt")
+        enabled.discard("mika")
+    # Keep speech commands discoverable in BotFather. Their handlers explain
+    # setup state and may use either the relay or a configured local job path.
     return [BotCommand(command=name, description=lookup[name]) for name in order if name in enabled]
 
 

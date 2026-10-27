@@ -19,6 +19,8 @@ from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import (
+    BotCommandScopeAllGroupChats,
+    BotCommandScopeAllPrivateChats,
     BufferedInputFile,
     CallbackQuery,
     InlineKeyboardButton,
@@ -248,12 +250,16 @@ class App:
                               "token TEXT PRIMARY KEY,user_id INTEGER NOT NULL,"
                               "chat_id INTEGER NOT NULL,message_id INTEGER,"
                               "url TEXT NOT NULL,expires REAL NOT NULL)")
+        self.store.db.execute("CREATE TABLE IF NOT EXISTS media_relay_staging ("
+                              "singleton INTEGER PRIMARY KEY CHECK(singleton=1),"
+                              "chat_id INTEGER NOT NULL)")
         self._url_choices: dict[str, tuple[int, int, int, Message, float]] = {}
         self.follow = FollowService(self.store, self.bot, settings.private_chats_only)
         self._check_all_tasks: dict[int, asyncio.Task[None]] = {}
         self._quality_tasks: set[asyncio.Task[None]] = set()
         self._ph_tasks: set[asyncio.Task[None]] = set()
         self._ph_choices: dict[str, tuple[int, int, int, asyncio.Future[int], float]] = {}
+        self._staging_lock = asyncio.Lock()
         self._guide_sessions: dict[tuple[int, int], tuple[int, float]] = {}
         community_store = CommunityStore(self.store.db)
         community_store.seed_hafez(Path(__file__).parent / "content/hafez.json")
@@ -495,7 +501,7 @@ class App:
                 "dice", "nickname", "rules", "setrules",
                 "notes", "setnote", "delrules", "welcome", "del",
                 "mute", "modlog", "groupstats", "groupstatus", "groupsettings", "qr", "scan", "ocr",
-                "st", "xst", "weather", "now", "nasa", "tr", "pron", "asr", "style", "mika",
+                "st", "xst", "edit", "weather", "now", "nasa", "tr", "pron", "asr", "style", "mika",
                 "tts", "stt",
                 "url", "link", "vpn", "proxy"}
             if explicit_text or text.startswith("/") and builtin:
@@ -620,7 +626,7 @@ class App:
                            "/tt", "/yt"}
         utility_commands = {"/qr", "/scan", "/ocr", "/tr", "/pron", "/asr", "/style", "/mika",
                             "/tts", "/stt",
-                            "/st", "/xst", "/weather", "/now",
+                            "/st", "/xst", "/edit", "/weather", "/now",
                             "/nasa", "/url", "/proxy", "/vpn", "/image", "/sticker", "/stickerimage",
                             "/gif", "/pack", "/convert"}
         if (cmd in CONTENT_COMMANDS and not self.module_enabled("content", m.chat.id) or
@@ -662,6 +668,12 @@ class App:
             return
         if hasattr(self, "audio_ui") and await self.audio_ui.command(m, cmd, arg):
             return
+        if cmd == "/edit" and self.userbot and self.userbot.staging_chat_id >= 0:
+            try:
+                await self._ensure_media_staging()
+            except Exception:
+                await m.reply("⚠️ Private media relay could not be prepared. Try again later.")
+                return
         if hasattr(self, "external_utilities") and await self.external_utilities.command(m, cmd, arg):
             return
         if cmd == "/vpn":
@@ -1351,6 +1363,34 @@ class App:
             if "message is not modified" not in str(exc).lower():
                 raise
 
+    async def _ensure_media_staging(self) -> None:
+        lock = getattr(self, "_staging_lock", None)
+        if lock is None:
+            lock = self._staging_lock = asyncio.Lock()
+        async with lock:
+            await self._prepare_media_staging()
+
+    async def _prepare_media_staging(self) -> None:
+        bridge = self.userbot
+        if bridge is None or bridge.staging_chat_id < 0:
+            return
+        row = self.store.db.execute(
+            "SELECT chat_id FROM media_relay_staging WHERE singleton=1").fetchone()
+        if row:
+            try:
+                await self.bot.get_chat_member(int(row[0]), self.bot.id)
+                bridge.staging_chat_id = int(row[0])
+                self.worker.userbot = bridge
+                return
+            except TelegramBadRequest:
+                self.store.db.execute("DELETE FROM media_relay_staging WHERE singleton=1")
+        relay_chat = await bridge.create_private_staging(self.bot.id,
+            getattr(self, "bot_username", ""), self.bot)
+        bridge.staging_chat_id = relay_chat
+        self.store.db.execute("INSERT OR REPLACE INTO media_relay_staging VALUES (1,?)",
+                              (relay_chat,))
+        self.worker.userbot = bridge
+
     async def _deliver_pornhub_relay(self, url: str, user: int, chat: int,
                                      chat_type: str, original_message: int) -> None:
         bridge = self.userbot
@@ -1380,10 +1420,13 @@ class App:
             finally:
                 self._ph_choices.pop(token, None)
 
+        video = None
         try:
             video = await bridge.pornhub_video(url, choose_quality)
             if not self.authorized(user, chat, chat_type):
                 return
+            if bridge.staging_chat_id >= 0:
+                await self._ensure_media_staging()
             await bridge.deliver_pornhub(self.bot, video, chat, original_message)
         except asyncio.CancelledError:
             raise
@@ -1392,12 +1435,16 @@ class App:
                 return
             if self.authorized(user, chat, chat_type):
                 await self.bot.send_message(chat,
-                    "⚠️ The video provider did not deliver a usable video. Try again later.",
+                    ("⚠️ The video arrived, but Telegram delivery failed. "
+                     "Check the private media relay." if video is not None else
+                     "⚠️ The video provider did not deliver a usable video. Try again later."),
                     reply_parameters=ReplyParameters(message_id=original_message))
         except Exception:
             if self.authorized(user, chat, chat_type):
                 await self.bot.send_message(chat,
-                    "⚠️ The video provider did not deliver a usable video. Try again later.",
+                    ("⚠️ The video arrived, but Telegram delivery failed. "
+                     "Check the private media relay." if video is not None else
+                     "⚠️ The video provider did not deliver a usable video. Try again later."),
                     reply_parameters=ReplyParameters(message_id=original_message))
 
     async def callback(self, q: CallbackQuery) -> None:
@@ -2450,10 +2497,15 @@ class App:
         identity = await self.bot.get_me()
         self.bot_username = identity.username or ""
         await self.audio_ui.recover()
-        await self.bot.set_my_commands(guide_commands(
+        listed_commands = guide_commands(
             relay_enabled=self.settings.mika_n8n_telegram_relay,
             tts_enabled=self.settings.mika_tts_enabled,
-            stt_enabled=self.settings.mika_stt_enabled))
+            stt_enabled=self.settings.mika_stt_enabled)
+        await self.bot.set_my_commands(listed_commands)
+        await self.bot.set_my_commands(listed_commands,
+                                       scope=BotCommandScopeAllPrivateChats())
+        await self.bot.set_my_commands(listed_commands,
+                                       scope=BotCommandScopeAllGroupChats())
         task = asyncio.create_task(self.worker.loop())
         follow_task = asyncio.create_task(self.follow.loop())
         self.mikasub_core.background = asyncio.create_task(self.mikasub_core.periodic())

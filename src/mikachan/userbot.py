@@ -169,7 +169,8 @@ class UserbotBridge:
         self.instagram_peer = None
         self.instagram_last_sent = 0.0
         self.instagram_last_click = 0.0
-        self.external_locks = {"ocr": asyncio.Lock(), "util": asyncio.Lock()}
+        self.external_locks = {"ocr": asyncio.Lock(), "util": asyncio.Lock(),
+                               "edit": asyncio.Lock()}
         self.external_peers: dict[str, object] = {}
 
     async def _ready(self) -> None:
@@ -249,7 +250,6 @@ class UserbotBridge:
 
     async def deliver_pornhub(self, bot: Bot, answer, chat: int,
                               original_message: int) -> None:
-        caption = "کم بگون همیشه بگون"
         reply = ReplyParameters(message_id=original_message)
         size = int(getattr(getattr(answer, "file", None), "size", 0) or 0)
         if size > 1_900_000_000:
@@ -258,7 +258,7 @@ class UserbotBridge:
             staged = await self.client.forward_messages(self.staging_chat_id, answer)
             try:
                 await bot.copy_message(chat, self.staging_chat_id, staged.id,
-                    caption=caption, reply_parameters=reply)
+                    caption="", reply_markup=None, reply_parameters=reply)
             finally:
                 try:
                     await self.client.delete_messages(self.staging_chat_id, staged.id)
@@ -271,8 +271,57 @@ class UserbotBridge:
             if not isinstance(content, bytes) or not 0 < len(content) <= 48_000_000:
                 raise ValueError("Provider video is unavailable or exceeds the upload limit")
             await bot.send_video(chat, BufferedInputFile(content, "video.mp4"),
-                                 caption=caption, reply_parameters=reply,
+                                 caption="", reply_parameters=reply,
                                  supports_streaming=True)
+
+    async def create_private_staging(self, bot_id: int, bot_username: str,
+                                     bot: Bot) -> int:
+        """Create a private temporary relay group shared only by this user account and bot."""
+        if self.staging_chat_id < 0:
+            return self.staging_chat_id
+        if not bot_username or not 0 < bot_id:
+            raise ValueError("Bot identity is unavailable for relay staging")
+        from telethon.tl.functions.channels import (  # type: ignore[import-untyped]
+            CreateChannelRequest, EditAdminRequest, InviteToChannelRequest)
+        from telethon.tl.types import ChatAdminRights  # type: ignore[import-untyped]
+        from telethon.utils import get_peer_id  # type: ignore[import-untyped]
+
+        await self._ready()
+        bot_peer = await self.client.get_entity(bot_username)
+        if not getattr(bot_peer, "bot", False) or int(bot_peer.id) != bot_id:
+            raise ValueError("Relay staging bot identity could not be verified")
+        created = await self.client(CreateChannelRequest(
+            title="Mikachan Private Media Relay", about="Private transient media relay",
+            megagroup=True))
+        channel = next((item for item in created.chats if getattr(item, "id", None)), None)
+        if channel is None:
+            raise ValueError("Private relay group could not be created")
+        try:
+            await self.client(InviteToChannelRequest(channel=channel, users=[bot_peer]))
+            # Privacy-mode bots cannot reliably copy media they never received.
+            # Minimal admin status lets this bot see transient staging messages.
+            await self.client(EditAdminRequest(channel=channel, user_id=bot_peer,
+                admin_rights=ChatAdminRights(other=True), rank="Relay"))
+            chat_id = int(get_peer_id(channel))
+            await bot.get_chat_member(chat_id, bot_id)
+            probe = await self.client.send_message(channel, "Mikachan relay readiness")
+            copied = None
+            try:
+                copied = await bot.copy_message(chat_id, chat_id, probe.id)
+            finally:
+                ids = [probe.id]
+                if copied is not None:
+                    ids.append(copied.message_id)
+                await self.client.delete_messages(channel, ids)
+        except Exception:
+            from telethon.tl.functions.channels import DeleteChannelRequest  # type: ignore[import-untyped]
+            try:
+                await self.client(DeleteChannelRequest(channel))
+            except Exception:
+                pass
+            raise
+        self.staging_chat_id = chat_id
+        return chat_id
 
     async def _proxy_peer(self):
         if self.proxy_peer is None:
@@ -508,12 +557,25 @@ class UserbotBridge:
                 await self.client.delete_messages(self.staging_chat_id, message_id)
 
     async def _external_peer(self, kind: str):
-        names = {"ocr": "OCRnerdBOT", "util": "UtilHubBot"}
+        names = {"ocr": "OCRnerdBOT", "util": "UtilHubBot", "edit": "AbzarMediaBot"}
         if kind not in names:
             raise ValueError("Unknown external utility")
         if kind not in self.external_peers:
-            peer = await self.client.get_entity(names[kind])
+            # Resolve the current username at Telegram rather than trusting a
+            # stale user-session entity cache. The resolved peer ID is the
+            # authority for the requested username even if User.username is
+            # absent in the returned profile object.
+            resolved_now = False
+            try:
+                from telethon.tl.functions.contacts import ResolveUsernameRequest  # type: ignore[import-untyped]
+                resolution = await self.client(ResolveUsernameRequest(names[kind]))
+                resolved_id = int(getattr(getattr(resolution, "peer", None), "user_id", 0))
+                peer = next(user for user in resolution.users if int(user.id) == resolved_id)
+                resolved_now = True
+            except (TypeError, AttributeError, StopIteration, OSError):
+                peer = await self.client.get_entity(names[kind])
             if (not getattr(peer, "bot", False) or
+                    not resolved_now and
                     str(getattr(peer, "username", "")).casefold() != names[kind].casefold() or
                     kind == "ocr" and int(getattr(peer, "id", 0)) != 8931851074):
                 raise ValueError("External utility identity could not be verified")
@@ -616,29 +678,31 @@ class UserbotBridge:
             raise ValueError("External utility is unavailable; try again later") from exc
 
     async def external_click(self, message_id: int, row: int, column: int,
-                             label: str) -> list:
+                             label: str, *, kind: str = "util") -> list:
+        subject = "Edit" if kind == "edit" else "Style"
         try:
-            async with asyncio.timeout(45):
-                async with self.external_locks["util"]:
+            async with asyncio.timeout(195 if kind == "edit" else 45):
+                async with self.external_locks[kind]:
                     await self._ready()
-                    peer = await self._external_peer("util")
+                    peer = await self._external_peer(kind)
                     original = await self.client.get_messages(peer, ids=message_id)
                     if (not original or original.sender_id != peer.id or
                             not getattr(original, "buttons", None) or
                             not 0 <= row < len(original.buttons) or
                             not 0 <= column < len(original.buttons[row])):
-                        raise ValueError("Style menu expired; send /style again")
+                        raise ValueError(f"{subject} menu expired; send the command again")
                     button = original.buttons[row][column]
                     if getattr(button, "data", None) is None or str(button.text) != label:
-                        raise ValueError("Style menu changed; send /style again")
+                        raise ValueError(f"{subject} menu changed; send the command again")
                     latest = await self.client.get_messages(peer, limit=1)
                     after = max(original.id, latest[0].id if latest else original.id)
                     await original.click(row, column)
-                    return await self._external_wait(peer, after, timeout=35, edited=original)
+                    return await self._external_wait(peer, after,
+                        timeout=180 if kind == "edit" else 35, edited=original)
         except ValueError:
             raise
         except Exception as exc:
-            raise ValueError("Style provider is unavailable; try again later") from exc
+            raise ValueError(f"{subject} provider is unavailable; try again later") from exc
 
     async def external_stage(self, kind: str, message) -> int:
         if self.staging_chat_id >= 0:
