@@ -156,6 +156,7 @@ class UserbotBridge:
 
         self.client = TelegramClient(StringSession(session), api_id, api_hash)
         self.staging_chat_id = staging_chat_id
+        self.staging_entity = None
         self.lock = asyncio.Lock()
         self.instagram_lock = asyncio.Lock()
         self.instagram_transfer_lock = asyncio.Lock()
@@ -180,6 +181,31 @@ class UserbotBridge:
             await self.client.connect()
         if not await self.client.is_user_authorized():
             raise ValueError("Userbot session is no longer authorized")
+
+    async def resolve_staging_chat(self, chat_id: int):
+        """Recover an InputPeer with access hash; StringSession stores no entity cache."""
+        if chat_id >= 0:
+            raise ValueError("Private transfer chat is not configured")
+        cached = getattr(self, "staging_entity", None)
+        if cached is not None and self.staging_chat_id == chat_id:
+            return cached
+        await self._ready()
+        from telethon.utils import get_peer_id  # type: ignore[import-untyped]
+        for dialog in await self.client.get_dialogs(limit=None):
+            entity = getattr(dialog, "entity", None)
+            if entity is not None and int(get_peer_id(entity)) == chat_id:
+                self.staging_chat_id = chat_id
+                self.staging_entity = entity
+                return entity
+        raise ValueError("Private transfer chat is inaccessible to the user account")
+
+    async def _staging(self):
+        if self.staging_chat_id >= 0:
+            raise ValueError("Private transfer chat is not configured")
+        entity = getattr(self, "staging_entity", None)
+        if entity is None:
+            entity = await self.resolve_staging_chat(self.staging_chat_id)
+        return entity
 
     async def _peer(self):
         if self.file_peer is None:
@@ -255,13 +281,13 @@ class UserbotBridge:
         if size > 1_900_000_000:
             raise ValueError("Provider video exceeds Telegram's supported upload size")
         if self.staging_chat_id < 0:
-            staged = await self.client.forward_messages(self.staging_chat_id, answer)
+            staged = await self.client.forward_messages(await self._staging(), answer)
             try:
                 await bot.copy_message(chat, self.staging_chat_id, staged.id,
                     caption="", reply_markup=None, reply_parameters=reply)
             finally:
                 try:
-                    await self.client.delete_messages(self.staging_chat_id, staged.id)
+                    await self.client.delete_messages(await self._staging(), staged.id)
                 except Exception:
                     pass  # A successful delivery must not become a false failure.
         else:
@@ -321,6 +347,7 @@ class UserbotBridge:
                 pass
             raise
         self.staging_chat_id = chat_id
+        self.staging_entity = channel
         return chat_id
 
     async def _proxy_peer(self):
@@ -544,7 +571,7 @@ class UserbotBridge:
                 current = await self.client.get_messages(peer, ids=message)
             if not current or getattr(current, "sender_id", None) != peer.id or not current.media:
                 raise ValueError("Instagram media is no longer available")
-            staged = await self.client.forward_messages(self.staging_chat_id, current)
+            staged = await self.client.forward_messages(await self._staging(), current)
             if isinstance(staged, list):
                 if len(staged) != 1:
                     raise ValueError("Instagram staging returned an unexpected batch")
@@ -554,7 +581,7 @@ class UserbotBridge:
     async def instagram_unstage(self, message_id: int) -> None:
         if self.staging_chat_id < 0:
             async with self.instagram_transfer_lock:
-                await self.client.delete_messages(self.staging_chat_id, message_id)
+                await self.client.delete_messages(await self._staging(), message_id)
 
     async def _external_peer(self, kind: str):
         names = {"ocr": "OCRnerdBOT", "util": "UtilHubBot", "edit": "AbzarMediaBot"}
@@ -653,7 +680,7 @@ class UserbotBridge:
                     if staged_id is not None:
                         source = None
                         for _ in range(6):
-                            source = await self.client.get_messages(self.staging_chat_id, ids=staged_id)
+                            source = await self.client.get_messages(await self._staging(), ids=staged_id)
                             if source:
                                 break
                             await asyncio.sleep(0.3)
@@ -722,7 +749,7 @@ class UserbotBridge:
         peer = await self._external_peer(kind)
         if getattr(message, "sender_id", None) != peer.id or not getattr(message, "media", None):
             raise ValueError("External media sender could not be verified")
-        staged = await self.client.forward_messages(self.staging_chat_id, message,
+        staged = await self.client.forward_messages(await self._staging(), message,
             drop_author=True, drop_media_captions=True)
         if isinstance(staged, list):
             if len(staged) != 1:
@@ -810,7 +837,7 @@ class UserbotBridge:
                                                         source_message)
                         source = None
                         for _ in range(5):
-                            source = await self.client.get_messages(self.staging_chat_id,
+                            source = await self.client.get_messages(await self._staging(),
                                                                     ids=staged.message_id)
                             if source:
                                 break
@@ -891,7 +918,7 @@ class UserbotBridge:
             raise ValueError("File exceeds the configured MTProto upload limit")
         async with self.lock:
             await self._ready()
-            staged = await self.client.send_file(self.staging_chat_id, str(path),
+            staged = await self.client.send_file(await self._staging(), str(path),
                                                  supports_streaming=video,
                                                  force_document=not video)
             try:
@@ -899,7 +926,7 @@ class UserbotBridge:
                                               caption=caption, reply_markup=buttons)
             finally:
                 try:
-                    await self.client.delete_messages(self.staging_chat_id, staged.id)
+                    await self.client.delete_messages(await self._staging(), staged.id)
                 except Exception:
                     pass
 

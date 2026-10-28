@@ -118,7 +118,8 @@ async def test_large_pornhub_video_creates_private_staging_then_copies_without_c
     app.bot = SimpleNamespace(id=123, get_chat_member=AsyncMock())
     app.worker = SimpleNamespace(userbot=None)
     app.userbot = SimpleNamespace(staging_chat_id=0,
-        create_private_staging=AsyncMock(return_value=-100123))
+        create_private_staging=AsyncMock(return_value=-100123),
+        resolve_staging_chat=AsyncMock(return_value=SimpleNamespace(id=123)))
     await app._ensure_media_staging()
     assert app.userbot.staging_chat_id == -100123
     assert store.db.execute("SELECT chat_id FROM media_relay_staging").fetchone()[0] == -100123
@@ -126,9 +127,17 @@ async def test_large_pornhub_video_creates_private_staging_then_copies_without_c
     await app._ensure_media_staging()
     app.userbot.create_private_staging.assert_awaited_once()
 
+    store.db.execute("DELETE FROM media_relay_staging")
+    app.userbot.staging_chat_id = -100999
+    app.userbot.resolve_staging_chat.side_effect = ValueError("missing dialog")
+    app.userbot.create_private_staging.reset_mock()
+    await app._ensure_media_staging()
+    app.userbot.create_private_staging.assert_awaited_once()
+
     from mikachan.userbot import UserbotBridge
     bridge = UserbotBridge.__new__(UserbotBridge)
     bridge.staging_chat_id = -100123
+    bridge.staging_entity = SimpleNamespace(id=123)
     bridge.client = SimpleNamespace(forward_messages=AsyncMock(
         return_value=SimpleNamespace(id=44)), delete_messages=AsyncMock())
     bot = SimpleNamespace(copy_message=AsyncMock())

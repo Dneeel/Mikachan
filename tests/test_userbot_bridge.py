@@ -163,6 +163,23 @@ async def test_pornhub_relay_accepts_only_video_from_verified_provider():
 
 
 @pytest.mark.asyncio
+async def test_staging_recovers_access_hash_from_dialogs_after_string_session_restart():
+    from telethon.tl.types import InputPeerChannel
+    from telethon.utils import get_peer_id
+
+    entity = InputPeerChannel(channel_id=4375926077, access_hash=123456789)
+    bridge = UserbotBridge.__new__(UserbotBridge)
+    bridge.staging_chat_id = int(get_peer_id(entity))
+    bridge.staging_entity = None
+    bridge._ready = AsyncMock()
+    bridge.client = SimpleNamespace(get_dialogs=AsyncMock(return_value=[
+        SimpleNamespace(entity=entity)]))
+    assert await bridge._staging() is entity
+    assert await bridge._staging() is entity
+    bridge.client.get_dialogs.assert_awaited_once_with(limit=None)
+
+
+@pytest.mark.asyncio
 async def test_pornhub_quality_menu_clicks_selected_provider_button():
     peer = SimpleNamespace(id=77, bot=True, username="PHDownlBot")
     menu = SimpleNamespace(id=102, sender_id=77, video=None, document=None,

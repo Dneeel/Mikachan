@@ -17,7 +17,7 @@ from aiogram import Bot, Dispatcher, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import (
     BotCommandScopeAllGroupChats,
     BotCommandScopeAllPrivateChats,
@@ -1371,18 +1371,30 @@ class App:
 
     async def _prepare_media_staging(self) -> None:
         bridge = self.userbot
-        if bridge is None or bridge.staging_chat_id < 0:
+        if bridge is None:
             return
         row = self.store.db.execute(
             "SELECT chat_id FROM media_relay_staging WHERE singleton=1").fetchone()
         if row:
             try:
                 await self.bot.get_chat_member(int(row[0]), self.bot.id)
+                await bridge.resolve_staging_chat(int(row[0]))
                 bridge.staging_chat_id = int(row[0])
                 self.worker.userbot = bridge
                 return
-            except TelegramBadRequest:
+            except (TelegramAPIError, ValueError):
                 self.store.db.execute("DELETE FROM media_relay_staging WHERE singleton=1")
+                bridge.staging_chat_id = 0
+                bridge.staging_entity = None
+        if bridge.staging_chat_id < 0:
+            try:
+                await bridge.resolve_staging_chat(bridge.staging_chat_id)
+                await self.bot.get_chat_member(bridge.staging_chat_id, self.bot.id)
+                self.worker.userbot = bridge
+                return
+            except (TelegramAPIError, ValueError):
+                bridge.staging_chat_id = 0
+                bridge.staging_entity = None
         relay_chat = await bridge.create_private_staging(self.bot.id,
             getattr(self, "bot_username", ""), self.bot)
         bridge.staging_chat_id = relay_chat
